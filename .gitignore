@@ -1,0 +1,15 @@
+# Build output and local caches
+/build/
+/outputs/
+/.mygo/
+/.tmp/
+
+# Compiled test binaries
+*.test
+*.dSYM/
+
+# macOS metadata
+.DS_Store
+
+# Platform objects
+mygo_windows_*.syso

@@ -1,0 +1,712 @@
+package chrome
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/egoist/mygo/ui"
+)
+
+type ManagementState struct {
+	Open, Busy                                                                                                                           bool
+	Page, Provider, Name, Transport, Command, Arguments, URL, Directory, Period, SessionID, Model, Ultra, LogPath, Channel, Effort, Fast string
+	ContextLimits, AddDirs, ProviderOverride                                                                                             string
+	// MCP form extras. Headers apply to HTTP servers, Environment to stdio;
+	// MCPProject writes ./.mcp.json instead of the profile file.
+	Headers     string
+	Environment string
+	MCPProject  bool
+	// ProviderDefault is the fx-wide default used for new sessions. It is
+	// separate from Provider, which only picks the account to sign in or out.
+	ProviderDefault  string
+	NoAdditionalDirs bool
+	Output           string
+	Generation       uint64
+	Details          []DetailSection
+	Doctor           []DoctorCheck
+	Credits          string
+	Slack            SlackStatus
+	SlackProblem     string
+	GitHub           GitHubState
+	Models           []ModelInfo
+	ModelQuery       string
+	ModelsProblem    string
+	// MCP reads are structured from fx's --json output, never guessed.
+	MCPServers     []MCPServerInfo
+	MCPDetail      *MCPServerDetail
+	MCPProblem     string
+	SessionView    *SessionDetail
+	SessionProblem string
+	// Allowlist edits fx's persistent local/user allow rules. The UI keeps
+	// the selected scope, rule kind and tool, plus the raw rows loaded from
+	// ~/.fx/settings.json.
+	AllowScope   string
+	AllowKind    string
+	AllowTool    string
+	AllowPattern string
+	AllowRules   []AllowlistRule
+	AllowProblem string
+	Skills       []SkillInfo
+	SkillQuery   string
+	SkillProblem string
+	Project      string
+}
+
+// SkillInfo is one skill found in fx's workspace or global discovery roots.
+type SkillInfo struct{ Name, Description, Source, Path string }
+
+// AllowlistRule is one raw persistent rule from ~/.fx/settings.json.
+type AllowlistRule struct{ Scope, Kind, Key, Label, Pattern, Decision string }
+
+// ModelInfo is one row of the native `fx models` list.
+type ModelInfo struct{ ID, Source string }
+
+// MCPServerInfo is one row of `fx mcp list --json`.
+type MCPServerInfo struct{ Name, Source, File, Transport, Status, Error string }
+
+// MCPToolInfo is one tool reported by `fx mcp show NAME --json`.
+type MCPToolInfo struct{ Name, Description string }
+
+// MCPServerDetail is the native view of `fx mcp show NAME --json`.
+type MCPServerDetail struct {
+	MCPServerInfo
+	Version string
+	URL     string
+	Command string
+	Tools   []MCPToolInfo
+}
+
+// SessionDetail is the native view of `fx session --json`.
+type SessionDetail struct {
+	ID         string
+	Created    string
+	Updated    string
+	Language   string
+	HistoryLen int
+	Turns      []SessionTurn
+}
+
+// SessionTurn is one saved turn in a session detail.
+type SessionTurn struct {
+	Kind      string
+	User      string
+	Images    int
+	Assistant string
+	Tools     []string
+}
+
+// DetailFact is one label/value row in the native Details page.
+type DetailFact struct{ Label, Value string }
+
+// DetailSection groups facts for one fx inspection.
+type DetailSection struct {
+	Title string
+	Facts []DetailFact
+	Text  string
+}
+
+// DoctorCheck is one `fx doctor` result.
+type DoctorCheck struct{ Name, Status, Detail string }
+
+// SlackStatus is the native rendering of `fx slack status --json`.
+type SlackStatus struct {
+	Installed      bool
+	AppID          string
+	TeamID         string
+	BotUserID      string
+	Expires        string
+	RefreshExpires string
+}
+
+// GitHubState is the native draft/publish form for `fx pr` and `fx issue`.
+type GitHubState struct {
+	Kind       string
+	Context    string
+	Auto       bool
+	Create     bool
+	Output     string
+	Problem    string
+	Busy       bool
+	Generation uint64
+}
+
+type ManagementHost struct {
+	Run           func(action string)
+	PickDirectory func()
+	Resume        func(id, workspace string)
+	// Allowlist applies one add/remove/reset to fx's settings. key is the
+	// tool category or the raw rule key; pattern is the command/url/domain.
+	Allowlist func(action, scope, kind, key, pattern string)
+	OpenPath  func(path string)
+}
+
+func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p Palette) {
+	_, height := c.Size()
+	if state.Page == "" {
+		state.Page = "Account"
+	}
+	sheet(c, &state.Open, p, "Workspace tools", func() {
+		ui.Column(c).FillWidth().Children(func() {
+			ui.Row(c).FillWidth().Padding(10, 14).AlignItems(ui.Center).Children(func() {
+				sheetTitle(c, "Workspace tools", p.InkStrong)
+				ui.Box(c).Grow(1)
+				ui.Button(c, "Close").FontSize(11).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).OnClick(func() { state.Open = false })
+			})
+			ui.Row(c).FillWidth().Padding(0, 10, 8, 10).Gap(2).Children(func() {
+				for _, page := range []string{"Account", "MCP", "Folders", "Details", "Sessions", "Launch", "Models", "Rules", "Skills", "Slack", "GitHub"} {
+					page := page
+					button := ui.Button(c, page).Label("Tools: "+page).Font(MonoFont).FontSize(10).Padding(4, 7).BorderWidth(0).Radius(3).Disabled(state.Busy).OnClick(func() {
+						state.Page = page
+						state.Output = ""
+						if page == "Models" && len(state.Models) == 0 && h.Run != nil {
+							h.Run("models")
+						}
+						if page == "Rules" && len(state.AllowRules) == 0 && h.Run != nil {
+							h.Run("allowlist-load")
+						}
+						if page == "Skills" && len(state.Skills) == 0 && h.Run != nil {
+							h.Run("skills-load")
+						}
+					})
+					if state.Page == page {
+						button.Background(p.Sunken).TextColor(p.Accent)
+					} else {
+						button.Background(p.Window).TextColor(p.InkMuted)
+					}
+				}
+			})
+			ui.Scroll(c).FillWidth().MaxHeight(min(float32(450), max(float32(120), height-150))).Children(func() {
+				ui.Column(c).FillWidth().Padding(8, 14, 14, 14).Gap(10).Children(func() {
+					note := func(text string) { ui.Text(c, text).FontSize(11).TextColor(p.InkMuted).Wrap() }
+					field := func(label string, value *string) {
+						ui.Column(c).FillWidth().Gap(4).Children(func() {
+							mono(ui.Text(c, label)).FontSize(9).TextColor(p.InkMuted)
+							ui.TextInput(c, value).Label(label).FontSize(12).FillWidth().Disabled(state.Busy)
+						})
+					}
+					button := func(label, action string) {
+						ui.Button(c, label).FontSize(11).Padding(6, 9).Disabled(state.Busy || h.Run == nil).OnClick(func() {
+							if h.Run != nil {
+								h.Run(action)
+							}
+						})
+					}
+					check := func(label string, value *bool) {
+						ui.Checkbox(c, value, label).FontSize(11).Disabled(state.Busy)
+					}
+					factRow := func(label, value string) {
+						if value == "" {
+							value = "—"
+						}
+						ui.Row(c).FillWidth().Gap(10).Children(func() {
+							ui.Text(c, label).FontSize(10).TextColor(p.InkMuted).Width(116)
+							ui.Text(c, value).FontSize(11).TextColor(p.Ink).Wrap().Selectable()
+						})
+					}
+					if state.Output != "" {
+						ui.Scroll(c).FillWidth().MaxHeight(150).Label("Workspace tool output").Children(func() {
+							ui.Text(c, state.Output).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).Wrap().Selectable().Padding(8, 10).Background(p.Sunken)
+						})
+					}
+					switch state.Page {
+					case "Account":
+						note("Complete provider sign-in and configuration in the fx console.")
+						note("The current conversation keeps its provider; new conversations use the default below.")
+						ui.RadioGroup(c, func() {
+							for _, provider := range []string{"", "vercel", "codex", "grok"} {
+								label := provider
+								if label == "" {
+									label = "Default"
+								}
+								// The choices read at the body's size, like the
+								// note above them: a radio list set larger than
+								// the prose beside it looks like another panel.
+								ui.Radio(c, &state.Provider, provider, label).FontSize(11)
+							}
+						})
+						ui.Row(c).Gap(8).Children(func() { button("Sign in", "login"); button("Sign out", "logout") })
+						ui.Row(c).Gap(8).Children(func() { button("Configure Gateway key", "setup"); button("Choose team", "teams") })
+						ui.Box(c).Height(1)
+						field("Default provider for new conversations", &state.ProviderDefault)
+						ui.Row(c).Gap(8).Children(func() { button("Set default provider", "provider-set") })
+						ui.Row(c).Gap(8).Children(func() { button("Refresh credits", "credits") })
+						if state.Credits != "" {
+							ui.Scroll(c).FillWidth().MaxHeight(100).Children(func() {
+								ui.Text(c, state.Credits).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).Wrap().Selectable().Padding(8, 10).Background(p.Sunken)
+							})
+						}
+					case "MCP":
+						note("Server changes are saved by fx. Start a new conversation to load changed servers.")
+						ui.Row(c).Gap(8).Children(func() {
+							button("List servers", "mcp-list")
+							button("Check server", "mcp-show")
+						})
+						ui.Row(c).Gap(8).Children(func() {
+							button("Add Slack", "mcp-add-slack")
+							button("Approve all project servers", "mcp-approve-all")
+						})
+						field("Server name", &state.Name)
+						ui.RadioGroup(c, func() {
+							ui.Radio(c, &state.Transport, "stdio", "stdio").FontSize(11)
+							ui.Radio(c, &state.Transport, "http", "HTTP").FontSize(11)
+						})
+						if state.Transport == "http" {
+							field("Server URL", &state.URL)
+							ui.Column(c).FillWidth().Gap(3).Children(func() {
+								mono(ui.Text(c, "HTTP headers (K=V, one per line, optional)")).FontSize(9).TextColor(p.InkMuted)
+								ui.TextArea(c, &state.Headers).Label("HTTP headers").Lines(1, 3).FillWidth().Disabled(state.Busy)
+							})
+						} else {
+							field("Server executable", &state.Command)
+							note("One argument per line; spaces stay inside that argument. No shell expansion.")
+							ui.TextArea(c, &state.Arguments).Label("Server arguments").Lines(1, 3).FillWidth().Disabled(state.Busy)
+							ui.Column(c).FillWidth().Gap(3).Children(func() {
+								mono(ui.Text(c, "Environment (K=V, one per line, optional)")).FontSize(9).TextColor(p.InkMuted)
+								ui.TextArea(c, &state.Environment).Label("Environment").Lines(1, 3).FillWidth().Disabled(state.Busy)
+							})
+						}
+						check("Write to this project's .mcp.json", &state.MCPProject)
+						ui.Row(c).Gap(8).Children(func() {
+							button("Add server", "mcp-add")
+							button("Sign in server", "mcp-login")
+							button("Sign out server", "mcp-logout")
+						})
+						ui.Row(c).Gap(8).Children(func() {
+							button("Remove server", "mcp-remove")
+							button("Approve server", "mcp-approve")
+							button("Reject server", "mcp-reject")
+						})
+						if state.MCPProblem != "" {
+							note(state.MCPProblem)
+						}
+						if len(state.MCPServers) > 0 {
+							ui.Column(c).FillWidth().Gap(3).Children(func() {
+								mono(ui.Text(c, "Configured servers")).FontSize(9).TextColor(p.InkMuted)
+								ui.Scroll(c).FillWidth().MaxHeight(220).Children(func() {
+									ui.Column(c).FillWidth().Gap(4).Children(func() {
+										for _, server := range state.MCPServers {
+											server := server
+											ui.Column(c).FillWidth().Gap(2).Padding(7, 8).Radius(4).Background(p.Sunken).Children(func() {
+												ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+													ui.Text(c, server.Name).Font(MonoFont).FontSize(11).TextColor(p.Ink).Grow(1).SingleLine()
+													ui.Text(c, server.Transport).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).SingleLine()
+													ui.Text(c, valueOrDash(server.Status)).Font(MonoFont).FontSize(9).TextColor(mcpStatusColor(p, server.Status)).SingleLine()
+													ui.Button(c, "Check "+server.Name).FontSize(9).Padding(3, 6).Disabled(state.Busy || h.Run == nil).OnClick(func() {
+														state.Name = server.Name
+														if h.Run != nil {
+															h.Run("mcp-show")
+														}
+													})
+												})
+												if server.Source != "" || server.File != "" {
+													ui.Text(c, strings.TrimSpace(server.Source+" · "+server.File)).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).SingleLine()
+												}
+												if server.Error != "" {
+													ui.Text(c, server.Error).FontSize(9).TextColor(p.Danger).Wrap()
+												}
+											})
+										}
+									})
+								})
+							})
+						}
+						if d := state.MCPDetail; d != nil {
+							ui.Column(c).FillWidth().Gap(4).Padding(8, 10).Radius(4).Background(p.Sunken).Children(func() {
+								mono(ui.Text(c, "Checked server")).FontSize(10).TextColor(p.Accent)
+								factRow("Name", d.Name)
+								factRow("Status", d.Status)
+								factRow("Transport", d.Transport)
+								factRow("Source", d.Source)
+								factRow("File", d.File)
+								factRow("Version", d.Version)
+								factRow("URL", d.URL)
+								factRow("Command", d.Command)
+								factRow("Error", d.Error)
+								factRow("Tools", fmt.Sprintf("%d", len(d.Tools)))
+								for _, tool := range d.Tools {
+									ui.Row(c).FillWidth().Gap(8).Children(func() {
+										ui.Text(c, tool.Name).Font(MonoFont).FontSize(10).TextColor(p.Ink).Width(140).SingleLine()
+										ui.Text(c, tool.Description).FontSize(10).TextColor(p.InkMuted).Wrap().Grow(1)
+									})
+								}
+							})
+						}
+						note("fx 0.0.15+ removed mcp path, mcp auth and mcp trust; List servers now shows each server's name, transport, status and file. Rejecting a server withdraws its approval; fx has no reset-all command.")
+					case "Folders":
+						note("Additional directories belong to this primary workspace. Start a new conversation after saving changes.")
+						field("Additional directory", &state.Directory)
+						ui.Button(c, "Choose directory…").FontSize(11).Disabled(state.Busy || h.PickDirectory == nil).OnClick(func() {
+							if h.PickDirectory != nil {
+								h.PickDirectory()
+							}
+						})
+						ui.Row(c).Gap(8).Children(func() {
+							button("List directories", "workspace-list")
+							button("Add directory", "workspace-add")
+							button("Remove directory", "workspace-remove")
+						})
+						button("Clear additional directories", "workspace-clear")
+					case "Details":
+						note("Read-only provider data: full status, permission rules/grants, and usage for the selected UTC period. Diagnostics use fx's own preflight.")
+						ui.RadioGroup(c, func() {
+							ui.Radio(c, &state.Period, "today", "Today").FontSize(11)
+							ui.Radio(c, &state.Period, "7d", "7 days").FontSize(11)
+							ui.Radio(c, &state.Period, "month", "Month").FontSize(11)
+						})
+						ui.Row(c).Gap(8).Children(func() {
+							button("Refresh details", "details")
+							button("Run doctor", "doctor")
+							button("Refresh credits", "credits")
+						})
+						ui.Button(c, "Open diagnostics folder").FontSize(11).Disabled(h.OpenPath == nil).OnClick(func() {
+							if h.OpenPath != nil {
+								if home, err := os.UserHomeDir(); err == nil {
+									h.OpenPath(filepath.Join(home, ".fx", "diagnostics"))
+								}
+							}
+						})
+						for _, section := range state.Details {
+							ui.Column(c).FillWidth().Gap(4).Padding(8, 10).Radius(4).Background(p.Sunken).Children(func() {
+								mono(ui.Text(c, section.Title)).FontSize(10).TextColor(p.Accent)
+								for _, item := range section.Facts {
+									factRow(item.Label, item.Value)
+								}
+								if section.Text != "" {
+									ui.Text(c, section.Text).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).Wrap().Selectable()
+								}
+							})
+						}
+						for _, check := range state.Doctor {
+							ui.Row(c).FillWidth().Gap(8).Children(func() {
+								label := strings.ToUpper(check.Status)
+								if label == "" {
+									label = "CHECK"
+								}
+								tone := p.InkMuted
+								switch check.Status {
+								case "ok":
+									tone = p.OK
+								case "warn":
+									tone = p.Warn
+								case "fail":
+									tone = p.Danger
+								}
+								ui.Text(c, label).Font(MonoFont).FontSize(9).TextColor(tone).Width(44)
+								ui.Text(c, check.Name).FontSize(11).TextColor(p.Ink).Width(100)
+								ui.Text(c, check.Detail).FontSize(10).TextColor(p.InkMuted).Wrap()
+							})
+						}
+						ui.Box(c).Height(1)
+						note("Release channel and upgrade. fx downloads and installs the selected channel.")
+						ui.RadioGroup(c, func() {
+							ui.Radio(c, &state.Channel, "stable", "Stable").FontSize(11)
+							ui.Radio(c, &state.Channel, "dev", "Dev").FontSize(11)
+						})
+						button("Upgrade on this channel", "upgrade-channel")
+					case "Sessions":
+						note("Browse, search and resume saved conversations. Older sessions convert automatically when opened; session repair and bulk conversion are handled by fx.")
+						button("Browse history…", "sessions")
+						field("Session id", &state.SessionID)
+						ui.Row(c).Gap(8).Children(func() {
+							button("Inspect session", "session-inspect")
+							button("Recover corrupt session", "session-recover")
+						})
+						ui.Box(c).Height(1)
+						note("Convert every session saved in the previous format. fx leaves unreadable sessions in place and reports anything it could not move.")
+						button("Convert old sessions", "sessions-convert")
+						if state.SessionProblem != "" {
+							note(state.SessionProblem)
+						}
+						if d := state.SessionView; d != nil {
+							ui.Column(c).FillWidth().Gap(4).Padding(8, 10).Radius(4).Background(p.Sunken).Children(func() {
+								mono(ui.Text(c, "Session detail")).FontSize(10).TextColor(p.Accent)
+								factRow("ID", d.ID)
+								factRow("Created", d.Created)
+								factRow("Updated", d.Updated)
+								factRow("Turns", fmt.Sprintf("%d", d.HistoryLen))
+								factRow("Language", d.Language)
+							})
+							if len(d.Turns) > 0 {
+								ui.Scroll(c).FillWidth().MaxHeight(260).Children(func() {
+									ui.Column(c).FillWidth().Gap(4).Children(func() {
+										for i, turn := range d.Turns {
+											turn := turn
+											ui.Column(c).FillWidth().Gap(2).Padding(6, 8).Radius(4).Background(p.Sunken).Children(func() {
+												label := fmt.Sprintf("%d · %s", i+1, valueOrDash(turn.Kind))
+												if turn.Images > 0 {
+													label += fmt.Sprintf(" · %d image(s)", turn.Images)
+												}
+												mono(ui.Text(c, label)).FontSize(9).TextColor(p.InkMuted)
+												if turn.User != "" {
+													ui.Text(c, "You: "+turn.User).FontSize(10).TextColor(p.Ink).Wrap()
+												}
+												if turn.Assistant != "" {
+													ui.Text(c, turn.Assistant).FontSize(10).TextColor(p.InkMuted).Wrap()
+												}
+												if len(turn.Tools) > 0 {
+													ui.Text(c, "Tools: "+strings.Join(turn.Tools, ", ")).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).Wrap()
+												}
+											})
+										}
+									})
+								})
+							}
+						}
+					case "Models":
+						note("The model catalog fx reports for this workspace. Selecting a row copies its id into the Launch form; a live conversation uses its own model picker.")
+						field("Filter models", &state.ModelQuery)
+						ui.Row(c).Gap(8).Children(func() {
+							button("Refresh models", "models")
+							button("Clear filter", "models-clear")
+						})
+						if state.ModelsProblem != "" {
+							note(state.ModelsProblem)
+						}
+						query := strings.ToLower(strings.TrimSpace(state.ModelQuery))
+						shown := 0
+						ui.Scroll(c).FillWidth().MaxHeight(280).Children(func() {
+							ui.Column(c).FillWidth().Gap(2).Children(func() {
+								for _, model := range state.Models {
+									if query != "" && !strings.Contains(strings.ToLower(model.ID), query) && !strings.Contains(strings.ToLower(model.Source), query) {
+										continue
+									}
+									shown++
+									model := model
+									ui.ButtonBase(c).FillWidth().Padding(5, 7).Radius(3).Label("Use model " + model.ID).OnClick(func() {
+										state.Model = model.ID
+										state.Page = "Launch"
+									}).Children(func() {
+										ui.Text(c, model.ID).Font(MonoFont).FontSize(11).TextColor(p.Ink).SingleLine()
+										ui.Box(c).Grow(1)
+										ui.Text(c, model.Source).FontSize(10).TextColor(p.InkMuted).SingleLine()
+									})
+								}
+								if shown == 0 {
+									ui.Text(c, "No models match the filter.").FontSize(11).TextColor(p.InkMuted)
+								}
+							})
+						})
+						ui.Text(c, fmt.Sprintf("%d shown", shown)).FontSize(10).TextColor(p.InkMuted)
+					case "Launch":
+						note("Starts a new conversation in this project. fx retains saved history; the current connection closes.")
+						button("Start new conversation", "launch")
+						field("Provider override (optional)", &state.ProviderOverride)
+						field("Model override (optional)", &state.Model)
+						field("Reasoning effort (auto, minimal, low, medium, high, xhigh)", &state.Effort)
+						ui.Column(c).FillWidth().Gap(3).Children(func() {
+							mono(ui.Text(c, "Additional directories (one absolute path per line)")).FontSize(9).TextColor(p.InkMuted)
+							ui.TextArea(c, &state.AddDirs).Label("Additional directories").Lines(1, 3).FillWidth().Disabled(state.Busy)
+						})
+						ui.Column(c).FillWidth().Gap(3).Children(func() {
+							mono(ui.Text(c, "Context limit overrides (NAME=BYTES|off, one per line)")).FontSize(9).TextColor(p.InkMuted)
+							ui.TextArea(c, &state.ContextLimits).Label("Context limit overrides").Lines(1, 3).FillWidth().Disabled(state.Busy)
+						})
+						ui.Column(c).FillWidth().Gap(2).Children(func() {
+							mono(ui.Text(c, "Fast mode")).FontSize(9).TextColor(p.InkMuted)
+							ui.RadioGroup(c, func() {
+								ui.Radio(c, &state.Fast, "default", "Default").FontSize(11)
+								ui.Radio(c, &state.Fast, "on", "On").FontSize(11)
+								ui.Radio(c, &state.Fast, "off", "Off").FontSize(11)
+							})
+						})
+						ui.Column(c).FillWidth().Gap(2).Children(func() {
+							mono(ui.Text(c, "Ultra mode")).FontSize(9).TextColor(p.InkMuted)
+							ui.RadioGroup(c, func() {
+								ui.Radio(c, &state.Ultra, "default", "Default").FontSize(11)
+								ui.Radio(c, &state.Ultra, "on", "On").FontSize(11)
+								ui.Radio(c, &state.Ultra, "off", "Off").FontSize(11)
+							})
+						})
+						check("Do not load additional directories", &state.NoAdditionalDirs)
+						field("ACP log path (optional, absolute)", &state.LogPath)
+						note("Effort and fast mode are applied to the new ACP session after it opens; fx accepts them through session configuration even though it does not advertise them as launch flags. Provider and directories can also be changed in a live conversation.")
+						button("Start with these options", "launch")
+					case "Rules":
+						note("Persistent allow rules live in ~/.fx/settings.json. Local rules belong to this workspace and shadow user rules; changes apply to new conversations.")
+						ui.RadioGroup(c, func() {
+							ui.Radio(c, &state.AllowScope, "local", "This workspace").FontSize(11)
+							ui.Radio(c, &state.AllowScope, "user", "All workspaces").FontSize(11)
+						})
+						ui.RadioGroup(c, func() {
+							ui.Radio(c, &state.AllowKind, "tool", "Tool").FontSize(11)
+							ui.Radio(c, &state.AllowKind, "command", "Command").FontSize(11)
+							ui.Radio(c, &state.AllowKind, "url", "URL").FontSize(11)
+							ui.Radio(c, &state.AllowKind, "domain", "Web fetch domain").FontSize(11)
+						})
+						if state.AllowKind == "tool" {
+							ui.RadioGroup(c, func() {
+								for _, tool := range []struct{ key, label string }{
+									{"read", "Read files"}, {"write", "Write files"}, {"edit", "Edit files"},
+									{"glob", "Glob files"}, {"grep", "Grep files"}, {"skill", "Skills"},
+									{"install_skill", "Install skills"}, {"subagent", "Subagents"},
+								} {
+									ui.Radio(c, &state.AllowTool, tool.key, tool.label).FontSize(11)
+								}
+							})
+						} else {
+							field("Command, URL or domain", &state.AllowPattern)
+						}
+						allow := func(action string) {
+							if h.Allowlist == nil {
+								return
+							}
+							h.Allowlist(action, state.AllowScope, state.AllowKind, state.AllowTool, state.AllowPattern)
+						}
+						ui.Row(c).Gap(8).Children(func() {
+							ui.Button(c, "Add rule").FontSize(11).Padding(6, 9).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() { allow("add") })
+							ui.Button(c, "Remove selected").FontSize(11).Padding(6, 9).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() { allow("remove") })
+						})
+						ui.Row(c).Gap(8).Children(func() {
+							ui.Button(c, "Reset this kind").FontSize(11).Padding(6, 9).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() { allow("reset") })
+							ui.Button(c, "Reset scope").FontSize(11).Padding(6, 9).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() { allow("reset-all") })
+						})
+						if state.AllowProblem != "" {
+							note(state.AllowProblem)
+						}
+						if len(state.AllowRules) == 0 {
+							note("No persistent allow rules are stored.")
+						} else {
+							ui.Scroll(c).FillWidth().MaxHeight(220).Children(func() {
+								ui.Column(c).FillWidth().Gap(2).Children(func() {
+									for _, rule := range state.AllowRules {
+										rule := rule
+										ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+											ui.Text(c, rule.Scope).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).Width(42)
+											ui.Text(c, rule.Label).FontSize(10).TextColor(p.InkMuted).Width(120)
+											ui.Text(c, rule.Pattern).Font(MonoFont).FontSize(10).TextColor(p.Ink).Wrap().Grow(1)
+											ui.Button(c, "Remove").FontSize(9).Padding(3, 6).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() {
+												if h.Allowlist != nil {
+													h.Allowlist("remove", rule.Scope, rule.Kind, rule.Key, rule.Pattern)
+												}
+											})
+										})
+									}
+								})
+							})
+						}
+					case "Skills":
+						note("Skills listed by fx from this workspace and the user's global discovery roots. Add, install and remove still use fx's own skill workflow; this page is the native catalog and folder entry point.")
+						field("Filter skills", &state.SkillQuery)
+						ui.Row(c).Gap(8).Children(func() {
+							button("Refresh skills", "skills-load")
+							ui.Button(c, "Open workspace skills").FontSize(11).Disabled(state.Busy || h.OpenPath == nil || state.Project == "").OnClick(func() {
+								if h.OpenPath != nil {
+									h.OpenPath(filepath.Join(state.Project, ".fx", "skills"))
+								}
+							})
+						})
+						if state.SkillProblem != "" {
+							note(state.SkillProblem)
+						}
+						query := strings.ToLower(strings.TrimSpace(state.SkillQuery))
+						shown := 0
+						ui.Scroll(c).FillWidth().MaxHeight(280).Children(func() {
+							ui.Column(c).FillWidth().Gap(6).Children(func() {
+								for _, skill := range state.Skills {
+									if query != "" && !strings.Contains(strings.ToLower(skill.Name), query) && !strings.Contains(strings.ToLower(skill.Description), query) {
+										continue
+									}
+									shown++
+									skill := skill
+									ui.Column(c).FillWidth().Gap(2).Padding(7, 8).Radius(4).Background(p.Sunken).Children(func() {
+										ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
+											ui.Text(c, skill.Name).FontSize(11).TextColor(p.Ink).Grow(1).SingleLine()
+											ui.Text(c, skill.Source).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).SingleLine()
+											ui.Button(c, "Open").FontSize(9).Padding(3, 6).Disabled(h.OpenPath == nil).OnClick(func() {
+												if h.OpenPath != nil {
+													h.OpenPath(skill.Path)
+												}
+											})
+										})
+										if skill.Description != "" {
+											ui.Text(c, skill.Description).FontSize(10).TextColor(p.InkMuted).Wrap()
+										}
+									})
+								}
+								if shown == 0 {
+									ui.Text(c, "No skills match the filter.").FontSize(11).TextColor(p.InkMuted)
+								}
+							})
+						})
+						ui.Text(c, fmt.Sprintf("%d shown", shown)).FontSize(10).TextColor(p.InkMuted)
+					case "Slack":
+						note("Slack authorization runs through fx and opens your browser. The bot token stays in fx's own credential store.")
+						ui.Row(c).Gap(8).Children(func() {
+							button("Refresh status", "slack-status")
+							button("Install workspace bot", "slack-install")
+							button("Refresh tokens", "slack-refresh")
+						})
+						button("Add Slack MCP server", "mcp-add-slack")
+						if state.SlackProblem != "" {
+							note(state.SlackProblem)
+						}
+						ui.Column(c).FillWidth().Gap(4).Padding(8, 10).Radius(4).Background(p.Sunken).Children(func() {
+							status := "Not installed"
+							if state.Slack.Installed {
+								status = "Installed"
+							}
+							factRow("State", status)
+							factRow("App id", state.Slack.AppID)
+							factRow("Team id", state.Slack.TeamID)
+							factRow("Bot user id", state.Slack.BotUserID)
+							factRow("Access expires", state.Slack.Expires)
+							factRow("Refresh expires", state.Slack.RefreshExpires)
+						})
+					case "GitHub":
+						note("Draft a pull request or issue from the current branch. Publishing runs fx --create and GitHub CLI may require authentication; nothing is published until you confirm.")
+						ui.RadioGroup(c, func() {
+							ui.Radio(c, &state.GitHub.Kind, "pr", "Pull request").FontSize(11)
+							ui.Radio(c, &state.GitHub.Kind, "issue", "Issue").FontSize(11)
+						})
+						ui.TextArea(c, &state.GitHub.Context).Label("Context (optional)").Lines(2, 5).FillWidth().Disabled(state.Busy || state.GitHub.Busy)
+						ui.Column(c).FillWidth().Gap(2).Children(func() {
+							ui.Checkbox(c, &state.GitHub.Auto, "Let fx review permissions automatically").FontSize(11).Disabled(state.Busy || state.GitHub.Busy)
+							ui.Checkbox(c, &state.GitHub.Create, "Publish with GitHub").FontSize(11).Disabled(state.Busy || state.GitHub.Busy)
+						})
+						button("Run GitHub action", "github-run")
+						if state.GitHub.Busy {
+							note("Running fx…")
+						}
+						if state.GitHub.Problem != "" {
+							note(state.GitHub.Problem)
+						}
+						if state.GitHub.Output != "" {
+							ui.Scroll(c).FillWidth().MaxHeight(180).Label("GitHub action output").Children(func() {
+								ui.Text(c, state.GitHub.Output).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).Wrap().Selectable().Padding(8, 10).Background(p.Sunken)
+							})
+						}
+					}
+					if state.Busy {
+						note("Reading fx…")
+					}
+				})
+			})
+		})
+	})
+}
+
+func valueOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
+}
+
+// mcpStatusColor keeps color semantic: failures are danger, servers waiting
+// on a connection are warn, healthy servers are OK, and unknown states stay
+// muted rather than inventing a tone.
+func mcpStatusColor(p Palette, status string) ui.Color {
+	s := strings.ToLower(strings.TrimSpace(status))
+	switch {
+	case s == "ready" || s == "connected" || s == "ok" || s == "running":
+		return p.OK
+	case strings.Contains(s, "error") || s == "failed":
+		return p.Danger
+	case s == "retrying" || s == "starting" || s == "connecting":
+		return p.Warn
+	default:
+		return p.InkMuted
+	}
+}
