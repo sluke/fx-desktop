@@ -1,5 +1,7 @@
 # fx Desktop
 
+[简体中文](README.zh-CN.md)
+
 Community desktop client for [fx](https://fx.sh/) — a native [MyGo](https://github.com/egoist/mygo) app that connects to the **fx** agent over ACP. Conversations, tool output and permissions are rendered natively; noninteractive fx commands run behind native forms, and only interactive authentication (`fx login`, `setup`, `teams`) uses the in-window console.
 
 This is not an official Vercel Labs release.
@@ -92,4 +94,4 @@ fx-desktop://open?path=/Users/you/myproject
 
 ## License
 
-MIT
+[MIT](LICENSE) © 2026 Lu Weiqing
