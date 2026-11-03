@@ -6,17 +6,18 @@
 
 本项目并非 Vercel Labs 官方发布。
 
-**支持平台：**macOS 和 Linux，与 fx CLI 一致。
+**支持平台：**macOS 13 及以上版本和 Linux，与 fx CLI 一致。
 
 ## 功能
 
 - **原生对话**：流式 Markdown 回复、可展开的工具结果、复制、取消和对话中切换模型。
-- **ACP 会话**：在当前项目窗口恢复 fx 保存的会话；工具和历史记录由 fx 管理。
+- **ACP 会话与历史**：浏览、搜索 fx 保存的会话，并在项目窗口中恢复；工具和历史记录由 fx 管理。
+- **输入区**：使用 `@` 引用工作区文件；连接的 agent 支持图片时可添加图片附件。
 - **内联权限请求**：等待用户明确选择；操作提示显示在对话之外。
 - **Quick Ask**：通过原生表单使用 `fx ask`，支持模型、推理强度、访问权限、系统提示词、图片、恢复会话、供应商顺序、上下文限制和额外目录。
 - **工作区工具**：原生 Account、MCP、Folders、Details、Sessions、Launch、Models、Rules、Skills、Slack 和 GitHub 页面。
 - **模型与启动设置**：供应商顺序、推理强度、Fast／Ultra、上下文限制、额外目录和模型选择器。
-- **允许规则编辑器**：添加、删除或重置 `~/.fx/settings.json` 中的权限规则。
+- **允许规则编辑器**：添加、删除或重置 `~/.fx/settings.json` 中的用户或工作区权限规则。
 - **文件标签页**：在右侧栏浏览工作区、展开文件夹、使用默认应用打开文件，或右键在文本编辑器中打开。
 - **变更面板**：实时查看 `git status` 和 `git diff`，并快速提交。
 - **常用操作**：命令面板、最近项目、打开文件夹、恢复上次项目和在 Finder 中显示。
@@ -74,9 +75,15 @@ go test ./...
 
 ```text
 main.go                 程序入口
-internal/app/           协调器、会话、操作和 fx 集成
+internal/app/           应用协调、窗口和会话
 internal/app/chrome/    使用 MyGo 构建的原生界面
-internal/acp/           ACP JSON-RPC 客户端
+internal/app/presenter/ 界面展示适配
+internal/acp/           ACP JSON-RPC 客户端及进程生命周期
+internal/conversation/  对话模型和文本处理
+internal/history/       已保存会话的历史记录
+internal/management/    fx 管理操作
+internal/workspace/     工作区文件、引用和变更
+internal/fxcli/         fx 命令执行
 internal/fxbin/         fx 可执行文件的安装和升级
 internal/fxsessions/    已保存会话的查看和删除
 internal/projects/      最近项目及持久化

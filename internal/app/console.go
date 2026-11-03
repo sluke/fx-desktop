@@ -33,6 +33,16 @@ type consoleRun struct {
 	done func(code int)
 }
 
+// consoleController owns one window's console drawer: the runs it holds, in
+// the order they started, and the id sequence that names them. It is app-loop
+// state, like the shell it drives; a terminal's own goroutine reports to it by
+// asking the app to run the change.
+type consoleController struct {
+	window *ProjectWindow
+	runs   []*consoleRun
+	seq    uint64
+}
+
 // consoleRunLimit bounds the tabs a window keeps. A console is a log, not a
 // workspace: eight runs are more than the drawer shows at once, and each
 // terminal keeps its own scrollback (§4.10.5).
@@ -43,13 +53,13 @@ const consoleRunLimit = 8
 // and that is the whole affordance for finding the console at all. It is where
 // a run is born, so the tests use it too — a PTY has no business in a test
 // process, and the bookkeeping is what needs proving.
-func (s *Session) attachConsoleRun(run *consoleRun) *consoleRun {
-	s.consoleSeq++
-	run.id = s.consoleSeq
-	s.consoles = append(s.consoles, run)
-	s.shell.ConsoleOpen = true
-	s.shell.ConsoleRun = run.id
-	s.trimConsoles()
+func (ctl *consoleController) attach(run *consoleRun) *consoleRun {
+	ctl.seq++
+	run.id = ctl.seq
+	ctl.runs = append(ctl.runs, run)
+	ctl.window.shell.ConsoleOpen = true
+	ctl.window.shell.ConsoleRun = run.id
+	ctl.trim()
 	return run
 }
 
@@ -57,10 +67,10 @@ func (s *Session) attachConsoleRun(run *consoleRun) *consoleRun {
 // its limit. A run that is still working is never closed for space: when every
 // tab is live the drawer keeps them all, because closing one would kill work
 // the user started.
-func (s *Session) trimConsoles() {
-	for len(s.consoles) > consoleRunLimit {
+func (ctl *consoleController) trim() {
+	for len(ctl.runs) > consoleRunLimit {
 		drop := -1
-		for i, run := range s.consoles {
+		for i, run := range ctl.runs {
 			if run.exited {
 				drop = i
 				break
@@ -69,20 +79,20 @@ func (s *Session) trimConsoles() {
 		if drop < 0 {
 			return
 		}
-		run := s.consoles[drop]
+		run := ctl.runs[drop]
 		run.removed = true
 		if run.term != nil {
 			run.term.Close()
 		}
-		s.consoles = append(s.consoles[:drop], s.consoles[drop+1:]...)
+		ctl.runs = append(ctl.runs[:drop], ctl.runs[drop+1:]...)
 	}
 }
 
 // activeConsole is the run the drawer draws, or nil when the selection points
 // at nothing (a closed tab, before the first run).
-func (s *Session) activeConsole() *consoleRun {
-	for _, run := range s.consoles {
-		if run.id == s.shell.ConsoleRun {
+func (ctl *consoleController) active() *consoleRun {
+	for _, run := range ctl.runs {
+		if run.id == ctl.window.shell.ConsoleRun {
 			return run
 		}
 	}
@@ -92,14 +102,17 @@ func (s *Session) activeConsole() *consoleRun {
 // closeConsoles ends every run this window holds. A run's process belongs to
 // the window that showed it: closing the window closes the runs, as closing a
 // command window always did.
-func (s *Session) closeConsoles() {
-	for _, run := range s.consoles {
+// closeAll ends every run this window holds. A run's process belongs to the
+// window that showed it: closing the window closes the runs, as closing a
+// command window always did.
+func (ctl *consoleController) closeAll() {
+	for _, run := range ctl.runs {
 		run.removed = true
 		if run.term != nil {
 			run.term.Close()
 		}
 	}
-	s.consoles = nil
+	ctl.runs = nil
 }
 
 // consoleIn runs a command fx process in the window's console drawer.
@@ -108,7 +121,7 @@ func (s *Session) closeConsoles() {
 // acting on nothing — has no drawer to put it in, so it opens the command
 // window it always did. The drawer is an improvement where it fits, not a
 // promise the app breaks where it does not (§4.7).
-func (c *Coordinator) consoleIn(s *Session, title string, args ...string) {
+func (c *Coordinator) consoleIn(s *ProjectWindow, title string, args ...string) {
 	if s == nil || s.project == "" {
 		c.openCommandSession(title, "", args...)
 		return
@@ -125,7 +138,7 @@ func (c *Coordinator) consoleIn(s *Session, title string, args ...string) {
 // startConsoleRun builds one run and its terminal, and hands the run to the
 // drawer. The run is made before the terminal so the exit callback can name
 // it: a process that reports its end immediately must still find its run.
-func (c *Coordinator) startConsoleRun(s *Session, title string, args ...string) (*consoleRun, error) {
+func (c *Coordinator) startConsoleRun(s *ProjectWindow, title string, args ...string) (*consoleRun, error) {
 	cmd := append([]string{c.fxPathSnapshot()}, args...)
 	run := &consoleRun{title: title, command: strings.Join(cmd, " ")}
 	if len(args) > 0 && args[0] == "login" {
@@ -157,13 +170,18 @@ func (c *Coordinator) startConsoleRun(s *Session, title string, args ...string) 
 		return nil, err
 	}
 	run.term = term
-	return s.attachConsoleRun(run), nil
+	return s.console.attach(run), nil
 }
 
 // finishConsoleRun records a run's end. The tab stays: the output and the exit
 // code are the point of a console, and a window that vanished on exit could
 // never be read twice.
-func (c *Coordinator) finishConsoleRun(s *Session, run *consoleRun, code int) {
+func (c *Coordinator) finishConsoleRun(s *ProjectWindow, run *consoleRun, code int) {
+	s.console.finish(run, code)
+}
+
+// finish records a run's end.
+func (ctl *consoleController) finish(run *consoleRun, code int) {
 	if run.removed {
 		return
 	}
@@ -172,14 +190,19 @@ func (c *Coordinator) finishConsoleRun(s *Session, run *consoleRun, code int) {
 	if run.done != nil {
 		run.done(code)
 	}
-	s.invalidate()
+	ctl.window.invalidate()
 }
 
 // sessionConsole projects the drawer's state for chrome. The terminal itself
 // stays here: the projection carries a closure that draws it, never a handle.
-func (c *Coordinator) sessionConsole(s *Session) chrome.ConsoleData {
-	d := chrome.ConsoleData{Runs: make([]chrome.ConsoleRun, 0, len(s.consoles))}
-	for _, run := range s.consoles {
+func (c *Coordinator) sessionConsole(s *ProjectWindow) chrome.ConsoleData {
+	return s.console.data()
+}
+
+// data projects the drawer's state for chrome.
+func (ctl *consoleController) data() chrome.ConsoleData {
+	d := chrome.ConsoleData{Runs: make([]chrome.ConsoleRun, 0, len(ctl.runs))}
+	for _, run := range ctl.runs {
 		d.Runs = append(d.Runs, chrome.ConsoleRun{
 			ID:      run.id,
 			Title:   run.title,
@@ -188,7 +211,7 @@ func (c *Coordinator) sessionConsole(s *Session) chrome.ConsoleData {
 			Exit:    run.exit,
 		})
 	}
-	if run := s.activeConsole(); run != nil && run.term != nil {
+	if run := ctl.active(); run != nil && run.term != nil {
 		// The key follows the run, so switching tabs builds a new element
 		// rather than re-binding the one that is there: two terminals are
 		// two views, each with state of its own.
@@ -203,24 +226,35 @@ func (c *Coordinator) sessionConsole(s *Session) chrome.ConsoleData {
 // toggleConsole shows or hides the drawer. Hiding it keeps the runs: the tabs
 // and their output are what the drawer is for, and ⌘J is how the conversation
 // gets the room back.
-func (c *Coordinator) toggleConsole(s *Session) {
-	s.shell.ConsoleOpen = !s.shell.ConsoleOpen
-	s.invalidate()
+func (c *Coordinator) toggleConsole(s *ProjectWindow) { s.console.toggle() }
+
+// toggle shows or hides the drawer.
+func (ctl *consoleController) toggle() {
+	ctl.window.shell.ConsoleOpen = !ctl.window.shell.ConsoleOpen
+	ctl.window.invalidate()
 }
 
 // selectConsole makes a run the one on screen, and shows the drawer: a click
 // on a tab cannot leave the panel hidden behind it.
-func (c *Coordinator) selectConsole(s *Session, id uint64) {
-	s.shell.ConsoleRun = id
-	s.shell.ConsoleOpen = true
-	s.invalidate()
+func (c *Coordinator) selectConsole(s *ProjectWindow, id uint64) { s.console.selectRun(id) }
+
+// selectRun makes a run the one on screen, and shows the drawer.
+func (ctl *consoleController) selectRun(id uint64) {
+	ctl.window.shell.ConsoleRun = id
+	ctl.window.shell.ConsoleOpen = true
+	ctl.window.invalidate()
 }
 
 // closeConsoleRun ends one run and drops its tab, killing a process that is
 // still going: closing the tab is the same act as closing the command window
 // the run used to have.
-func (c *Coordinator) closeConsoleRun(s *Session, id uint64) {
-	for i, run := range s.consoles {
+func (c *Coordinator) closeConsoleRun(s *ProjectWindow, id uint64) { s.console.closeRun(id) }
+
+// closeRun ends one run and drops its tab, killing a process that is still
+// going: closing the tab is the same act as closing the command window the run
+// used to have.
+func (ctl *consoleController) closeRun(id uint64) {
+	for i, run := range ctl.runs {
 		if run.id != id {
 			continue
 		}
@@ -228,21 +262,21 @@ func (c *Coordinator) closeConsoleRun(s *Session, id uint64) {
 		if run.term != nil {
 			run.term.Close()
 		}
-		s.consoles = append(s.consoles[:i], s.consoles[i+1:]...)
-		if s.shell.ConsoleRun == id {
+		ctl.runs = append(ctl.runs[:i], ctl.runs[i+1:]...)
+		if ctl.window.shell.ConsoleRun == id {
 			// Fall to the run that took its place, or to the one before it.
-			s.shell.ConsoleRun = 0
+			ctl.window.shell.ConsoleRun = 0
 			switch {
-			case i < len(s.consoles):
-				s.shell.ConsoleRun = s.consoles[i].id
+			case i < len(ctl.runs):
+				ctl.window.shell.ConsoleRun = ctl.runs[i].id
 			case i > 0:
-				s.shell.ConsoleRun = s.consoles[i-1].id
+				ctl.window.shell.ConsoleRun = ctl.runs[i-1].id
 			}
 		}
-		if len(s.consoles) == 0 {
-			s.shell.ConsoleOpen = false
+		if len(ctl.runs) == 0 {
+			ctl.window.shell.ConsoleOpen = false
 		}
-		s.invalidate()
+		ctl.window.invalidate()
 		return
 	}
 }

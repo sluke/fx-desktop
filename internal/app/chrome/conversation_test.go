@@ -623,3 +623,55 @@ func TestConversationConfigStripLeavesTheArrowItsRoom(t *testing.T) {
 		}
 	}
 }
+
+// B5/N2: the draft's identity follows the control's edit events. Typing,
+// paste, undo and taking a mention each count, so a submission in flight can
+// tell that the field it is about to clear is no longer the one it took.
+func TestConversationReportsEveryKindOfDraftEdit(t *testing.T) {
+	state := ConversationState{}
+	edits := 0
+	h := ConversationHost{
+		Ready:        true,
+		DraftEdited:  func() { edits++ },
+		MentionFiles: []MentionFile{{Name: "main.go", Path: "main.go"}},
+		CanMention:   true,
+		Send:         func(string, []Attachment) bool { return true },
+	}
+	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 800, 600)
+	if err := ts.Click("Message fx"); err != nil {
+		t.Fatal(err)
+	}
+	ts.Type("abc")
+	if edits == 0 {
+		t.Fatal("typing did not count as an edit")
+	}
+	typed := edits
+
+	ts.SetClipboard("pasted")
+	ts.Key(ui.Cmd, ui.KeyV)
+	if edits <= typed {
+		t.Fatalf("paste did not count as an edit (%d edits)", edits)
+	}
+	pasted := edits
+
+	ts.Key(ui.Cmd, ui.KeyZ)
+	if edits <= pasted {
+		t.Fatalf("undo did not count as an edit (%d edits)", edits)
+	}
+	undone := edits
+
+	// Open the @ picker by typing a mention, then take the row with Enter.
+	ts.Frame()
+	ts.Type(" @ma")
+	ts.Frame()
+	if !state.MentionOpen {
+		t.Fatalf("the mention picker did not open: %q open=%v q=%q %d-%d closed=%q", state.Draft, state.MentionOpen, state.MentionQuery, state.MentionStart, state.MentionEnd, state.MentionClosed)
+	}
+	ts.Key(0, ui.KeyEnter)
+	if edits <= undone {
+		t.Fatalf("taking a mention did not count as an edit (%d edits)", edits)
+	}
+	if !strings.Contains(state.Draft, "@main.go") {
+		t.Fatalf("the mention was not inserted: %q", state.Draft)
+	}
+}

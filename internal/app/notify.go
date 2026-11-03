@@ -92,7 +92,7 @@ func postAttentionNotification(sum chrome.SessionSummary) {
 }
 
 // sessionByRailID finds the live session a rail row stands for.
-func (c *Coordinator) sessionByRailID(id string) *Session {
+func (c *Coordinator) sessionByRailID(id string) *ProjectWindow {
 	for _, s := range c.sessionsSnapshot() {
 		if s.railID() == id {
 			return s

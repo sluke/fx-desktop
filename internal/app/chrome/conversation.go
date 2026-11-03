@@ -9,79 +9,37 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/markdown"
+
+	"fx-desktop/internal/conversation"
+	"fx-desktop/internal/workspace"
 )
 
 // copyFeedbackDuration is how long the Copy button reads "Copied" before it
 // reverts, mirroring the design mock. A var so tests can shorten it.
 var copyFeedbackDuration = 1600 * time.Millisecond
 
-// DiffLine kinds. They live here because chrome owns the rendering
-// vocabulary; the app only classifies lines into them.
+// DiffLine kinds are the workspace's semantic classification; chrome only
+// maps them to colors. They are re-exported so the rendering code keeps its
+// vocabulary without owning the data model.
 const (
-	DiffContext = "context"
-	DiffAdd     = "add"
-	DiffDel     = "del"
+	DiffContext = workspace.DiffContext
+	DiffAdd     = workspace.DiffAdd
+	DiffDel     = workspace.DiffDel
 )
 
-// ChatMessage contains agent protocol data, never terminal escape sequences.
-// ChatMessage is one row of the transcript.
-type ChatMessage struct {
-	ID                        uint64
-	Role, Text, Title, Status string
-	Done                      bool
-	// Started and Ended time a tool call. The transcript shows how long
-	// the call took, the way the design's audit log shows a duration
-	// instead of a word: a row that says only "Running" next to a word
-	// like "Completed" tells the reader nothing (§4.2).
-	Started, Ended time.Time
-	// Images names the pictures sent with this message. The bubble shows
-	// them as "image: name" chips so the history records what was sent, not
-	// just the words that came with it.
-	Images []string
-	// Diff is set on a tool message that changed files. A diff is rendered
-	// structurally and expanded by default — the change is the point of the
-	// row — instead of being flattened back into Text (§4.2).
-	Diff *DiffInfo
-	// Command is the shell command a tool call ran. fx's ACP result preview
-	// stops inside its own envelope, before the command's output, so the
-	// command is the only human content an expanded shell call can show.
-	Command string
-	// Shell is set on a shell call, with the flags fx reported about its
-	// captured result. It turns the expanded payload into a call summary
-	// instead of a dump of fx's bookkeeping.
-	Shell *ShellResult
-}
+// The transcript, approval and configuration models are the conversation
+// package's. chrome renders them and maps their semantic fields to colors; it
+// does not own them, so the app never has to depend on this package to name a
+// message.
+type ChatMessage = conversation.Message
+type ShellResult = conversation.ShellResult
+type DiffInfo = conversation.DiffInfo
+type PermissionOption = conversation.PermissionOption
+type ChatPermission = conversation.Permission
 
-// ShellResult is what fx reported about a shell call's result beyond its row
-// state. The ACP preview cuts fx's envelope at 200 bytes, so only these flags
-// reach the client; they are the part that changes what the result means.
-type ShellResult struct {
-	Truncated     bool
-	Incomplete    bool
-	Indeterminate bool
-	Signal        string
-}
+// DiffLine is one classified diff line: Kind is "context", "add" or "del".
+type DiffLine = workspace.DiffLine
 
-// DiffInfo is one file's change as a list of classified lines.
-type DiffInfo struct {
-	Path  string
-	Lines []DiffLine
-}
-
-// DiffLine is one rendered line: Kind is "context", "add" or "del".
-type DiffLine struct {
-	Kind string
-	Text string
-}
-type PermissionOption struct {
-	ID   string `json:"optionId"`
-	Name string `json:"name"`
-	Kind string `json:"kind"`
-}
-type ChatPermission struct {
-	ID, Title, Detail string
-	Options           []PermissionOption
-}
 type ConversationState struct {
 	NoticesOpen bool
 	Draft       string
@@ -150,6 +108,9 @@ type ConversationHost struct {
 	CanSteer bool
 	// Queued is how many messages are already waiting for the turn to end.
 	Queued int
+	// Preparing says the app is reading the files this message names; the
+	// draft stays in the composer until that finishes.
+	Preparing bool
 	// Configs and Modes are the session's live configuration, straight from
 	// fx. Modes is the richer view of the permission mode; Configs is
 	// rendered verbatim, so "model" is not a special case (§4.4.1).
@@ -191,8 +152,12 @@ type ConversationHost struct {
 	SetAdvanced             func(effort string, fast, ultra bool)
 	Permission              *ChatPermission
 	Send                    func(text string, attachments []Attachment) bool
-	Stop                    func()
-	ChoosePermission        func(id, option string)
+	// DraftEdited counts one edit of the composer's draft — typing, paste,
+	// undo/redo, a mention insertion — so the app can tell the draft a
+	// submission was taken from from one the user has changed since (§B5).
+	DraftEdited      func()
+	Stop             func()
+	ChoosePermission func(id, option string)
 	// Changed repaints the window; the copy revert fires from a timer
 	// goroutine, which may call it because Invalidate is goroutine-safe.
 	Changed func()
@@ -401,6 +366,15 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 									return true
 								}
 								return false
+							}).
+							// The control reports the edits it applies — typed,
+							// pasted, undone — between frames. The draft's
+							// identity follows those events, not the draws
+							// (§B5, N2).
+							OnChange(func() {
+								if h.DraftEdited != nil {
+									h.DraftEdited()
+								}
 							})
 					})
 					// Taking a mention leaves the caret to be put back: the
@@ -456,7 +430,7 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 						// not stretch or center reliably inside a
 						// fixed-size button: they follow text metrics.
 						ui.Button(c, "").Label("Send message").Tooltip(sendTooltip(h, state)).Padding(8).Radius(16).BorderWidth(0).Background(p.Ink).TextColor(p.OnInk).
-							Disabled(!h.Ready || h.ConfigChanging || h.Busy && len(state.Attachments) > 0 ||
+							Disabled(!h.Ready || h.ConfigChanging || h.Preparing || h.Busy && len(state.Attachments) > 0 ||
 								strings.TrimSpace(state.Draft) == "" && len(state.Attachments) == 0).OnClick(func() { dismissMention(state); send(state.Draft) }).
 							Children(func() { ui.Icon(c, IconArrowUp).FontSize(16).TextColor(p.OnInk) })
 					})
@@ -560,6 +534,8 @@ func composerStatus(h ConversationHost, state *ConversationState) string {
 	switch {
 	case h.Stopping:
 		return "Stopping…"
+	case h.Preparing:
+		return "Preparing… · reading mentioned files"
 	case h.Permission != nil:
 		return "Waiting for approval"
 	case h.Busy && h.Queued == 1:

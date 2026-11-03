@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,328 +14,28 @@ import (
 	"github.com/egoist/mygo"
 
 	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/app/presenter"
+	"fx-desktop/internal/management"
 )
 
+// The management request rules live in the management package. These
+// adapters keep the app's call sites and the panel's form type, and are the
+// only place the two meet.
 func managementCommand(action string, state chrome.ManagementState) ([]string, bool, error) {
-	value := func(s, label string) (string, error) {
-		s = strings.TrimSpace(s)
-		if s == "" || strings.HasPrefix(s, "-") || strings.ContainsAny(s, "\x00\r\n") {
-			return "", fmt.Errorf("Enter a valid %s", label)
-		}
-		return s, nil
-	}
-	provider := strings.TrimSpace(state.Provider)
-	switch action {
-	case "login", "logout":
-		if provider != "" && provider != "vercel" && provider != "codex" && provider != "grok" {
-			return nil, false, fmt.Errorf("Choose default, vercel, codex or grok")
-		}
-		args := []string{action}
-		if provider != "" {
-			args = append(args, provider)
-		}
-		return args, action == "logout", nil
-	case "setup", "teams":
-		return []string{action}, false, nil
-	case "mcp-list":
-		return []string{"mcp", "list", "--json"}, false, nil
-	case "mcp-show":
-		name, err := value(state.Name, "server name")
-		if err != nil {
-			return nil, false, err
-		}
-		return []string{"mcp", "show", name, "--json"}, false, nil
-	case "mcp-add-slack":
-		return []string{"mcp", "add", "slack"}, true, nil
-	case "mcp-approve-all":
-		return []string{"mcp", "approve", "--all"}, true, nil
-	case "mcp-add", "mcp-login", "mcp-logout", "mcp-remove", "mcp-approve", "mcp-reject":
-		name, err := value(state.Name, "server name")
-		if err != nil {
-			return nil, false, err
-		}
-		switch action {
-		case "mcp-add":
-			args := []string{"mcp", "add"}
-			if state.MCPProject {
-				args = append(args, "--project")
-			}
-			if state.Transport == "http" {
-				u, err := url.Parse(strings.TrimSpace(state.URL))
-				if err != nil || u.Host == "" || u.Scheme != "http" && u.Scheme != "https" {
-					return nil, false, fmt.Errorf("Enter an http or https MCP URL")
-				}
-				headers, err := mcpPairs(state.Headers, "HTTP header")
-				if err != nil {
-					return nil, false, err
-				}
-				for _, header := range headers {
-					args = append(args, "--header", header)
-				}
-				// fx 0.0.15+: `mcp add [--project] [--header K=V]... NAME URL`.
-				return append(args, name, u.String()), false, nil
-			}
-			if state.Transport != "" && state.Transport != "stdio" {
-				return nil, false, fmt.Errorf("Unsupported MCP transport")
-			}
-			command, err := value(state.Command, "server executable")
-			if err != nil {
-				return nil, false, err
-			}
-			env, err := mcpPairs(state.Environment, "environment variable")
-			if err != nil {
-				return nil, false, err
-			}
-			for _, item := range env {
-				args = append(args, "--env", item)
-			}
-			// fx 0.0.15+: stdio arguments follow the `--` separator.
-			args = append(args, name, "--", command)
-			for _, arg := range strings.Split(strings.ReplaceAll(state.Arguments, "\r\n", "\n"), "\n") {
-				if arg != "" {
-					if strings.ContainsRune(arg, 0) {
-						return nil, false, fmt.Errorf("Arguments cannot contain NUL")
-					}
-					args = append(args, arg)
-				}
-			}
-			return args, false, nil
-		case "mcp-approve":
-			return []string{"mcp", "approve", name}, true, nil
-		case "mcp-reject":
-			return []string{"mcp", "reject", name}, true, nil
-		case "mcp-login":
-			return []string{"mcp", "login", name}, false, nil
-		case "mcp-logout":
-			return []string{"mcp", "logout", name}, true, nil
-		default:
-			return []string{"mcp", "remove", name}, true, nil
-		}
-	case "provider-set":
-		name, err := value(state.ProviderDefault, "provider name")
-		if err != nil {
-			return nil, false, err
-		}
-		return []string{"provider", name}, true, nil
-	case "upgrade-channel":
-		channel := strings.TrimSpace(state.Channel)
-		if channel != "stable" && channel != "dev" {
-			return nil, false, fmt.Errorf("Choose stable or dev")
-		}
-		return []string{"upgrade", "--channel", channel}, true, nil
-	case "models":
-		return []string{"models", "--json"}, false, nil
-	case "doctor":
-		return []string{"doctor", "--json"}, false, nil
-	case "credits":
-		return []string{"credits", "--json"}, false, nil
-	case "slack-status":
-		return []string{"slack", "status", "--json"}, false, nil
-	case "slack-install":
-		return []string{"slack", "install", "--json"}, true, nil
-	case "slack-refresh":
-		return []string{"slack", "refresh", "--json"}, true, nil
-	case "sessions-convert":
-		// fx 0.0.15 removed --sessions-v2; conversion is now the default
-		// store and `sessions convert` takes no global store flag.
-		return []string{"sessions", "convert", "--json"}, true, nil
-	case "workspace-list":
-		return []string{"workspace", "list", "--json"}, false, nil
-	case "workspace-clear":
-		return []string{"workspace", "clear"}, true, nil
-	case "workspace-add", "workspace-remove":
-		dir := strings.TrimSpace(state.Directory)
-		if !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) {
-			return nil, false, fmt.Errorf("Choose an absolute directory path")
-		}
-		if action == "workspace-add" {
-			if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-				return nil, false, fmt.Errorf("The additional directory must exist")
-			}
-		}
-		return []string{"workspace", strings.TrimPrefix(action, "workspace-"), filepath.Clean(dir)}, action == "workspace-remove", nil
-	case "session-inspect", "session-recover":
-		id, err := value(state.SessionID, "session id")
-		if err != nil {
-			return nil, false, err
-		}
-		if action == "session-inspect" {
-			return []string{"session", "--id", id, "--json"}, false, nil
-		}
-		// fx 0.0.15 removed `session migrate`; recovery is still available.
-		return []string{"session", "recover", "--id", id}, true, nil
-	case "launch":
-		if state.NoAdditionalDirs && strings.TrimSpace(state.AddDirs) != "" {
-			return nil, false, fmt.Errorf("Choose additional directories or ignore saved ones, not both")
-		}
-		var args []string
-		globals, err := launchGlobalArgs(state)
-		if err != nil {
-			return nil, false, err
-		}
-		args = append(args, globals...)
-		if strings.TrimSpace(state.ProviderOverride) != "" {
-			provider, err := value(state.ProviderOverride, "provider name")
-			if err != nil {
-				return nil, false, err
-			}
-			args = append(args, "--provider", provider)
-		}
-		if strings.TrimSpace(state.Model) != "" {
-			model, err := value(state.Model, "model id")
-			if err != nil {
-				return nil, false, err
-			}
-			args = append(args, "--model", model)
-		}
-		if strings.TrimSpace(state.Effort) != "" {
-			effort, err := value(state.Effort, "reasoning effort")
-			if err != nil {
-				return nil, false, err
-			}
-			args = append(args, "--effort", effort)
-		}
-		switch state.Fast {
-		case "", "default":
-		case "on":
-			args = append(args, "--fast")
-		case "off":
-			args = append(args, "--no-fast")
-		default:
-			return nil, false, fmt.Errorf("Choose default, on or off for fast mode")
-		}
-		switch state.Ultra {
-		case "", "default":
-		case "on":
-			args = append(args, "--ultrafast")
-		case "off":
-			args = append(args, "--no-ultrafast")
-		default:
-			return nil, false, fmt.Errorf("Choose default, on or off for Ultra mode")
-		}
-		if state.NoAdditionalDirs {
-			args = append(args, "--no-additional-dirs")
-		}
-		if strings.TrimSpace(state.LogPath) != "" {
-			path := strings.TrimSpace(state.LogPath)
-			if !filepath.IsAbs(path) || strings.ContainsRune(path, 0) {
-				return nil, false, fmt.Errorf("ACP log path must be absolute")
-			}
-			args = append(args, "--log-file", filepath.Clean(path))
-		}
-		return args, true, nil
-	}
-	return nil, false, fmt.Errorf("Unsupported operation: %s", action)
+	return management.Command(action, state.Form)
 }
 
-// mcpPairs validates the repeatable K=V flags fx accepts for MCP headers and
-// environment variables. Blank lines are ignored; each nonblank line must
-// have a nonempty key. Values stay one argv entry, exactly as typed.
-func mcpPairs(raw, label string) ([]string, error) {
-	var pairs []string
-	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.ContainsRune(line, 0) {
-			return nil, fmt.Errorf("%ss cannot contain NUL", label)
-		}
-		key, _, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(key) == "" {
-			return nil, fmt.Errorf("Each %s must use K=V", strings.ToLower(label))
-		}
-		pairs = append(pairs, line)
-	}
-	return pairs, nil
-}
-
-// launchGlobalArgs parses the flags fx accepts before its subcommand. Keeping
-// them out of the ACP argv is what lets `fx --context-limit ... acp` start
-// instead of rejecting the option as an ACP flag.
-func launchGlobalArgs(state chrome.ManagementState) ([]string, error) {
-	return globalArgsFromForm(state.ContextLimits, state.AddDirs, state.Project)
-}
-
-func globalArgsFromForm(contextLimits, addDirs, project string) ([]string, error) {
-	var args []string
-	for _, line := range strings.Split(strings.ReplaceAll(contextLimits, "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		name, value, ok := strings.Cut(line, "=")
-		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
-		if !ok || name == "" || value == "" {
-			return nil, fmt.Errorf("Context limits use NAME=BYTES or NAME=off")
-		}
-		for _, r := range name {
-			if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '_' {
-				return nil, fmt.Errorf("Context limit names use lowercase letters, digits and underscores")
-			}
-		}
-		if value != "off" {
-			if value == "" {
-				return nil, fmt.Errorf("Context limit values must be a byte count or off")
-			}
-			for _, r := range value {
-				if r < '0' || r > '9' {
-					return nil, fmt.Errorf("Context limit values must be a byte count or off")
-				}
-			}
-		}
-		args = append(args, "--context-limit", name+"="+value)
-	}
-	for _, line := range strings.Split(strings.ReplaceAll(addDirs, "\r\n", "\n"), "\n") {
-		dir := strings.TrimSpace(line)
-		if dir == "" {
-			continue
-		}
-		if !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) {
-			return nil, fmt.Errorf("Additional directories must be absolute paths")
-		}
-		dir = filepath.Clean(dir)
-		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-			return nil, fmt.Errorf("Additional directory does not exist: %s", dir)
-		}
-		if project != "" && filepath.Clean(project) == dir {
-			return nil, fmt.Errorf("The primary workspace cannot also be an additional directory")
-		}
-		args = append(args, "--add-dir", dir)
-	}
-	return args, nil
-}
-
-// githubCommand builds `fx pr` or `fx issue`. The context is a single argv
-// entry, never a shell string. `--create` is the external publishing step, so
-// the UI asks for confirmation before it runs.
+// githubCommand builds `fx pr` or `fx issue` from the panel's form.
 func githubCommand(state chrome.GitHubState) ([]string, bool, error) {
-	kind := strings.TrimSpace(state.Kind)
-	if kind != "pr" && kind != "issue" {
-		return nil, false, fmt.Errorf("Choose a pull request or an issue")
-	}
-	args := []string{kind}
-	if state.Auto {
-		args = append(args, "--auto")
-	}
-	if state.Create {
-		args = append(args, "--create")
-	}
-	context := strings.TrimSpace(state.Context)
-	if strings.ContainsRune(context, 0) {
-		return nil, false, fmt.Errorf("Context cannot contain NUL")
-	}
-	if context != "" {
-		// Keep a context that begins with a dash from becoming an fx flag.
-		if strings.HasPrefix(context, "-") {
-			args = append(args, "--")
-		}
-		args = append(args, context)
-	}
-	return args, state.Create, nil
+	return management.GitHub(management.GitHubForm{Kind: state.Kind, Context: state.Context, Auto: state.Auto, Create: state.Create})
 }
 
-func (c *Coordinator) openManagement(s *Session) {
+// globalArgsFromForm parses the flags fx accepts before its subcommand.
+func globalArgsFromForm(contextLimits, addDirs, project string) ([]string, error) {
+	return management.GlobalArgs(contextLimits, addDirs, project)
+}
+
+func (c *Coordinator) openManagement(s *ProjectWindow) {
 	if s.shell.Tools.Busy {
 		s.shell.Tools.Output = ""
 	}
@@ -378,13 +77,13 @@ func (c *Coordinator) openManagement(s *Session) {
 	s.invalidate()
 }
 
-func (c *Coordinator) openManagementPage(s *Session, page string) {
+func (c *Coordinator) openManagementPage(s *ProjectWindow, page string) {
 	c.openManagement(s)
 	s.shell.Tools.Page = page
 	s.invalidate()
 }
 
-func (c *Coordinator) sessionManagement(s *Session) chrome.ManagementHost {
+func (c *Coordinator) sessionManagement(s *ProjectWindow) chrome.ManagementHost {
 	return chrome.ManagementHost{
 		Run: func(action string) { mygo.App.WhenReady(func() { c.runManagement(s, action) }) },
 		PickDirectory: func() {
@@ -405,10 +104,7 @@ func (c *Coordinator) sessionManagement(s *Session) chrome.ManagementHost {
 			_ = mygo.Shell.OpenPath(path)
 		},
 		Resume: func(id, workspace string) {
-			mygo.App.WhenReady(func() {
-				if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-					return
-				}
+			s.dispatch(func() {
 				if workspace == "" {
 					workspace = s.project
 				}
@@ -445,7 +141,7 @@ func (c *Coordinator) sessionManagement(s *Session) chrome.ManagementHost {
 	}
 }
 
-func (c *Coordinator) runManagement(s *Session, action string) {
+func (c *Coordinator) runManagement(s *ProjectWindow, action string) {
 	if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
 		return
 	}
@@ -544,18 +240,7 @@ func (c *Coordinator) runManagement(s *Session, action string) {
 	c.runManagementJob(s, action, args)
 }
 
-func managementJobTimeout(action string) time.Duration {
-	switch action {
-	case "upgrade-channel":
-		return 10 * time.Minute
-	case "slack-install", "slack-refresh", "mcp-add-slack":
-		return 5 * time.Minute
-	case "sessions-convert", "session-recover":
-		return 2 * time.Minute
-	default:
-		return 60 * time.Second
-	}
-}
+func managementJobTimeout(action string) time.Duration { return management.JobTimeout(action) }
 
 // managementJobSummary turns machine-readable mutation output into a native
 // sentence where fx provides enough structure. Everything else stays as fx's
@@ -606,7 +291,7 @@ func managementJobSummary(action, text string, runErr error) string {
 	return text
 }
 
-func (c *Coordinator) runGitHubAction(s *Session) {
+func (c *Coordinator) runGitHubAction(s *ProjectWindow) {
 	state := &s.shell.Tools
 	if state.Busy || state.GitHub.Busy {
 		return
@@ -642,14 +327,13 @@ func (c *Coordinator) runGitHubAction(s *Session) {
 	state.GitHub.Output = "Running fx " + strings.Join(args, " ") + "…"
 	s.invalidate()
 	executable, dir := c.fxPathSnapshot(), s.project
+	scope, stop := s.scope("github")
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer stop()
+		ctx, cancel := context.WithTimeout(scope, 10*time.Minute)
 		defer cancel()
 		text, runErr := managementRead(ctx, executable, dir, args...)
-		mygo.App.WhenReady(func() {
-			if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-				return
-			}
+		s.dispatch(func() {
 			if state.GitHub.Generation != generation {
 				return
 			}
@@ -670,7 +354,7 @@ func (c *Coordinator) runGitHubAction(s *Session) {
 	}()
 }
 
-func (c *Coordinator) runManagementJob(s *Session, action string, args []string) {
+func (c *Coordinator) runManagementJob(s *ProjectWindow, action string, args []string) {
 	state := &s.shell.Tools
 	if state.Busy {
 		return
@@ -682,14 +366,13 @@ func (c *Coordinator) runManagementJob(s *Session, action string, args []string)
 	s.invalidate()
 	executable, dir := c.fxPathSnapshot(), s.project
 	timeout := managementJobTimeout(action)
+	scope, stop := s.scope("management")
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer stop()
+		ctx, cancel := context.WithTimeout(scope, timeout)
 		defer cancel()
 		text, runErr := managementRead(ctx, executable, dir, args...)
-		mygo.App.WhenReady(func() {
-			if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-				return
-			}
+		s.dispatch(func() {
 			state := &s.shell.Tools
 			if state.Generation != generation || !state.Open {
 				return
@@ -771,228 +454,26 @@ type managementReadResult struct {
 	sessionProblem string
 }
 
-func apiText(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var value any
-	if json.Unmarshal(raw, &value) != nil {
-		return string(raw)
-	}
-	compact, err := json.Marshal(value)
-	if err != nil {
-		return string(raw)
-	}
-	return string(compact)
-}
-
-func fact(label, value string) chrome.DetailFact {
-	return chrome.DetailFact{Label: label, Value: value}
-}
-
+// The management pages' models are the presenter's: it maps fx's JSON into
+// rows, sections and labels. These adapters keep the app's names for them.
 func detailsSections(status *FxStatus, permissions *FxPermissions, usage *FxUsage, failures []string) []chrome.DetailSection {
-	sections := make([]chrome.DetailSection, 0, 3)
-	if status != nil {
-		mode := status.Mode
-		if mode == "" {
-			mode = status.PermissionMode
-		}
-		ultra := "off"
-		if status.Ultrafast {
-			ultra = "on"
-		}
-		sections = append(sections, chrome.DetailSection{
-			Title: "Status",
-			Facts: []chrome.DetailFact{
-				fact("Model", status.Model),
-				fact("Model origin", status.ModelOrigin),
-				fact("Effort", valueOr(status.Effort, "auto")),
-				fact("Provider", status.ModelSource),
-				fact("Provider endpoint", status.ProviderEndpoint),
-				fact("Providers", strings.Join(status.ConnectedProviders, ", ")),
-				fact("Auth", status.Auth),
-				fact("Auth refreshable", yesNo(status.AuthRefreshable)),
-				fact("Permission mode", mode),
-				fact("Permission modes", modeIDs(status.Modes)),
-				fact("Update channel", status.UpdateChannel),
-				fact("Build channel", status.BuildChannel),
-				fact("Build revision", status.BuildRevision),
-				fact("Workspace", status.Workspace),
-				fact("History turns", fmt.Sprintf("%d", status.HistoryTurns)),
-				fact("Session grants", fmt.Sprintf("%d", status.SessionGrants)),
-				fact("Agent step limit", fmt.Sprintf("%d", status.AgentStepLimit)),
-				fact("Ultrafast", ultra),
-				fact("MCP servers", fmt.Sprintf("%d", len(status.MCP.Servers))),
-			},
-		})
-		if len(status.MCP.ConfigurationIssues) > 0 || rawPresent(status.MCP.InspectionError) {
-			var lines []string
-			lines = append(lines, status.MCP.ConfigurationIssues...)
-			if rawPresent(status.MCP.InspectionError) {
-				lines = append(lines, "Inspection: "+apiText(status.MCP.InspectionError))
-			}
-			sections = append(sections, chrome.DetailSection{Title: "MCP issues", Text: strings.Join(lines, "\n")})
-		}
-	}
-	if permissions != nil {
-		text := ""
-		if len(permissions.Rules) > 0 {
-			var lines []string
-			for i, rule := range permissions.Rules {
-				lines = append(lines, fmt.Sprintf("%d. %s", i+1, apiText(rule)))
-			}
-			text = strings.Join(lines, "\n")
-		}
-		sections = append(sections, chrome.DetailSection{
-			Title: "Permissions",
-			Facts: []chrome.DetailFact{
-				fact("Mode", permissions.Mode),
-				fact("Runtime grants", fmt.Sprintf("%d", permissions.GrantCount)),
-				fact("Runtime grants available", yesNo(permissions.RuntimeGrantsAvailable)),
-				fact("Grant scope", permissions.GrantScope),
-				fact("Rules scope", permissions.RulesScope),
-				fact("Persistent rules", fmt.Sprintf("%d", len(permissions.Rules))),
-			},
-			Text: text,
-		})
-		if len(permissions.Grants) > 0 {
-			var grants []string
-			for i, grant := range permissions.Grants {
-				grants = append(grants, fmt.Sprintf("%d. %s", i+1, apiText(grant)))
-			}
-			sections = append(sections, chrome.DetailSection{
-				Title: "Runtime grants",
-				Text:  strings.Join(grants, "\n") + "\nRevoking runtime grants is only available in fx's interactive shell.",
-			})
-		}
-	}
-	if usage != nil {
-		status := valueOr(usage.Status, usage.Completeness)
-		if usage.Reason != "" {
-			status += " (" + usage.Reason + ")"
-		}
-		sections = append(sections, chrome.DetailSection{
-			Title: "Usage · " + valueOr(usage.Period, "month"),
-			Facts: []chrome.DetailFact{
-				fact("Source", usage.Source),
-				fact("Status", status),
-				fact("Fetched", unixMSLabel(usage.FetchedAtMS)),
-				fact("Total tokens", compactCount(usage.Totals.TotalTokens)),
-				fact("Input", compactCount(usage.Totals.InputTokens)),
-				fact("Output", compactCount(usage.Totals.OutputTokens)),
-				fact("Reasoning", compactCount(usage.Totals.ReasoningTokens)),
-				fact("Cache read", compactCount(usage.Totals.CacheReadTokens)),
-				fact("Cache write", compactCount(usage.Totals.CacheWriteTokens)),
-				fact("Requests", fmt.Sprintf("%d", usage.Totals.RequestCount)),
-				fact("Spend", fmt.Sprintf("$%.2f", usage.Totals.Spend)),
-			},
-		})
-		var detail []string
-		if rawPresent(usage.Budget) {
-			detail = append(detail, "Budget: "+apiText(usage.Budget))
-		}
-		for i, model := range usage.Models {
-			if rawPresent(model) {
-				detail = append(detail, fmt.Sprintf("Model %d: %s", i+1, apiText(model)))
-			}
-		}
-		if rawPresent(usage.Codex) {
-			detail = append(detail, "Codex: "+apiText(usage.Codex))
-		}
-		if rawPresent(usage.Grok) {
-			detail = append(detail, "Grok: "+apiText(usage.Grok))
-		}
-		if len(detail) > 0 {
-			sections = append(sections, chrome.DetailSection{Title: "Usage detail", Text: strings.Join(detail, "\n")})
-		}
-	}
-	if len(failures) > 0 {
-		sections = append(sections, chrome.DetailSection{Title: "Unavailable", Text: strings.Join(failures, "\n")})
-	}
-	return sections
+	return presenter.Details(status, permissions, usage, failures)
 }
 
-func valueOr(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
-}
+func sessionDetailView(d *FxSessionDetail) *chrome.SessionDetail { return presenter.SessionDetail(d) }
 
-func yesNo(value bool) string {
-	if value {
-		return "yes"
-	}
-	return "no"
-}
+// valueOr keeps a blank form value from rendering as an empty cell.
+func valueOr(value, fallback string) string { return presenter.ValueOr(value, fallback) }
 
-func modeIDs(modes []FxMode) string {
-	ids := make([]string, 0, len(modes))
-	for _, mode := range modes {
-		if mode.ID != "" {
-			ids = append(ids, mode.ID)
-		}
-	}
-	return strings.Join(ids, ", ")
-}
+// apiText renders a JSON value as compact text.
+func apiText(raw json.RawMessage) string { return presenter.APIText(raw) }
 
-func rawPresent(raw json.RawMessage) bool {
-	value := strings.TrimSpace(string(raw))
-	return value != "" && value != "null"
-}
+// rawPresent reports whether fx sent a field rather than null.
+func rawPresent(raw json.RawMessage) bool { return presenter.RawPresent(raw) }
 
-func unixMSLabel(ms *int64) string {
-	if ms == nil || *ms <= 0 {
-		return ""
-	}
-	return time.UnixMilli(*ms).Format("2006-01-02 15:04 MST")
-}
+func slackStatusView(s *FxSlackStatus) chrome.SlackStatus { return presenter.SlackStatus(s) }
 
-// sessionDetailView turns `fx session --json` into the compact, read-only
-// rows the native Sessions page can render. Long assistant text is trimmed
-// here so a large saved conversation cannot dominate one frame.
-func sessionDetailView(d *FxSessionDetail) *chrome.SessionDetail {
-	if d == nil {
-		return nil
-	}
-	view := &chrome.SessionDetail{
-		ID:         d.ID,
-		Language:   d.ConversationLanguage,
-		HistoryLen: d.HistoryLen,
-	}
-	if d.CreatedAtMS > 0 {
-		view.Created = time.UnixMilli(d.CreatedAtMS).Format("2006-01-02 15:04 MST")
-	}
-	if d.UpdatedAtMS > 0 {
-		view.Updated = time.UnixMilli(d.UpdatedAtMS).Format("2006-01-02 15:04 MST")
-	}
-	for _, turn := range d.History {
-		view.Turns = append(view.Turns, chrome.SessionTurn{
-			Kind:      turn.Kind,
-			User:      truncateText(turn.User.Text, 2000),
-			Images:    len(turn.User.Images),
-			Assistant: truncateText(turn.Assistant, 2000),
-			Tools:     turn.CompletedToolNames,
-		})
-	}
-	return view
-}
-
-func slackStatusView(s *FxSlackStatus) chrome.SlackStatus {
-	if s == nil {
-		return chrome.SlackStatus{}
-	}
-	view := chrome.SlackStatus{Installed: s.Installed, AppID: s.AppID, TeamID: s.TeamID, BotUserID: s.BotUserID}
-	if s.ExpiresAtMS != nil && *s.ExpiresAtMS > 0 {
-		view.Expires = time.UnixMilli(*s.ExpiresAtMS).Format("2006-01-02 15:04 MST")
-	}
-	if s.RefreshExpiresAt != nil && *s.RefreshExpiresAt > 0 {
-		view.RefreshExpires = time.UnixMilli(*s.RefreshExpiresAt).Format("2006-01-02 15:04 MST")
-	}
-	return view
-}
-
-func (c *Coordinator) readManagement(s *Session, action string, args []string) {
+func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []string) {
 	state := &s.shell.Tools
 	period := state.Period
 	if period == "" {
@@ -1014,8 +495,10 @@ func (c *Coordinator) readManagement(s *Session, action string, args []string) {
 		// `mcp show` connects to the server to report status and tools.
 		timeout = 60 * time.Second
 	}
+	scope, stop := s.scope("management-read")
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer stop()
+		ctx, cancel := context.WithTimeout(scope, timeout)
 		defer cancel()
 		result := managementReadResult{}
 		switch action {
@@ -1164,10 +647,7 @@ func (c *Coordinator) readManagement(s *Session, action string, args []string) {
 			}
 			result.output += result.problem.Error()
 		}
-		mygo.App.WhenReady(func() {
-			if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-				return
-			}
+		s.dispatch(func() {
 			state := &s.shell.Tools
 			if state.Generation != generation || !state.Open {
 				return

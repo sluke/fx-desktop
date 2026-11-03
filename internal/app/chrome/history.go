@@ -6,25 +6,25 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+
+	"fx-desktop/internal/history"
 )
 
-type HistorySession struct {
-	ID, Title, Workspace string
-	UpdatedAtMS          int64
-}
+// HistorySession is one saved conversation.
+type HistorySession = history.Session
 
-// HistoryState is UI-owned. Paging metadata is snapshotted before each worker.
+// HistoryState is the panel's own state plus the query controller it renders.
+// The split is deliberate: Open, the search field, the delete progress and the
+// list's scroll position belong to the view; the cursor walk, the dedupe sets,
+// the request generation and the matches belong to history.Paging and are
+// snapshotted before every worker.
 type HistoryState struct {
-	Open, Busy, Loaded, Deleting, All, Exhausted      bool
-	DraftQuery, Query, Cursor, Problem, ResumeProblem string
-	Entries, Pending                                  []HistorySession
-	Seen, Cursors                                     map[string]bool
-	Scanned                                           int
-	Generation                                        uint64
-	List                                              ui.ListState
+	Open, Deleting bool
+	DraftQuery     string
+	ResumeProblem  string
+	List           ui.ListState
+	history.Paging
 }
-
-func (s *HistoryState) HasMore() bool { return s.Loaded && (!s.Exhausted || len(s.Pending) > 0) }
 
 type HistoryHost struct {
 	Run      func(action string)

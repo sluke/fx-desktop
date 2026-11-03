@@ -56,7 +56,7 @@ func TestDeriveAttentionPriority(t *testing.T) {
 }
 
 func TestSessionSummaryNamesCommandSession(t *testing.T) {
-	s := &Session{title: "fx doctor"}
+	s := &ProjectWindow{title: "fx doctor"}
 	sum := s.summary()
 	if sum.Title != "fx doctor" {
 		t.Fatalf("title = %q, want fx doctor", sum.Title)
@@ -70,7 +70,7 @@ func TestSessionSummaryNamesCommandSession(t *testing.T) {
 }
 
 func TestSessionSummaryFallsBackToProjectBase(t *testing.T) {
-	s := &Session{project: "/home/me/work/thing"}
+	s := &ProjectWindow{project: "/home/me/work/thing"}
 	if got := s.summary().Title; got != "thing" {
 		t.Fatalf("title = %q, want thing", got)
 	}
@@ -78,8 +78,8 @@ func TestSessionSummaryFallsBackToProjectBase(t *testing.T) {
 
 func TestSessionSummariesSortsRegistry(t *testing.T) {
 	c := &Coordinator{}
-	c.addSession(&Session{project: "/b", started: time.Now()})
-	c.addSession(&Session{project: "/a", started: time.Now()})
+	c.addSession(&ProjectWindow{project: "/b", started: time.Now()})
+	c.addSession(&ProjectWindow{project: "/a", started: time.Now()})
 	got := c.sessionSummaries()
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
@@ -97,7 +97,7 @@ func TestSessionSummariesDoNotCopyTranscripts(t *testing.T) {
 	for i := range chat.messages {
 		chat.messages[i] = chrome.ChatMessage{ID: uint64(i), Role: "assistant", Text: "x"}
 	}
-	c := &Coordinator{sessions: []*Session{{chat: chat, project: "/tmp/example", started: time.Now()}}}
+	c := &Coordinator{sessions: []*ProjectWindow{{chat: chat, project: "/tmp/example", started: time.Now()}}}
 	_ = c.sessionSummaries()
 
 	runtime.GC()

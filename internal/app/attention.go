@@ -8,7 +8,7 @@ import (
 )
 
 // attentionInput is the already-snapshotted state the rail state machine
-// needs. Keeping it a plain value — rather than a *Session or a chatSnapshot —
+// needs. Keeping it a plain value — rather than a *ProjectWindow or a chatSnapshot —
 // is what makes the derivation testable without an fx process.
 type attentionInput struct {
 	chat     bool // the session is a native ACP conversation
@@ -45,7 +45,7 @@ func deriveAttention(in attentionInput) chrome.Attention {
 
 // railID is the stable identity of a session on the rail: the workspace for a
 // project session, a synthetic id for a chrome-less command session.
-func (s *Session) railID() string {
+func (s *ProjectWindow) railID() string {
 	if s.project != "" {
 		return s.project
 	}
@@ -58,7 +58,7 @@ func (s *Session) railID() string {
 // LastActive is the session start for now. Real activity time needs a
 // timestamp the chat snapshot does not carry yet; the sort stays deterministic
 // in the meantime because workspace and title break the remaining ties.
-func (s *Session) summary() chrome.SessionSummary {
+func (s *ProjectWindow) summary() chrome.SessionSummary {
 	var (
 		branch     string
 		changes    int
@@ -67,15 +67,14 @@ func (s *Session) summary() chrome.SessionSummary {
 		git        *GitInfo
 		reviewedAt time.Time
 	)
-	s.mu.Lock()
-	if s.git != nil {
-		branch = s.git.Branch
-		changes = len(s.git.Changes)
+	git, reviewedAt = s.workspace.reviewSnapshot()
+	if git != nil {
+		branch = git.Branch
+		changes = len(git.Changes)
 	}
-	git = s.git
+	s.mu.Lock()
 	exited = s.exited
 	approval = s.attention
-	reviewedAt = s.reviewedAt
 	s.mu.Unlock()
 	// A change is "reviewed" when it is older than both the last commit and
 	// the last time the drawer was opened (§5, §12.0). Without that, every

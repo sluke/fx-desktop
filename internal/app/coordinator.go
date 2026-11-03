@@ -24,7 +24,7 @@ import (
 // (the UI thread). Everything else — git reads, fx --json queries, install
 // and upgrade — runs on its own goroutine and returns to the app loop via
 // mygo.App.WhenReady. Fields reachable from both sides are guarded by mu;
-// a Session's own fields are guarded by its own mutex.
+// a window's own fields are guarded by its own mutex.
 type Coordinator struct {
 	mu sync.Mutex
 
@@ -46,7 +46,14 @@ type Coordinator struct {
 	// session fail against the broken binary.
 	fxBroken bool
 
-	sessions   []*Session
+	sessions []*ProjectWindow
+	// sessionUse is which saved conversations this app may still write,
+	// independent of which windows are visible (T9). History deletion and
+	// conversation restore meet here.
+	sessionUse sessionRegistry
+	// windowSeq names windows for the app's lifetime. It is monotonic and
+	// never reused, so a queued closure cannot address a later window.
+	windowSeq  uint64
 	pickerWin  *mygo.Window
 	welcomeWin *mygo.Window
 	prefsWin   *mygo.Window
@@ -309,7 +316,7 @@ func (c *Coordinator) fxAuthNotice() chrome.AuthNotice {
 }
 
 // sessionFor finds the session that owns a project path, if any.
-func (c *Coordinator) sessionFor(path string) *Session {
+func (c *Coordinator) sessionFor(path string) *ProjectWindow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, s := range c.sessions {
@@ -323,7 +330,7 @@ func (c *Coordinator) sessionFor(path string) *Session {
 // sessionForWindow finds the session a menu accelerator should act on: the
 // window the click came from, else the frontmost live session. Window reads
 // go through winSnapshot — window-close callbacks may run concurrently.
-func (c *Coordinator) sessionForWindow(w *mygo.Window) *Session {
+func (c *Coordinator) sessionForWindow(w *mygo.Window) *ProjectWindow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if w != nil {
@@ -360,16 +367,16 @@ func (c *Coordinator) sessionCount() int {
 // sessionsSnapshot copies the session list under the lock. Callers that
 // only iterate — focus-all, repaint-all, second-instance handling — use it
 // so a window closing on another thread cannot mutate the slice mid-walk.
-func (c *Coordinator) sessionsSnapshot() []*Session {
+func (c *Coordinator) sessionsSnapshot() []*ProjectWindow {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]*Session, len(c.sessions))
+	out := make([]*ProjectWindow, len(c.sessions))
 	copy(out, c.sessions)
 	return out
 }
 
 // addSession registers a session under the lock.
-func (c *Coordinator) addSession(s *Session) {
+func (c *Coordinator) addSession(s *ProjectWindow) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sessions = append(c.sessions, s)
@@ -927,4 +934,12 @@ func (c *Coordinator) showAllWindows() {
 		c.pickerWin.Show()
 		c.pickerWin.Focus()
 	}
+}
+
+// nextWindowID hands out the next window identity.
+func (c *Coordinator) nextWindowID() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.windowSeq++
+	return c.windowSeq
 }

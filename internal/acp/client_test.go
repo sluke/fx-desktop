@@ -13,8 +13,15 @@ func pipeClient(t *testing.T, onEvent func(Packet)) (*Client, *json.Decoder, *js
 	t.Helper()
 	serverRead, clientWrite := io.Pipe()
 	clientRead, serverWrite := io.Pipe()
-	c := &Client{input: clientWrite, done: make(chan struct{}), pending: make(map[string]chan Packet), cancel: func() { clientRead.Close(); serverRead.Close() }, onEvent: onEvent}
-	go c.read(clientRead)
+	c := &Client{input: clientWrite, done: make(chan struct{}), exited: make(chan struct{}), pending: make(map[string]chan Packet), cancel: func() { clientRead.Close(); serverRead.Close() }, onEvent: onEvent}
+	go func() {
+		// Mirror the real pump: the protocol side is closed when reading ends.
+		err := c.read(clientRead)
+		if err == nil {
+			err = ErrClosed
+		}
+		c.finish(err)
+	}()
 	t.Cleanup(func() { c.Close(); serverWrite.Close() })
 	return c, json.NewDecoder(serverRead), json.NewEncoder(serverWrite)
 }

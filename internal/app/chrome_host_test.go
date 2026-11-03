@@ -150,7 +150,7 @@ func TestSessionSettingsPalettePreservesDraftAndResetsPicker(t *testing.T) {
 	c := NewCoordinator()
 	chat := newChatSession("/missing-local-stub", t.TempDir(), nil, nil)
 	defer chat.Close()
-	s := &Session{coord: c, project: t.TempDir(), chat: chat}
+	s := &ProjectWindow{coord: c, project: t.TempDir(), chat: chat}
 	s.chatUI.Draft = "keep this draft"
 	s.chatUI.ConfigOpen, s.chatUI.ConfigQuery = "model", "old filter"
 	c.runCommand(s, "session-settings")
@@ -165,7 +165,7 @@ func TestSessionSettingsPalettePreservesDraftAndResetsPicker(t *testing.T) {
 
 func TestSessionActionsWireFxIntegration(t *testing.T) {
 	c := NewCoordinator()
-	s := &Session{project: "/p/proj"}
+	s := &ProjectWindow{project: "/p/proj"}
 	a := c.sessionActions(s)
 	// Every fx-backed affordance must be wired, or the panel hides it.
 	if a.NewSession == nil || a.Commit == nil || a.RunCommand == nil ||
@@ -187,7 +187,7 @@ func TestSessionActionsWireFxIntegration(t *testing.T) {
 // work and the palette offers rows that open nothing.
 func TestCommandSessionHidesWorkspaceActions(t *testing.T) {
 	c := NewCoordinator()
-	a := c.sessionActions(&Session{})
+	a := c.sessionActions(&ProjectWindow{})
 	if a.Commit != nil || a.StageAll != nil ||
 		a.ResumeSession != nil || a.Ask != nil || a.ChooseConfig != nil {
 		t.Fatalf("workspace actions must stay unwired without a project: %+v", a)
@@ -218,7 +218,7 @@ func TestCommandSessionHidesWorkspaceActions(t *testing.T) {
 // sessionSummaries — it raises by the same id the rail shows.
 func TestSessionSummariesCoverEveryRegisteredSession(t *testing.T) {
 	c := NewCoordinator()
-	c.sessions = append(c.sessions, &Session{project: "/a"}, &Session{project: "/b"})
+	c.sessions = append(c.sessions, &ProjectWindow{project: "/a"}, &ProjectWindow{project: "/b"})
 	sums := c.sessionSummaries()
 	if len(sums) != 2 {
 		t.Fatalf("expected 2 rail rows, got %+v", sums)
@@ -234,11 +234,11 @@ func TestSessionSummariesCoverEveryRegisteredSession(t *testing.T) {
 
 func TestSessionDataCarriesGitAndSessions(t *testing.T) {
 	c := NewCoordinator()
-	s := &Session{
+	s := &ProjectWindow{
 		project: "/p/proj",
-		git:     &GitInfo{Branch: "main", Changes: []chrome.Change{{Path: "a.go", Kind: "M"}}},
 		saved:   []FxSession{{ID: "abc", Title: "Rename", UpdatedAtMS: time.Now().Add(-2 * time.Minute).UnixMilli(), HistoryLen: 3}},
 	}
+	s.workspace.setGit(&GitInfo{Branch: "main", Changes: []chrome.Change{{Path: "a.go", Kind: "M"}}}, nil)
 	d := c.sessionData(s)
 	if len(d.Changes) != 1 {
 		t.Fatalf("git data missing: %+v", d)
@@ -259,7 +259,7 @@ func TestSessionDataCarriesGitAndSessions(t *testing.T) {
 
 func TestRunCommandOpensDialogs(t *testing.T) {
 	c := NewCoordinator()
-	s := &Session{} // no workspace
+	s := &ProjectWindow{} // no workspace
 	c.runCommand(s, "ask")
 	if !s.shell.AskOpen {
 		t.Fatal("ask should open the quick-ask dialog")

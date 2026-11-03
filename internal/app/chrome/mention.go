@@ -2,77 +2,30 @@ package chrome
 
 import (
 	"strings"
-	"unicode"
 
 	"github.com/egoist/mygo/ui"
+
+	"fx-desktop/internal/workspace"
 )
 
 // MentionFile is one file the @ picker can offer. Path is what a mention
 // writes into the message — the project path, the way fx's own picker writes
 // it; Name and Dir are what a row shows.
-type MentionFile struct {
-	Path string
-	Name string
-	Dir  string
-	// LowerName and LowerPath are Name and Path folded once, when the project
-	// is listed. rankMentionFiles reads them so a frame does not fold the
-	// whole project again (§4.10.3). Empty means "fold on use", which is what
-	// a hand-built file in a test gets.
-	LowerName string
-	LowerPath string
-}
+type MentionFile = workspace.File
 
 // mentionLimit is how many rows the picker shows. fx's own picker shows up to
 // ten when the terminal has room; this one keeps a shorter list, so opening it
 // never buries the message being written.
 const mentionLimit = 8
 
-// A mention is @path, where path names a file in the project. The picker
-// completes one and the app resolves one when the message is sent, so the rule
-// for reading one lives here, once: the two must see the same message the same
-// way, or a name the picker wrote would arrive as prose. A mention opens a word
-// — an @ inside one is an address, not a mention — and ends where the name
-// does, at the space or the punctuation after it.
-
-// mentionBreak reports whether a rune leaves an @ opening a word: the space
-// between words, or the punctuation a sentence wraps a name in.
-func mentionBreak(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune("([{\"'", r)
-}
-
-// mentionEnd reports whether a rune ends the path a mention names.
-func mentionEnd(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(",;:)]}\"'", r)
-}
-
-// trimMention drops the punctuation a sentence leaves on the end of a name:
-// "@main.go," names main.go. Only the end is touched, so a name with dots in
-// it keeps them.
-func trimMention(path string) string { return strings.TrimRight(path, ".,;:!?") }
+// A mention is @path, where path names a file in the project. The rule for
+// reading one lives in the workspace package, once, because the picker and
+// the sender must see the same message the same way: otherwise a name the
+// picker wrote would arrive at fx as prose.
 
 // MentionPaths lists the paths a message names with @path, in the order they
-// appear and without repeats. It is what the app resolves when the message is
-// sent, and it reads a mention exactly as the picker writes one.
-func MentionPaths(text string) []string {
-	var paths []string
-	seen := make(map[string]bool)
-	runes := []rune(text)
-	for i := 0; i < len(runes); i++ {
-		if runes[i] != '@' || (i > 0 && !mentionBreak(runes[i-1])) {
-			continue
-		}
-		end := i + 1
-		for end < len(runes) && !mentionEnd(runes[end]) {
-			end++
-		}
-		if path := trimMention(string(runes[i+1 : end])); path != "" && !seen[path] {
-			seen[path] = true
-			paths = append(paths, path)
-		}
-		i = end - 1
-	}
-	return paths
-}
+// appear and without repeats.
+func MentionPaths(text string) []string { return workspace.MentionPaths(text) }
 
 // mentionAt reads the @ mention the caret is in: the query typed after the @,
 // and the rune range the mention occupies (start at the @, end at the caret).
@@ -82,7 +35,7 @@ func mentionAt(text string, caret int) (query string, start, end int, ok bool) {
 	runes := []rune(text)
 	caret = min(max(caret, 0), len(runes))
 	start = caret
-	for start > 0 && !mentionBreak(runes[start-1]) {
+	for start > 0 && !workspace.MentionBreak(runes[start-1]) {
 		start--
 	}
 	// The caret must be past the @ — sitting on it is not yet a mention — and
@@ -92,7 +45,7 @@ func mentionAt(text string, caret int) (query string, start, end int, ok bool) {
 		return "", 0, 0, false
 	}
 	for _, r := range runes[start+1 : caret] {
-		if mentionEnd(r) {
+		if workspace.MentionEnd(r) {
 			return "", 0, 0, false
 		}
 	}
@@ -205,9 +158,16 @@ func dismissMention(state *ConversationState) {
 // The caret follows on the next pass, after the field has taken the text: a
 // caret can only be moved while the pass that builds the field runs, and the
 // field keeps the caret it holds when it publishes a new value.
-func acceptMention(state *ConversationState, file MentionFile) {
+//
+// The insertion is an edit of the draft like any other: it is announced
+// through h.DraftEdited so a submission in flight keeps the field it did not
+// take (§B5).
+func acceptMention(state *ConversationState, h ConversationHost, file MentionFile) {
 	caret := state.MentionStart + len([]rune(mentionText(file.Path)))
 	state.Draft = mentionInsertion(state.Draft, state.MentionStart, state.MentionEnd, file.Path)
+	if h.DraftEdited != nil {
+		h.DraftEdited()
+	}
 	state.MentionCaretAt, state.MentionCaretPending = caret, true
 	dismissMention(state)
 	state.MentionStart, state.MentionEnd, state.MentionQuery = 0, 0, ""
@@ -242,7 +202,7 @@ func mentionKey(state *ConversationState, h ConversationHost, k ui.TextKey) bool
 		if !ok {
 			return false
 		}
-		acceptMention(state, file)
+		acceptMention(state, h, file)
 		// The editor still holds the draft as it was: hand it the completed
 		// text, which is what the bound value now says too.
 		k.SetText(state.Draft)
@@ -321,7 +281,7 @@ func mentionPicker(c *ui.Context, state *ConversationState, h ConversationHost, 
 				switch {
 				case len(rows) > 0:
 					for i, file := range rows {
-						mentionRow(c, state, p, file, i == active)
+						mentionRow(c, state, h, p, file, i == active)
 					}
 				case h.MentionLoading:
 					ui.Text(c, "Reading this project…").FontSize(12).TextColor(p.InkMuted).Padding(12, 10)
@@ -336,9 +296,9 @@ func mentionPicker(c *ui.Context, state *ConversationState, h ConversationHost, 
 
 // mentionRow is one file. What the message will say is the path, so the row
 // shows the name it is found by first and the folder it lives in second.
-func mentionRow(c *ui.Context, state *ConversationState, p Palette, file MentionFile, active bool) {
+func mentionRow(c *ui.Context, state *ConversationState, h ConversationHost, p Palette, file MentionFile, active bool) {
 	row := ui.Row(c).Key("mention:"+file.Path).FillWidth().Padding(5, 10).AlignItems(ui.Center).Gap(8).
-		OnClick(func() { acceptMention(state, file) })
+		OnClick(func() { acceptMention(state, h, file) })
 	if active {
 		row.Background(p.Sunken)
 	}

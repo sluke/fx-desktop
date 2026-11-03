@@ -35,6 +35,12 @@ type Packet struct {
 
 // Client can have a prompt in flight while receiving permission requests.
 // Its reader never waits for the UI, nor for a request it is responsible for reading.
+//
+// Two completion signals are kept apart on purpose (§4.3): Done reports that
+// the protocol connection is unusable, so every pending RPC can give up;
+// Exited reports that the direct fx child has been reaped by cmd.Wait, so the
+// process (and the pipes it owned) is really gone. Closing a session waits for
+// the second before a replacement is started.
 type Client struct {
 	mu      sync.Mutex
 	writeMu sync.Mutex
@@ -42,10 +48,14 @@ type Client struct {
 	pending map[string]chan Packet
 	input   io.WriteCloser
 	done    chan struct{}
-	once    sync.Once
 	cancel  context.CancelFunc
 	err     error
+	exited  chan struct{}
+	exitErr error
 	onEvent func(Packet)
+
+	doneOnce sync.Once
+	exitOnce sync.Once
 }
 
 func Start(ctx context.Context, executable, dir string, args []string, onEvent func(Packet)) (*Client, error) {
@@ -84,19 +94,25 @@ func StartWithGlobals(ctx context.Context, executable, dir string, globals, args
 		cancel()
 		return nil, err
 	}
-	c := &Client{input: input, done: make(chan struct{}), pending: make(map[string]chan Packet), cancel: cancel, onEvent: onEvent}
+	c := &Client{input: input, done: make(chan struct{}), exited: make(chan struct{}), pending: make(map[string]chan Packet), cancel: cancel, onEvent: onEvent}
 	go func() {
-		c.read(output)
-		err := cmd.Wait()
-		if err == nil {
-			err = ErrClosed
+		// The protocol side ends first: a scanner error, EOF or an unparsable
+		// frame means no reply can arrive, so waiters are released now. The
+		// process itself is reaped afterwards and only then is Exited closed.
+		readErr := c.read(output)
+		if readErr == nil {
+			readErr = ErrClosed
 		}
-		c.finish(err)
+		c.finish(readErr)
+		waitErr := cmd.Wait()
+		c.markExited(waitErr)
 	}()
 	return c, nil
 }
 
-func (c *Client) read(r io.Reader) {
+// read decodes frames until the stream ends. It reports why it stopped; the
+// caller decides what that means for the connection.
+func (c *Client) read(r io.Reader) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 8192), 8*1024*1024)
 	for scanner.Scan() {
@@ -105,8 +121,7 @@ func (c *Client) read(r io.Reader) {
 		}
 		var p Packet
 		if err := json.Unmarshal(scanner.Bytes(), &p); err != nil || p.JSONRPC != "2.0" {
-			c.finish(errors.New("fx sent an invalid ACP frame"))
-			return
+			return errors.New("fx sent an invalid ACP frame")
 		}
 		if p.Method != "" {
 			if c.onEvent != nil {
@@ -122,14 +137,14 @@ func (c *Client) read(r io.Reader) {
 			ch <- p
 		}
 	}
-	err := scanner.Err()
-	if err == nil {
-		err = ErrClosed
-	}
-	c.finish(err)
+	return scanner.Err()
 }
+
+// finish marks the protocol connection closed. It is idempotent and never
+// blocks: it only records the reason, releases every waiter and makes the
+// process stop reading, so the reaping goroutine can run.
 func (c *Client) finish(err error) {
-	c.once.Do(func() {
+	c.doneOnce.Do(func() {
 		c.mu.Lock()
 		c.err = err
 		c.mu.Unlock()
@@ -139,21 +154,60 @@ func (c *Client) finish(err error) {
 	})
 }
 
+// markExited records that cmd.Wait returned: the direct child is reaped.
+func (c *Client) markExited(err error) {
+	c.exitOnce.Do(func() {
+		c.mu.Lock()
+		c.exitErr = err
+		c.mu.Unlock()
+		close(c.exited)
+	})
+}
+
 // Shutdown lets fx observe stdin EOF and cancel/reap its own tool processes.
-// The caller runs this off the app loop; an unresponsive process is bounded.
-func (c *Client) Shutdown() {
+// The polite wait is bounded by grace; if it elapses the process is killed and
+// reaping is still awaited, bounded by ctx. A nil error means the process was
+// confirmed reaped, not merely signalled — callers use that to decide whether
+// a replacement may start (§4.3).
+//
+// The caller runs this off the app loop.
+func (c *Client) Shutdown(ctx context.Context, grace time.Duration) error {
 	c.input.Close()
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
+	polite := time.NewTimer(grace)
+	defer polite.Stop()
 	select {
-	case <-c.done:
-	case <-timer.C:
+	case <-c.exited:
+		return nil
+	case <-polite.C:
+	case <-ctx.Done():
 		c.Close()
+		return ctx.Err()
+	}
+	// fx did not exit on its own; terminate it and still confirm reaping.
+	c.Close()
+	select {
+	case <-c.exited:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("fx did not exit: %w", ctx.Err())
 	}
 }
-func (c *Client) Close()                { c.finish(ErrClosed) }
+
+// Close tears the connection down. It is idempotent and does not wait: the
+// reaping goroutine closes Exited afterwards.
+func (c *Client) Close() { c.finish(ErrClosed) }
+
+// Done reports that the protocol connection is unusable.
 func (c *Client) Done() <-chan struct{} { return c.done }
-func (c *Client) Err() error            { c.mu.Lock(); defer c.mu.Unlock(); return c.err }
+
+// Exited reports that the direct fx child has been reaped by cmd.Wait. It does
+// not claim anything about tools fx detached from itself.
+func (c *Client) Exited() <-chan struct{} { return c.exited }
+
+func (c *Client) Err() error { c.mu.Lock(); defer c.mu.Unlock(); return c.err }
+
+// ExitErr is cmd.Wait's result, meaningful only after Exited is closed.
+func (c *Client) ExitErr() error { c.mu.Lock(); defer c.mu.Unlock(); return c.exitErr }
 
 func (c *Client) write(v any) error {
 	b, err := json.Marshal(v)

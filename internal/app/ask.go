@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/egoist/mygo"
-
 	"fx-desktop/internal/app/chrome"
 )
 
@@ -186,7 +184,7 @@ func askResultMeta(result fxAskResult) string {
 	return strings.Join(parts, " · ")
 }
 
-func (c *Coordinator) runAsk(s *Session, req chrome.AskRequest) {
+func (c *Coordinator) runAsk(s *ProjectWindow, req chrome.AskRequest) {
 	args, err := askArgs(req)
 	if err != nil {
 		s.shell.AskBusy = false
@@ -202,16 +200,15 @@ func (c *Coordinator) runAsk(s *Session, req chrome.AskRequest) {
 	s.shell.AskMeta = ""
 	s.invalidate()
 	executable, dir := c.fxPathSnapshot(), s.project
+	scope, stop := s.scope("ask")
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer stop()
+		ctx, cancel := context.WithTimeout(scope, 10*time.Minute)
 		defer cancel()
 		text, runErr := managementReadLimit(ctx, executable, dir, 2*1024*1024, args...)
 		var result fxAskResult
 		parsed := json.Unmarshal([]byte(text), &result) == nil
-		mygo.App.WhenReady(func() {
-			if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-				return
-			}
+		s.dispatch(func() {
 			if s.shell.AskGeneration != generation {
 				return
 			}

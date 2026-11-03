@@ -81,7 +81,7 @@ func TestSessionButtonsDeferNativeDialogs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			testutil.IsolateHome(t)
 			c := NewCoordinator()
-			s := &Session{coord: c, project: tc.data.ProjectPath, shell: chrome.DefaultShell()}
+			s := &ProjectWindow{coord: c, project: tc.data.ProjectPath, shell: chrome.DefaultShell()}
 			s.shell.ReviewOpen = tc.review
 			ts := ui.NewTester(func(ctx *ui.Context) {
 				chrome.Frame(ctx, chrome.Host{

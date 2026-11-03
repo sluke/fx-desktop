@@ -107,7 +107,7 @@ func resolveFileManagerPath(path string) (string, error) {
 // A project window gets that flow in its console drawer, where the login can
 // actually be typed into (§4.7); a window with no session to hang a drawer on
 // gets a command window, as every command did before.
-func (c *Coordinator) signIn(s *Session) {
+func (c *Coordinator) signIn(s *ProjectWindow) {
 	if s != nil && s.project != "" {
 		c.consoleIn(s, "fx login", "login")
 		return
@@ -118,7 +118,7 @@ func (c *Coordinator) signIn(s *Session) {
 // sessionActions extends the shared actions with the ones only a project
 // session offers: new sessions, palette dispatch, commits, slash commands
 // typed into the terminal, and the fx launch options.
-func (c *Coordinator) sessionActions(s *Session) chrome.Actions {
+func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	a := c.chromeActions(s.winSnapshot())
 	a.NewSession = nativeAction(func() {
 		if s.chat != nil {
@@ -149,14 +149,14 @@ func (c *Coordinator) sessionActions(s *Session) chrome.Actions {
 	a.ManageWorkspace = func() { c.openManagement(s) }
 	a.OpenHistory = func() { mygo.App.WhenReady(func() { c.openHistory(s) }) }
 	a.Commit = nativeAction(func() { c.commitChanges(s) })
-	a.RefreshChanges = nativeAction(func() { go s.refreshGit() })
+	a.RefreshChanges = nativeAction(func() { s.startGitRefresh() })
 	// The review drawer reads one workspace's tree. A command window has
 	// none, so it gets no entry point — not even a status-strip button.
 	// A project that is not a git repository has nothing the drawer could
 	// ever show either: the rail's Changes line says so, and neither the
 	// strip nor the palette offers a dead end. The menu item stays, as the
 	// console's does, and opens that same answer.
-	if s.workspace() != chrome.WorkspaceNotRepo {
+	if s.workspace.state() != chrome.WorkspaceNotRepo {
 		a.ToggleReview = nativeAction(func() { c.toggleReview(s) })
 	}
 	a.CloseReview = nativeAction(func() { c.closeReview(s) })
@@ -194,7 +194,7 @@ func (c *Coordinator) sessionActions(s *Session) chrome.Actions {
 
 // openConfig keeps palette configuration and inline configuration on one state.
 // An empty id opens the complete list, including the hidden permission mode.
-func (s *Session) openConfig(configID string) {
+func (s *ProjectWindow) openConfig(configID string) {
 	s.chatUI.ConfigListOpen = configID == ""
 	s.chatUI.ConfigOpen = configID
 	s.chatUI.ConfigQuery = ""
@@ -286,7 +286,7 @@ func invalidateWin(w *mygo.Window) {
 	}
 }
 
-func (c *Coordinator) runCommand(s *Session, id string) {
+func (c *Coordinator) runCommand(s *ProjectWindow, id string) {
 	switch id {
 	case "workspace-tools":
 		c.openManagement(s)
@@ -344,7 +344,7 @@ func (c *Coordinator) runCommand(s *Session, id string) {
 	case "docs":
 		_ = mygo.Shell.OpenExternal("https://fx.sh/docs")
 	case "refresh-git":
-		go s.refreshGit()
+		s.startGitRefresh()
 	case "review-changes":
 		c.toggleReview(s)
 	case "session-interrupt":
@@ -355,7 +355,7 @@ func (c *Coordinator) runCommand(s *Session, id string) {
 			s.term.Send([]byte{0x03})
 		}
 	case "refresh-status":
-		go s.refreshFxInfo()
+		s.startFxRefresh()
 	case "focus-attention":
 		c.focusNextAttention(s)
 	}
@@ -369,18 +369,13 @@ func (c *Coordinator) runCommand(s *Session, id string) {
 // the user confirms before anything is staged. Second, git runs off the UI
 // thread — a 30s commit must not freeze the window — and reports back
 // through the app loop, where alone a dialog may be shown.
-func (c *Coordinator) commitChanges(s *Session) {
+func (c *Coordinator) commitChanges(s *ProjectWindow) {
 	msg := strings.TrimSpace(s.shell.CommitMsg)
 	if msg == "" {
 		mygo.Dialog.Error("Commit", "Write a commit message first")
 		return
 	}
-	n := 0
-	s.mu.Lock()
-	if s.git != nil {
-		n = len(s.git.Changes)
-	}
-	s.mu.Unlock()
+	n := s.workspace.changeCount()
 	detail := "This stages every change in the working tree and commits it."
 	if n > 0 {
 		detail = fmt.Sprintf("This stages all %d changed file(s) and commits them.", n)
@@ -396,18 +391,18 @@ func (c *Coordinator) commitChanges(s *Session) {
 		return
 	}
 	go func() {
-		out, err := runGitCommand(context.Background(), s.project, "add", "-A")
+		out, err := runGitCommand(s.lifetime(), s.project, "add", "-A")
 		if err == nil {
-			out, err = runGitCommand(context.Background(), s.project, "commit", "-m", msg)
+			out, err = runGitCommand(s.lifetime(), s.project, "commit", "-m", msg)
 		}
 		finalOut, finalErr := out, err
-		mygo.App.WhenReady(func() {
+		s.dispatch(func() {
 			if finalErr != nil {
 				mygo.Dialog.Error("Commit", firstLine(finalOut))
 				return
 			}
 			s.shell.CommitMsg = ""
-			go s.refreshGit()
+			s.startGitRefresh()
 		})
 	}()
 }
@@ -426,13 +421,8 @@ func runGitCommand(ctx context.Context, dir string, args ...string) ([]byte, err
 // `git add -A` is recoverable (a reset undoes it), so it sits one rung
 // below the irreversible actions — but it still stages everything, so it
 // asks first rather than silently restaging files the user had kept out.
-func (c *Coordinator) stageAll(s *Session) {
-	n := 0
-	s.mu.Lock()
-	if s.git != nil {
-		n = len(s.git.Changes)
-	}
-	s.mu.Unlock()
+func (c *Coordinator) stageAll(s *ProjectWindow) {
+	n := s.workspace.changeCount()
 	detail := "Every change in the working tree will be staged."
 	if n > 0 {
 		detail = fmt.Sprintf("All %d changed file(s) will be staged.", n)
@@ -448,14 +438,14 @@ func (c *Coordinator) stageAll(s *Session) {
 		return
 	}
 	go func() {
-		out, err := runGitCommand(context.Background(), s.project, "add", "-A")
+		out, err := runGitCommand(s.lifetime(), s.project, "add", "-A")
 		finalOut, finalErr := out, err
-		mygo.App.WhenReady(func() {
+		s.dispatch(func() {
 			if finalErr != nil {
 				mygo.Dialog.Error("Stage all", firstLine(finalOut))
 				return
 			}
-			go s.refreshGit()
+			s.startGitRefresh()
 		})
 	}()
 }
@@ -499,18 +489,19 @@ func (c *Coordinator) sidebarData(project string, welcome *welcomeModel) chrome.
 
 // sessionData feeds the rail: the workspace's changes from git, fx's saved
 // conversations, and the models the session can switch to.
-func (c *Coordinator) sessionData(s *Session) chrome.SidebarData {
+func (c *Coordinator) sessionData(s *ProjectWindow) chrome.SidebarData {
 	d := chrome.SidebarData{
 		ProjectPath: s.project,
 		FxVersion:   c.fxVersionSnapshot(),
 		Recent:      c.recentPaths(),
 	}
-	s.mu.Lock()
-	if s.git != nil {
-		d.Changes = s.git.Changes
+	git, gitErr := s.workspace.gitSnapshot()
+	if git != nil {
+		d.Changes = git.Changes
 	}
-	d.Workspace = workspaceState(s.git, s.gitErr)
+	d.Workspace = workspaceState(git, gitErr)
 	now := time.Now()
+	s.mu.Lock()
 	for _, x := range s.saved {
 		d.Saved = append(d.Saved, chrome.SavedSession{
 			ID:     x.ID,
@@ -548,7 +539,7 @@ func (c *Coordinator) focusSession(id string) {
 
 // focusNextAttention raises the top-most session that wants the user, which
 // is what ⌘] and the palette's "Focus next session needing you" promise.
-func (c *Coordinator) focusNextAttention(current *Session) {
+func (c *Coordinator) focusNextAttention(current *ProjectWindow) {
 	active := ""
 	if current != nil {
 		active = current.railID()

@@ -12,8 +12,15 @@ import (
 	"time"
 
 	"fx-desktop/internal/acp"
-	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/conversation"
 	"fx-desktop/internal/sessionstats"
+)
+
+// shutdownGrace is how long fx is given to exit after stdin EOF before it is
+// terminated; shutdownTimeout bounds the whole teardown, kill included.
+const (
+	shutdownGrace   = time.Second
+	shutdownTimeout = 5 * time.Second
 )
 
 // queuedPrompt is one message waiting for the running turn to end. The text
@@ -27,15 +34,78 @@ type queuedPrompt struct {
 
 // chatSession is independent of frame state. Workers publish snapshots; rendering
 // never waits for a process, network, approval, or mutex held over I/O.
+// closeResult is the evidence the one teardown leaves behind (§4.1). A
+// replacement conversation may start only on a reaped result: the process is
+// confirmed gone, or it was definitely never created. problem explains a
+// teardown that could not establish that.
+type closeResult struct {
+	reaped  bool
+	problem error
+}
+
 type chatSession struct {
+	// closedDone is closed once the teardown has a result: the fx process is
+	// confirmed reaped, or there is definitely no process. A replacement
+	// conversation waits on it and then reads that result (§4.3).
 	closedDone chan struct{}
-	notices    []string
-	mu         sync.Mutex
-	client     *acp.Client
-	cancel     context.CancelFunc
-	ctx        context.Context
-	project    string
-	executable string
+	closeOnce  sync.Once
+	// closeResult is written before closedDone is closed, so a consumer that
+	// waited on the signal reads a definite answer rather than reassembling
+	// one from a nil client and an empty ExitProblem (R1).
+	closeResult closeResult
+	// shutdownOnce makes exactly one goroutine the owner of process
+	// termination (R2). A start that fails hands the process to it instead
+	// of killing the process itself, so a polite stdin-EOF exit is still
+	// possible.
+	shutdownOnce sync.Once
+	// started records whether the connection attempt ever began: a session
+	// that never connected has no process to reap.
+	started bool
+	// processDone is closed once the process exists or its creation failed —
+	// before any handshake RPC, and only after that result is published
+	// under mu. Close waits on this, not on a finished start: being able to
+	// reap must not be delayed by an initialize, session/new or session/load
+	// that is still in flight (§4.2, N3).
+	processDone chan struct{}
+	processOnce sync.Once
+	// processErr is the creation result published alongside client: non-nil
+	// means fx was never created. It is read under mu, after processDone.
+	processErr error
+	// startedHook is a test seam that runs after acp.StartWithGlobals
+	// returned and before the handle is published — the window R1 is about.
+	// It is nil in the app.
+	startedHook func()
+	// publishHook is a test seam at the publication boundary: it runs after
+	// the creation result is readable and before it is announced. An
+	// announcement that overtook the publication is exactly the R1 defect,
+	// and it is observable here without depending on a scheduler.
+	publishHook func()
+	// handshakeCtx bounds the opening RPCs and is cancelled by Close, so a
+	// stalled handshake is released at once. It is separate from ctx on
+	// purpose: cancelling a handshake must not be the same act as killing the
+	// process, which gets its bounded stdin-EOF grace instead.
+	handshakeCtx    context.Context
+	handshakeCancel context.CancelFunc
+	notices         []string
+	mu              sync.Mutex
+	client          *acp.Client
+	cancel          context.CancelFunc
+	ctx             context.Context
+	project         string
+	executable      string
+	// registry is the app-level record of which saved conversations this app
+	// may write to, and which conversation may write which one (T9, T15). It
+	// is deliberately not the window list: a conversation whose window has
+	// closed keeps its claim until its process is confirmed reaped, because fx
+	// may still be writing that directory. sessionClaims are this
+	// conversation's places in it — the bookings taken before the RPCs that
+	// open each ID, and the exclusive lease once acquired. There can be more
+	// than one: fx may answer session/load with a different conversation, and
+	// the directory it was told to load is still open in that process, so its
+	// lease is held until this conversation's process is confirmed gone (S6).
+	registry      *sessionRegistry
+	sessionUseID  string
+	sessionClaims []*sessionClaim
 	// args are the flags fx acp itself accepts. globalArgs are the fx launch
 	// flags that must precede the `acp` subcommand (context-limit, add-dir and
 	// no-additional-dirs); app-only flags such as effort and fast are applied
@@ -44,14 +114,14 @@ type chatSession struct {
 	globalArgs []string
 	resume     string
 	sessionID  string
-	messages   []chrome.ChatMessage
+	messages   []conversation.Message
 	byID       map[string]int
 	// viewMessages is the transcript the window renders. It is kept in sync
 	// with messages incrementally: copying a session-sized transcript on every
 	// frame is O(messages) allocation just to read one screen of it
 	// (§4.10.6). snapshotForView owns this slice and may reuse its storage;
 	// snapshot() still returns an independent copy for callers that keep it.
-	viewMessages []chrome.ChatMessage
+	viewMessages []conversation.Message
 	viewDirty    map[int]struct{}
 	// streams holds the builder a message is still arriving into. Appending
 	// a chunk to a string copies everything already received, so a long
@@ -92,8 +162,8 @@ type chatSession struct {
 	stats *sessionstats.Store
 	// configs and modes are the session's live configuration, taken from
 	// fx's answer to session/new and refreshed by every set_config_option.
-	configs []chrome.ConfigOption
-	modes   []chrome.ModeOption
+	configs []conversation.ConfigOption
+	modes   []conversation.ModeOption
 	// effort, fast and ultra are accepted by fx through the same
 	// session/set_config_option method even though session/new does not list
 	// them. They are model-dependent; an unsupported value is reported on the
@@ -108,7 +178,7 @@ type chatSession struct {
 	// first turn as session_info_update, so it is empty until then.
 	title                string
 	problem, model, mode string
-	permission           *chrome.ChatPermission
+	permission           *conversation.Permission
 	changed              func()
 }
 
@@ -126,30 +196,30 @@ type configOptionWire struct {
 	} `json:"options"`
 }
 
-func toConfigOptions(entries []configOptionWire) []chrome.ConfigOption {
-	out := make([]chrome.ConfigOption, 0, len(entries))
+func toConfigOptions(entries []configOptionWire) []conversation.ConfigOption {
+	out := make([]conversation.ConfigOption, 0, len(entries))
 	for _, e := range entries {
-		option := chrome.ConfigOption{ID: e.ID, Name: e.Name, Category: e.Category, Type: e.Type, CurrentValue: e.CurrentValue}
+		option := conversation.ConfigOption{ID: e.ID, Name: e.Name, Category: e.Category, Type: e.Type, CurrentValue: e.CurrentValue}
 		for _, choice := range e.Options {
-			option.Options = append(option.Options, chrome.ConfigChoice{Value: choice.Value, Name: choice.Name})
+			option.Options = append(option.Options, conversation.ConfigChoice{Value: choice.Value, Name: choice.Name})
 		}
 		out = append(out, option)
 	}
 	return out
 }
 
-func findConfigOption(options []chrome.ConfigOption, id string) (chrome.ConfigOption, bool) {
+func findConfigOption(options []conversation.ConfigOption, id string) (conversation.ConfigOption, bool) {
 	for _, o := range options {
 		if o.ID == id {
 			return o, true
 		}
 	}
-	return chrome.ConfigOption{}, false
+	return conversation.ConfigOption{}, false
 }
 
 type chatSnapshot struct {
 	Notices                               []string
-	Messages                              []chrome.ChatMessage
+	Messages                              []conversation.Message
 	Ready, Busy, Stopping, ConfigChanging bool
 	// Steering is fx's capability; Queued is how many messages are waiting
 	// for the running turn to end.
@@ -166,8 +236,8 @@ type chatSnapshot struct {
 	ContextUsed, ContextTotal int
 	InputTokens, OutputTokens int
 	// Configs, Modes and Mode are what fx says this session may be set to.
-	Configs []chrome.ConfigOption
-	Modes   []chrome.ModeOption
+	Configs []conversation.ConfigOption
+	Modes   []conversation.ModeOption
 	Mode    string
 	// SessionTitle is fx's generated conversation name, empty until the
 	// first turn names it.
@@ -178,12 +248,25 @@ type chatSnapshot struct {
 	// session.
 	Effort, AdvancedProblem string
 	Fast, Ultra             bool
-	Permission              *chrome.ChatPermission
+	Permission              *conversation.Permission
 }
 
 func newChatSession(executable, project string, args []string, changed func()) *chatSession {
-	ctx, cancel := context.WithCancel(context.Background())
-	c := &chatSession{closedDone: make(chan struct{}), ctx: ctx, cancel: cancel, executable: executable, project: project, byID: make(map[string]int), changed: changed, effort: "auto"}
+	return newChatSessionWithContext(context.Background(), executable, project, args, changed)
+}
+
+// newChatSessionWithContext gives a connection its own cancellation scope.
+// It is deliberately not derived from the window context: closing a window must
+// not yank the ACP process away before it has had its stdin-EOF grace period.
+// The session's own Close performs that shutdown and then cancels this scope;
+// the window's context only stops the window's other background work (§2.1).
+func newChatSessionWithContext(ctx context.Context, executable, project string, args []string, changed func()) *chatSession {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	handshakeCtx, handshakeCancel := context.WithCancel(ctx)
+	c := &chatSession{closedDone: make(chan struct{}), processDone: make(chan struct{}), ctx: ctx, cancel: cancel, handshakeCtx: handshakeCtx, handshakeCancel: handshakeCancel, executable: executable, project: project, byID: make(map[string]int), changed: changed, effort: "auto"}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--sessions-v2":
@@ -262,22 +345,10 @@ func (c *chatSession) canTakeImages() bool {
 }
 
 // snapshot returns the shell's view of the session.
-// chatStatus is the chat's state without its transcript. The rail, the agent
-// strip and the sidebar read it every frame; copying the message slice for
-// them made a long conversation pay for itself several times a frame
-// (§4.10.4).
-type chatStatus struct {
-	Ready, Busy, Stopping, ConfigChanging bool
-	// Permission says a turn is waiting on an approval; the request itself
-	// belongs to the transcript view.
-	Permission                              bool
-	Steering, Images, Files                 bool
-	Queued                                  int
-	ContextUsed, ContextTotal, MessageCount int
-	InputTokens, OutputTokens               int
-	Problem, Model, Mode, SessionID         string
-	SessionTitle                            string
-}
+// chatStatus is the conversation's state without its transcript; the type
+// belongs to the conversation package because it is business state, not a
+// rendering decision.
+type chatStatus = conversation.Status
 
 func (c *chatSession) statusLocked() chatStatus {
 	return chatStatus{
@@ -358,7 +429,7 @@ func (c *chatSession) saveStats() {
 func (c *chatSession) snapshot() chatSnapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.snapshotLocked(append([]chrome.ChatMessage(nil), c.messages...))
+	return c.snapshotLocked(append([]conversation.Message(nil), c.messages...))
 }
 
 // snapshotForView is the per-frame read. It returns a transcript owned by the
@@ -373,7 +444,7 @@ func (c *chatSession) snapshotForView() chatSnapshot {
 	return c.snapshotLocked(c.viewMessages)
 }
 
-func (c *chatSession) snapshotLocked(messages []chrome.ChatMessage) chatSnapshot {
+func (c *chatSession) snapshotLocked(messages []conversation.Message) chatSnapshot {
 	st := c.statusLocked()
 	s := chatSnapshot{
 		Ready: st.Ready, Busy: st.Busy, Stopping: st.Stopping, ConfigChanging: st.ConfigChanging,
@@ -381,7 +452,7 @@ func (c *chatSession) snapshotLocked(messages []chrome.ChatMessage) chatSnapshot
 		Steering: st.Steering, Images: st.Images, Files: st.Files, Queued: st.Queued,
 		ContextUsed: st.ContextUsed, ContextTotal: st.ContextTotal,
 		InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
-		Configs: append([]chrome.ConfigOption(nil), c.configs...), Modes: append([]chrome.ModeOption(nil), c.modes...),
+		Configs: append([]conversation.ConfigOption(nil), c.configs...), Modes: append([]conversation.ModeOption(nil), c.modes...),
 		SessionTitle: st.SessionTitle,
 		Effort:       c.effort, Fast: c.fast, Ultra: c.ultra,
 		AdvancedProblem: c.advancedProblem,
@@ -390,7 +461,7 @@ func (c *chatSession) snapshotLocked(messages []chrome.ChatMessage) chatSnapshot
 	s.Notices = append([]string(nil), c.notices...)
 	if c.permission != nil {
 		p := *c.permission
-		p.Options = append([]chrome.PermissionOption(nil), p.Options...)
+		p.Options = append([]conversation.PermissionOption(nil), p.Options...)
 		s.Permission = &p
 	}
 	return s
@@ -453,20 +524,89 @@ func (c *chatSession) fail(err error) {
 	c.invalidate()
 }
 func (c *chatSession) connect() {
-	client, err := acp.StartWithGlobals(c.ctx, c.executable, c.project, c.globalArgs, c.args, c.event)
-	if err != nil {
-		c.fail(fmt.Errorf("Could not start fx: %w", err))
-		return
-	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		client.Close()
+		// A close that won the race forbids a launch: a closed object does
+		// not start a process afterwards (§4.2, N3).
+		c.signalProcessReady()
 		return
 	}
-	c.client = client
+	c.started = true
 	c.mu.Unlock()
-	ctx, cancel := context.WithTimeout(c.ctx, 20*time.Second)
+	client, err := c.start()
+	if client != nil {
+		// closedDone follows the process, not the protocol: a replacement
+		// conversation waits until fx has really been reaped (§4.3). This
+		// goroutine is also the second chance for a teardown that ran out of
+		// budget: a real Exited upgrades an unconfirmed close (§4.1).
+		go func() {
+			<-client.Exited()
+			c.markReaped()
+		}()
+	}
+	if err != nil {
+		if !errors.Is(err, errChatClosed) {
+			c.fail(err)
+		}
+		return
+	}
+	<-client.Done()
+	c.mu.Lock()
+	c.ready = false
+	closed := c.closed
+	c.mu.Unlock()
+	if !closed {
+		c.fail(errors.New("The fx connection ended. Reopen this project to reconnect."))
+	}
+}
+
+// errChatClosed says the window closed while the connection was starting. The
+// process that was created is still reaped; it is just not usable.
+var errChatClosed = errors.New("connection closed while starting")
+
+// start launches fx and opens the session. On success it leaves the client in
+// c.client, so a Close racing with this attempt always finds what to reap.
+//
+// Every failure after the process exists hands the process to shutdown rather
+// than killing it here (R2): a handshake cancelled by Close, a protocol error
+// and a failed session/load all end the same way — stdin EOF, fx's own
+// cleanup, and a kill only when the grace period is spent. One owner, one
+// policy.
+func (c *chatSession) start() (*acp.Client, error) {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		// Close arrived before the process was created: create nothing.
+		c.signalProcessReady()
+		return nil, errChatClosed
+	}
+	client, err := acp.StartWithGlobals(c.ctx, c.executable, c.project, c.globalArgs, c.args, c.event)
+	if hook := c.startedHook; hook != nil {
+		// The process exists and nobody knows it yet: the exact window R1
+		// described.
+		hook()
+	}
+	// Publish the definite creation result before any handshake RPC, and only
+	// then announce it: a consumer that waits for processDone reads nothing
+	// but the real handle or the real failure (R1).
+	c.publishProcess(client, err)
+	if err != nil {
+		return nil, fmt.Errorf("Could not start fx: %w", err)
+	}
+	c.mu.Lock()
+	closed = c.closed
+	c.mu.Unlock()
+	if closed {
+		// Close already owns the teardown; this attempt only reports why it
+		// is not usable.
+		return client, errChatClosed
+	}
+	// The opening RPCs are cancelled by Close, not by killing the process:
+	// a stalled initialize must release the close budget, while the process
+	// still gets its own stdin-EOF grace (§4.2, N3).
+	ctx, cancel := context.WithTimeout(c.handshakeCtx, 20*time.Second)
 	defer cancel()
 	var init struct {
 		ProtocolVersion int `json:"protocolVersion"`
@@ -490,22 +630,16 @@ func (c *chatSession) connect() {
 		} `json:"agentCapabilities"`
 	}
 	if err = client.Call(ctx, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]string{"name": "fx-desktop", "version": "0.1.0"}, "clientCapabilities": map[string]any{"session": map[string]any{"notices": map[string]any{}}}, "_meta": map[string]any{"fx": map[string]bool{"terminal": false}}}, &init); err != nil {
-		client.Close()
-		c.fail(err)
-		return
+		return client, c.abandonStart(client, err)
 	}
 	if init.ProtocolVersion != 1 {
-		client.Close()
-		c.fail(errors.New("This fx ACP version is not supported"))
-		return
+		return client, c.abandonStart(client, errors.New("This fx ACP version is not supported"))
 	}
 	resume := c.resume
 	if resume == "last" {
 		saved, err := fxSessions(ctx, c.executable, c.project)
 		if err != nil {
-			client.Close()
-			c.fail(err)
-			return
+			return client, c.abandonStart(client, err)
 		}
 		resume = ""
 		var latest int64
@@ -530,6 +664,15 @@ func (c *chatSession) connect() {
 	}
 	method := "session/new"
 	if resume != "" {
+		// The target of a restore is claimed before the RPC that opens it:
+		// fx starts writing that directory as soon as it accepts the load, so
+		// protection cannot wait for the reply (T9, R3), and the lease must
+		// already be ours (the swap took it before the process started, when
+		// the flags named the ID). A deletion that owns the ID refuses the
+		// load here, and so does a second window still writing it.
+		if err := c.takeSession(resume); err != nil {
+			return client, c.abandonStart(client, err)
+		}
 		method = "session/load"
 		params["sessionId"] = resume
 		c.mu.Lock()
@@ -553,17 +696,16 @@ func (c *chatSession) connect() {
 		} `json:"modes"`
 	}
 	if err = client.Call(ctx, method, params, &result); err != nil {
-		client.Close()
-		c.fail(err)
-		return
+		return client, c.abandonStart(client, err)
 	}
 	if result.SessionID == "" {
 		result.SessionID = resume
 	}
 	if result.SessionID == "" {
-		client.Close()
-		c.fail(errors.New("fx did not return a conversation ID"))
-		return
+		return client, c.abandonStart(client, errors.New("fx did not return a conversation ID"))
+	}
+	if err := c.takeSession(result.SessionID); err != nil {
+		return client, c.abandonStart(client, err)
 	}
 	c.mu.Lock()
 	c.sessionID = result.SessionID
@@ -573,9 +715,9 @@ func (c *chatSession) connect() {
 	c.images = init.AgentCapabilities.PromptCapabilities.Image
 	c.files = init.AgentCapabilities.PromptCapabilities.EmbeddedContext
 	c.configs = toConfigOptions(result.ConfigOptions)
-	c.modes = make([]chrome.ModeOption, 0, len(result.Modes.AvailableModes))
+	c.modes = make([]conversation.ModeOption, 0, len(result.Modes.AvailableModes))
 	for _, m := range result.Modes.AvailableModes {
-		c.modes = append(c.modes, chrome.ModeOption{ID: m.ID, Name: m.Name, Description: m.Description})
+		c.modes = append(c.modes, conversation.ModeOption{ID: m.ID, Name: m.Name, Description: m.Description})
 	}
 	if option, ok := findConfigOption(c.configs, "model"); ok {
 		c.model = option.CurrentValue
@@ -584,14 +726,7 @@ func (c *chatSession) connect() {
 	c.mu.Unlock()
 	c.invalidate()
 	c.applyInitialAdvanced(client)
-	<-client.Done()
-	c.mu.Lock()
-	c.ready = false
-	closed := c.closed
-	c.mu.Unlock()
-	if !closed {
-		c.fail(errors.New("The fx connection ended. Reopen this project to reconnect."))
-	}
+	return client, nil
 }
 
 // applyInitialAdvanced sends the launch-time effort/fast choices. fx rejects
@@ -621,7 +756,7 @@ func (c *chatSession) applyInitialAdvanced(client *acp.Client) {
 		requests = append(requests, request{"fast", value})
 	}
 	for _, request := range requests {
-		ctx, cancel := context.WithTimeout(c.ctx, 20*time.Second)
+		ctx, cancel := context.WithTimeout(c.handshakeCtx, 20*time.Second)
 		var result struct {
 			ConfigOptions []configOptionWire `json:"configOptions"`
 		}
@@ -639,7 +774,7 @@ func (c *chatSession) applyInitialAdvanced(client *acp.Client) {
 			if option, ok := findConfigOption(c.configs, "model"); ok {
 				c.model = option.CurrentValue
 			}
-			if mode, ok := chrome.ModeConfig(c.configs); ok {
+			if mode, ok := conversation.ModeConfig(c.configs); ok {
 				c.mode = mode.CurrentValue
 			}
 		}
@@ -650,6 +785,118 @@ func (c *chatSession) applyInitialAdvanced(client *acp.Client) {
 	}
 }
 
+// publishProcess records the definite creation result under the lock, then
+// announces it. The two are one publication, not two (R1): everything that
+// waits for processDone reads a handle or a reason, never a "not yet".
+func (c *chatSession) publishProcess(client *acp.Client, err error) {
+	c.mu.Lock()
+	c.client = client
+	c.processErr = err
+	c.mu.Unlock()
+	if hook := c.publishHook; hook != nil {
+		hook()
+	}
+	c.signalProcessReady()
+}
+
+// processResult is what a teardown acts on: the published handle, and whether
+// creation failed instead. Callers must have observed processDone first.
+func (c *chatSession) processResult() (*acp.Client, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.client, c.processErr
+}
+
+// abandonStart ends a start that failed while the process was alive. The
+// process is handed to the one teardown owner, which closes stdin and gives fx
+// its own grace to clean up; killing here would skip that (R2).
+func (c *chatSession) abandonStart(client *acp.Client, err error) error {
+	if client != nil {
+		c.beginShutdown()
+	}
+	return err
+}
+
+// signalProcessReady records that the process handle exists or that creation
+// failed — the point from which a close can reap, without waiting for the
+// handshake RPCs (§4.2, N3).
+func (c *chatSession) signalProcessReady() { c.processOnce.Do(func() { close(c.processDone) }) }
+
+// beginShutdown schedules the one teardown. Every path that has to end the
+// process — Close, a failed start, a refused protocol version — goes through
+// here, so exactly one goroutine decides how the process stops (R2).
+func (c *chatSession) beginShutdown() { c.shutdownOnce.Do(func() { go c.shutdown() }) }
+
+// finishClose records the teardown's result and only then releases whoever
+// waits on closedDone (§4.1). The result is written under mu, so a consumer
+// that reads it after the channel closes sees a complete answer.
+func (c *chatSession) finishClose(reaped bool, problem error) {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		if reaped || c.closeResult.reaped {
+			// A real Exited is the strongest evidence there is; a bounded
+			// teardown that gave up must not overwrite it with its own
+			// failure (§4.1).
+			c.closeResult = closeResult{reaped: true}
+		} else {
+			c.closeResult = closeResult{problem: problem}
+		}
+		confirmed := c.closeResult.reaped
+		c.mu.Unlock()
+		if confirmed {
+			// The claim is given back before the signal, so a consumer that
+			// wakes on closedDone can act on the ID at once: "reaped" and
+			// "still in use" must never be true at the same time (T9, R3).
+			c.releaseClaim()
+		}
+		close(c.closedDone)
+	})
+}
+
+// releaseClaim (sessionregistry.go) gives the claim back exactly once: it is
+// the hand-back that lets the next window write the same saved conversation
+// (T15). finishClose calls it before signalling, so a consumer that wakes on
+// closedDone can act on the ID at once.
+
+// signalClosed records a confirmed reaping: the process is gone, or there was
+// definitely none.
+func (c *chatSession) signalClosed() { c.finishClose(true, nil) }
+
+// markReaped records a real Exited observed after the bounded teardown. It
+// upgrades an "unconfirmed" result, because a process that is confirmed gone
+// must not keep blocking replacements on a stale reason (§4.1).
+func (c *chatSession) markReaped() {
+	c.mu.Lock()
+	c.closeResult = closeResult{reaped: true}
+	c.mu.Unlock()
+	// finishClose first: whichever goroutine runs the teardown's one body
+	// releases the claim and then closes the signal, in that order. Taking
+	// the claim here first would let the other goroutine close the signal
+	// while this one still held the claim to release (T9, R3).
+	c.finishClose(true, nil)
+	// If the teardown had already signalled an unconfirmed result, its body
+	// is spent and this is the hand-back that ends the uncertainty.
+	c.releaseClaim()
+}
+
+// CloseResult is the teardown's evidence: whether fx is confirmed gone (or was
+// never created), and why that could not be established. Meaningful once
+// closedDone is closed.
+func (c *chatSession) CloseResult() (reaped bool, problem error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closeResult.reaped, c.closeResult.problem
+}
+
+// Close stops the conversation without blocking the app loop. closedDone is
+// closed by the teardown once it has a result, so a caller that waits on it
+// knows the process is gone — or, if shutdown could not be confirmed,
+// CloseResult says why (§4.3).
+//
+// The shutdown budget starts here, when the close is asked for. A handshake in
+// flight is cancelled immediately so it cannot spend that budget waiting for
+// an answer that will never come; it is a separate act from killing the
+// process, which still gets its polite stdin-EOF grace (§4.2, N3).
 func (c *chatSession) Close() {
 	c.mu.Lock()
 	if c.closed {
@@ -657,19 +904,87 @@ func (c *chatSession) Close() {
 		return
 	}
 	c.closed = true
-	client := c.client
+	started := c.started
 	c.mu.Unlock()
-	if client == nil {
+	if c.handshakeCancel != nil {
+		c.handshakeCancel()
+	}
+	if !started {
+		// The connection was never attempted, so no process can exist and a
+		// caller waiting for the reaping would wait for nothing.
 		c.cancel()
-		close(c.closedDone)
+		c.signalProcessReady()
+		c.signalClosed()
 		return
 	}
-	go func() { client.Shutdown(); c.cancel(); close(c.closedDone) }()
+	c.beginShutdown()
+}
+
+// shutdown is the only goroutine that ends a process (R2). It waits for the
+// creation result — which is published before processDone closes, so it reads
+// a definite handle (R1) — closes stdin, gives fx its grace to cancel its own
+// tools, and only then, if the budget is spent, lets the client terminate it.
+func (c *chatSession) shutdown() {
+	defer c.cancel()
+	// One deadline covers the whole teardown: waiting for the handle, the
+	// stdin-EOF grace period, termination and reaping (§4.2, N3).
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	select {
+	case <-c.processDone:
+	case <-ctx.Done():
+		// The creation result never arrived within the budget. Report that
+		// instead of claiming a reaped process.
+		c.finishClose(false, fmt.Errorf("fx did not start: %w", ctx.Err()))
+		return
+	}
+	client, _ := c.processResult()
+	if client == nil {
+		// Creation failed, or was refused before it began: there is
+		// definitely no process, so the barrier may lift. The failure itself
+		// is already the session's problem.
+		c.finishClose(true, nil)
+		return
+	}
+	if err := client.Shutdown(ctx, shutdownGrace); err != nil {
+		c.finishClose(false, err)
+		return
+	}
+	c.finishClose(true, nil)
+}
+
+// ExitProblem reports a teardown that could not confirm the fx process exited.
+// It is one reading of CloseResult, kept for the callers that only ask "may a
+// replacement start".
+func (c *chatSession) ExitProblem() error {
+	_, problem := c.CloseResult()
+	return problem
+}
+
+// abandon fails a connection that was never started; used when a replacement
+// must not begin.
+func (c *chatSession) abandon(err error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	// Record the reason before closing: fail() refuses to publish anything to
+	// a closed session, and this one never had a turn to end.
+	c.problem = err.Error()
+	c.closed = true
+	c.mu.Unlock()
+	if c.handshakeCancel != nil {
+		c.handshakeCancel()
+	}
+	c.invalidate()
+	c.signalProcessReady()
+	c.signalClosed()
 }
 
 func (c *chatSession) appendLocked(role, key, text string) int {
 	c.next++
-	c.messages = append(c.messages, chrome.ChatMessage{ID: c.next, Role: role, Text: text})
+	c.messages = append(c.messages, conversation.Message{ID: c.next, Role: role, Text: text})
 	index := len(c.messages) - 1
 	if key != "" {
 		c.byID[key] = index
@@ -708,7 +1023,7 @@ func (c *chatSession) event(p acp.Packet) {
 				Title    string          `json:"title"`
 				RawInput json.RawMessage `json:"rawInput"`
 			} `json:"toolCall"`
-			Options []chrome.PermissionOption `json:"options"`
+			Options []conversation.PermissionOption `json:"options"`
 		}
 		if json.Unmarshal(p.Params, &params) != nil {
 			return
@@ -722,7 +1037,7 @@ func (c *chatSession) event(p acp.Packet) {
 			}
 			return
 		}
-		c.permission = &chrome.ChatPermission{ID: string(p.ID), Title: params.ToolCall.Title, Detail: truncateText(string(params.ToolCall.RawInput), 8000), Options: params.Options}
+		c.permission = &conversation.Permission{ID: string(p.ID), Title: params.ToolCall.Title, Detail: truncateText(string(params.ToolCall.RawInput), 8000), Options: params.Options}
 		c.mu.Unlock()
 		c.invalidate()
 		return
@@ -831,7 +1146,7 @@ func (c *chatSession) event(p acp.Packet) {
 		}
 		if u.Name == "shell" || m.Command != "" {
 			if m.Shell == nil {
-				m.Shell = &chrome.ShellResult{}
+				m.Shell = &conversation.ShellResult{}
 			}
 		}
 		if len(u.Content) > 0 {
@@ -893,7 +1208,7 @@ func (c *chatSession) event(p acp.Packet) {
 	}
 	c.invalidate()
 }
-func toolContent(raw json.RawMessage) (string, *chrome.DiffInfo) {
+func toolContent(raw json.RawMessage) (string, *conversation.DiffInfo) {
 	var blocks []struct {
 		Type                   string                      `json:"type"`
 		Content                struct{ Type, Text string } `json:"content"`
@@ -903,7 +1218,7 @@ func toolContent(raw json.RawMessage) (string, *chrome.DiffInfo) {
 		return "", nil
 	}
 	var out strings.Builder
-	var diff *chrome.DiffInfo
+	var diff *conversation.DiffInfo
 	for _, b := range blocks {
 		switch {
 		case b.Type == "content" && b.Content.Type == "text":
@@ -915,7 +1230,7 @@ func toolContent(raw json.RawMessage) (string, *chrome.DiffInfo) {
 			// prose. Keep it structured so the timeline can colour it
 			// (§4.2).
 			if diff == nil {
-				diff = &chrome.DiffInfo{}
+				diff = &conversation.DiffInfo{}
 			}
 			if diff.Path == "" {
 				diff.Path = b.Path
@@ -943,19 +1258,6 @@ type promptImage struct {
 	Name     string
 	MimeType string
 	Data     []byte
-}
-
-// toPromptImages narrows the composer's attachments to what the wire carries.
-// The preview and the id are for the chip, not for fx.
-func toPromptImages(attachments []chrome.Attachment) []promptImage {
-	if len(attachments) == 0 {
-		return nil
-	}
-	images := make([]promptImage, 0, len(attachments))
-	for _, a := range attachments {
-		images = append(images, promptImage{Name: a.Name, MimeType: a.MimeType, Data: a.Data})
-	}
-	return images
 }
 
 // submit reserves the turn synchronously so double-clicks cannot send
@@ -1300,7 +1602,7 @@ func (c *chatSession) setConfig(configID, value string) {
 			c.applyAdvancedLocked(configID, value)
 			c.advancedProblem = ""
 		}
-		if mode, ok := chrome.ModeConfig(c.configs); ok {
+		if mode, ok := conversation.ModeConfig(c.configs); ok {
 			c.mode = mode.CurrentValue
 		}
 		if option, ok := findConfigOption(c.configs, "model"); ok {
@@ -1355,7 +1657,7 @@ func (c *chatSession) setAdvanced(effort string, fast, ultra bool) {
 				if option, ok := findConfigOption(c.configs, "model"); ok {
 					c.model = option.CurrentValue
 				}
-				if mode, ok := chrome.ModeConfig(c.configs); ok {
+				if mode, ok := conversation.ModeConfig(c.configs); ok {
 					c.mode = mode.CurrentValue
 				}
 			}

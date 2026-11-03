@@ -6,17 +6,18 @@ Community desktop client for [fx](https://fx.sh/) — a native [MyGo](https://gi
 
 This is not an official Vercel Labs release.
 
-**Platforms:** macOS and Linux, matching the fx CLI.
+**Platforms:** macOS 13+ and Linux, matching the fx CLI.
 
 ## Features
 
 - **Native conversation UI** — streaming Markdown replies, expandable tool results, copy controls, cancellation and in-place model switching
-- **Real ACP sessions** — saved sessions from fx, resumed in the current project window; tools and history stay owned by fx
+- **ACP sessions and history** — browse and search saved fx sessions, then resume them in a project window; tools and history stay owned by fx
+- **Composer** — reference workspace files with `@` and attach images when the connected agent supports them
 - **Inline permissions** — requests wait for an explicit choice; operational notices stay outside the conversation
 - **Quick Ask** — a native form for `fx ask` (model, effort, access, system prompt, images, resume, provider order, context limits, extra directories)
 - **Workspace tools** — native Account, MCP, Folders, Details, Sessions, Launch, Models, Rules, Skills, Slack and GitHub pages
 - **Model and launch controls** — provider order, effort, fast/Ultra, context limits, additional directories and a live model picker
-- **Allowlist editor** — add, remove and reset fx permission rules in `~/.fx/settings.json`
+- **Allowlist editor** — add, remove and reset user or workspace fx permission rules in `~/.fx/settings.json`
 - **Files tab** — browse the workspace in the right rail, expand folders in place, open with the default application, or right-click a file to open it in the text editor
 - **Changes panel** — live `git status` / `git diff` tree and a quick commit box
 - **Everyday shell** — command palette, recent projects, open-folder, restore-last-project, reveal-in-Finder
@@ -74,9 +75,15 @@ Tests isolate `HOME` and `PATH` through `internal/testutil`; installer tests use
 
 ```text
 main.go
-internal/app/          coordinator, sessions, actions, fx integration
+internal/app/          application coordination, windows and sessions
 internal/app/chrome/   native UI built with MyGo
-internal/acp/          ACP JSON-RPC client
+internal/app/presenter/ presentation adapters
+internal/acp/          ACP JSON-RPC client and process lifecycle
+internal/conversation/ conversation models and text
+internal/history/      saved-session history
+internal/management/   fx management operations
+internal/workspace/    workspace files, mentions and changes
+internal/fxcli/        fx command execution
 internal/fxbin/        fx binary install and upgrade
 internal/fxsessions/   saved-session inspection and removal
 internal/projects/     recent projects and persistence

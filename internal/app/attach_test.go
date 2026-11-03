@@ -3,14 +3,18 @@ package app
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/binary"
 	"hash/crc32"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/testutil"
@@ -67,8 +71,18 @@ func paddedPNG(t *testing.T, total int) []byte {
 
 // attachSession is the least session an attachment needs: a native chat, a
 // composer, and no window (invalidate is a no-op without one).
-func attachSession() *Session {
-	return &Session{coord: NewCoordinator(), chat: &chatSession{}}
+func attachSession() *ProjectWindow {
+	return &ProjectWindow{coord: NewCoordinator(), chat: &chatSession{}}
+}
+
+// attachSessionWithLoop is attachSession whose dispatch a test drains itself,
+// so the worker's hand-off to the app loop is observed instead of bypassed.
+func attachSessionWithLoop(t *testing.T) (*ProjectWindow, *manualLoop) {
+	t.Helper()
+	s := attachSession()
+	loop := &manualLoop{}
+	s.loop = loop.dispatch
+	return s, loop
 }
 
 // What fx would refuse never reaches the wire, and the refusal lands where the
@@ -136,7 +150,7 @@ func TestAttachRefusesAMessageOverThePromptLimit(t *testing.T) {
 func TestAttachImageFilesTakesImagesAndNamesTheRest(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := attachSession()
+	s, loop := attachSessionWithLoop(t)
 	s.coord = c
 	dir := t.TempDir()
 	good := filepath.Join(dir, "shot.png")
@@ -149,6 +163,8 @@ func TestAttachImageFilesTakesImagesAndNamesTheRest(t *testing.T) {
 	}
 
 	c.attachImageFiles(s, []string{good, bad, filepath.Join(dir, "missing.png")})
+	loop.await(t)
+	loop.drain()
 	if len(s.chatUI.Attachments) != 1 || s.chatUI.Attachments[0].Name != "shot.png" {
 		t.Fatalf("attachments = %+v", s.chatUI.Attachments)
 	}
@@ -161,7 +177,7 @@ func TestAttachImageFilesTakesImagesAndNamesTheRest(t *testing.T) {
 // shell asks nothing of a session that is not a native one.
 func TestAttachIsIgnoredWithoutANativeSession(t *testing.T) {
 	c := NewCoordinator()
-	s := &Session{coord: c}
+	s := &ProjectWindow{coord: c}
 	c.attachImageFiles(s, []string{"anything.png"})
 	if len(s.chatUI.Attachments) != 0 || s.chatUI.AttachError != "" {
 		t.Fatalf("a terminal session took an image: %d attachments, %q",
@@ -184,5 +200,145 @@ func TestRemoveAttachmentTakesBackOneImage(t *testing.T) {
 	c.removeAttachment(s, first)
 	if len(s.chatUI.Attachments) != 1 || s.chatUI.Attachments[0].Name != "two.png" {
 		t.Fatalf("attachments = %+v", s.chatUI.Attachments)
+	}
+}
+
+// N1: the read is started for one conversation, and the window may switch to
+// another before the result is published. The image belongs to the draft it
+// was chosen for: attaching it to whichever conversation is current would put
+// a picture the user never chose for it into the next message.
+func TestReviewImagesStayWithOriginConversation(t *testing.T) {
+	testutil.IsolateHome(t)
+	c := NewCoordinator()
+	s, loop := attachSessionWithLoop(t)
+	s.coord = c
+	s.project = t.TempDir()
+	s.swap.start = func(*chatSession) {}
+	png := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(png, pngBytes(t, 6, 6), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c.attachImageFiles(s, []string{png})
+	// The worker has read the image and handed the result to the app loop; it
+	// has not run yet.
+	loop.await(t)
+
+	// The window switches conversation first.
+	next := newChatSession("", s.project, nil, nil)
+	s.chat = next
+	s.swap.request(next)
+
+	loop.drain()
+	if len(s.chatUI.Attachments) != 0 {
+		t.Fatalf("an image read for the old conversation was attached to the new one: %+v", s.chatUI.Attachments)
+	}
+}
+
+// N5: a FIFO (or any non-regular file) is refused without being opened.
+// Opening a FIFO for reading blocks until a writer appears, so the old
+// stat-then-ReadFile path could hang the worker forever.
+func TestAttachRefusesANonRegularFileWithoutOpeningIt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("named pipes")
+	}
+	path := filepath.Join(t.TempDir(), "image.png")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := readImageFile(context.Background(), path, chrome.MaxImageBytes)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Fatalf("a FIFO was read or refused for the wrong reason: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reading a FIFO blocked the worker")
+	}
+}
+
+// N5: one drop has a total byte budget. A list of individually legal images
+// must not load far more than a message could ever carry.
+func TestAttachDropsWhatIsOverTheBatchBudget(t *testing.T) {
+	testutil.IsolateHome(t)
+	c := NewCoordinator()
+	s, loop := attachSessionWithLoop(t)
+	s.coord = c
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.png")
+	second := filepath.Join(dir, "second.png")
+	// Each is legal on its own; together they are over one drop's budget.
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, paddedPNG(t, 4<<20), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.attachImageFiles(s, []string{first, second})
+	loop.await(t)
+	loop.drain()
+	if len(s.chatUI.Attachments) != 1 {
+		t.Fatalf("attachments = %d, want the one image that fits the budget", len(s.chatUI.Attachments))
+	}
+	if !strings.Contains(s.chatUI.AttachError, "does not fit in this message") {
+		t.Fatalf("the batch budget was not explained: %q", s.chatUI.AttachError)
+	}
+}
+
+// A batch retired by a close publishes nothing, even if its callback was
+// already queued for the app loop.
+func TestRetiredImageBatchPublishesNothing(t *testing.T) {
+	testutil.IsolateHome(t)
+	c := NewCoordinator()
+	s, loop := attachSessionWithLoop(t)
+	s.coord = c
+	png := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(png, pngBytes(t, 5, 5), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.attachImageFiles(s, []string{png})
+	loop.await(t)
+	s.retireImageBatches()
+	loop.drain()
+	if len(s.chatUI.Attachments) != 0 || s.chatUI.AttachError != "" {
+		t.Fatalf("a retired batch published: attachments=%d error=%q",
+			len(s.chatUI.Attachments), s.chatUI.AttachError)
+	}
+}
+
+// N1, delayed paths: the picker captures the conversation when it opens. If a
+// swap happens while the dialog is up, the chosen files are not read at all
+// for the replacement session.
+func TestDelayedImageRequestDoesNotSurviveAConversationSwap(t *testing.T) {
+	testutil.IsolateHome(t)
+	c := NewCoordinator()
+	s, loop := attachSessionWithLoop(t)
+	s.coord = c
+	s.project = t.TempDir()
+	s.swap.start = func(*chatSession) {}
+	png := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(png, pngBytes(t, 4, 4), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opened := s.swap.generation()
+	next := newChatSession("", s.project, nil, nil)
+	s.chat = next
+	s.swap.request(next)
+
+	c.attachImageFilesFor(s, []string{png}, opened)
+	time.Sleep(20 * time.Millisecond)
+	loop.drain()
+	if len(s.chatUI.Attachments) != 0 {
+		t.Fatalf("a picker opened for the old conversation attached to the new one: %+v", s.chatUI.Attachments)
+	}
+	s.mu.Lock()
+	tracked := len(s.images)
+	s.mu.Unlock()
+	if tracked != 0 {
+		t.Fatalf("the retired picker started %d read(s)", tracked)
 	}
 }

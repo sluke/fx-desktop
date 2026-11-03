@@ -4,6 +4,13 @@
 /.mygo/
 /.tmp/
 
+# Local agent memory, session state and working notes
+/.workbuddy/
+/ARCHITECTURE.md
+
+# Local UI captures; already tracked files remain tracked
+/internal/outputs/
+
 # Compiled test binaries
 *.test
 *.dSYM/

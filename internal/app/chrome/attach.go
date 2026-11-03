@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/gif"  // registered so Decode identifies GIFs
 	_ "image/jpeg" // and JPEGs
 	_ "image/png"  //  and PNGs
@@ -13,6 +14,8 @@ import (
 	"github.com/egoist/mygo/ui"
 	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp" // and WebPs
+
+	"fx-desktop/internal/workspace"
 )
 
 // Attachment is one image riding the next prompt.
@@ -57,36 +60,149 @@ const MaxPromptBytes = 8 << 20
 // photo from becoming a 48MB bitmap.
 const previewPixels = 96
 
-// NewImageAttachment validates one image and prepares it for the composer.
-// Nothing about the request is left to the caller: if this returns an
-// attachment, fx has been measured to accept that shape and size.
-func NewImageAttachment(name string, data []byte) (Attachment, error) {
+// ImageLimit bounds what one compressed image may expand to. Compressed bytes
+// say nothing about the canvas inside them — a few kilobytes of PNG can declare
+// millions of pixels — so the limits are read from the header before any pixel
+// buffer is allocated (R5).
+type ImageLimit struct {
+	// MaxSide is the longest side, in pixels, a single dimension may have.
+	MaxSide int
+	// MaxPixels is the total number of pixels the image may declare.
+	MaxPixels int
+}
+
+// DefaultImageLimit is the product's bound: 12 000 pixels on a side and 24
+// megapixels in total. Both are far above a screenshot or a phone photo a
+// person sends to a model, and far below what a decompression bomb claims.
+var DefaultImageLimit = ImageLimit{MaxSide: 12000, MaxPixels: 24_000_000}
+
+// ImageInfo is what an encoded image says about itself without being decoded.
+type ImageInfo struct {
+	MimeType      string
+	Width, Height int
+	// bytesPerPixel is the buffer Go's decoder allocates per pixel for this
+	// image's own colour model, taken from the header. It is not a constant:
+	// a 16-bit PNG decodes to eight bytes per pixel, not four (S2).
+	bytesPerPixel int
+}
+
+// EstimatedDecodeBytes is what decoding this image is expected to cost: the
+// pixel buffer the preview is scaled from, at the image's own depth. It is the
+// number the window's decode budget reserves.
+//
+// It is a reservation, not a measurement: a decoder's own working set and the
+// thumbnail add to it, and the budget it feeds is logical bytes, not resident
+// memory. What it must never do is understate the buffer itself — that is the
+// one part that is knowable from the header.
+func (i ImageInfo) EstimatedDecodeBytes() int {
+	const maxInt = int(^uint(0) >> 1)
+	bytes := int64(i.Width) * int64(i.Height) * int64(i.bytesPerPixel)
+	if bytes <= 0 || bytes > int64(maxInt) {
+		// Overflow or no size: reserve everything rather than too little.
+		return maxInt
+	}
+	return int(bytes)
+}
+
+// decodeBytesPerPixel is the buffer these decoders allocate for one pixel of
+// this model. The values are the slice sizes, not a guess: image.NRGBA64 and
+// image.RGBA64 store eight bytes, image.YCbCr keeps three planes of one byte,
+// image.NYCbCrA adds an alpha plane (WebP with alpha decodes to it), and
+// image.Paletted one index.
+//
+// The table is per model rather than per format, because one format can decode
+// to several: PNG to RGBA, NRGBA, RGBA64 or Gray, JPEG to YCbCr or CMYK, WebP to
+// YCbCr, NYCbCrA or NRGBA. A model that is not listed costs the widest common
+// form — an estimate that is too high wastes a reservation, one that is too low
+// defeats the budget.
+func decodeBytesPerPixel(m color.Model) int {
+	switch m {
+	case color.NRGBA64Model, color.RGBA64Model:
+		return 8
+	case color.NRGBAModel, color.RGBAModel, color.CMYKModel:
+		return 4
+	case color.NYCbCrAModel:
+		// Three planes plus alpha, the shape WebP's alpha channel decodes to.
+		return 4
+	case color.YCbCrModel:
+		return 3
+	case color.Gray16Model:
+		return 2
+	case color.GrayModel, color.AlphaModel:
+		return 1
+	}
+	if _, ok := m.(color.Palette); ok {
+		// GIF decodes to a paletted image: one index per pixel.
+		return 1
+	}
+	// An unknown model from a decoder added later: assume the widest common
+	// form rather than under-reserving.
+	return 4
+}
+
+// InspectImage reads the header of an encoded image and refuses it if its
+// declared canvas is beyond limit. It allocates no pixel buffer, so it is the
+// check that has to come first: decoding is where the memory goes.
+func InspectImage(name string, data []byte, limit ImageLimit) (ImageInfo, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "image"
 	}
 	if len(data) == 0 {
-		return Attachment{}, fmt.Errorf("%s is empty", name)
+		return ImageInfo{}, fmt.Errorf("%s is empty", name)
 	}
 	if len(data) > MaxImageBytes {
-		return Attachment{}, fmt.Errorf("%s is %s; fx takes up to %s per image",
+		return ImageInfo{}, fmt.Errorf("%s is %s; fx takes up to %s per image",
 			name, humanSize(len(data)), humanSize(MaxImageBytes))
 	}
-	img, format, err := image.Decode(bytes.NewReader(data))
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return Attachment{}, fmt.Errorf("%s is not an image fx can read (PNG, JPEG, GIF or WebP)", name)
+		return ImageInfo{}, fmt.Errorf("%s is not an image fx can read (PNG, JPEG, GIF or WebP)", name)
 	}
 	mimeType := mimeForFormat(format)
 	if mimeType == "" {
-		// Decode only succeeds for the formats imported above, so this is
-		// unreachable — but an unlabelled image must never be sent as a
+		// DecodeConfig only succeeds for the formats imported above, so this
+		// is unreachable — but an unlabelled image must never be sent as a
 		// guess, because fx rejects the whole message when the type is wrong.
-		return Attachment{}, fmt.Errorf("%s is a %s image, which fx does not take", name, format)
+		return ImageInfo{}, fmt.Errorf("%s is a %s image, which fx does not take", name, format)
+	}
+	w, h := cfg.Width, cfg.Height
+	if w <= 0 || h <= 0 {
+		return ImageInfo{}, fmt.Errorf("%s has no picture in it", name)
+	}
+	if limit.MaxSide > 0 && (w > limit.MaxSide || h > limit.MaxSide) {
+		return ImageInfo{}, fmt.Errorf("%s is %d×%d; this app opens images up to %d pixels on a side",
+			name, w, h, limit.MaxSide)
+	}
+	if limit.MaxPixels > 0 && w*h > limit.MaxPixels {
+		return ImageInfo{}, fmt.Errorf("%s is %d×%d, more than the %d megapixels this app opens at once",
+			name, w, h, limit.MaxPixels/1_000_000)
+	}
+	return ImageInfo{MimeType: mimeType, Width: w, Height: h, bytesPerPixel: decodeBytesPerPixel(cfg.ColorModel)}, nil
+}
+
+// NewImageAttachment validates one image and prepares it for the composer.
+// Nothing about the request is left to the caller: if this returns an
+// attachment, fx has been measured to accept that shape and size.
+func NewImageAttachment(name string, data []byte) (Attachment, error) {
+	return NewImageAttachmentWithin(name, data, DefaultImageLimit)
+}
+
+// NewImageAttachmentWithin is NewImageAttachment under limits the caller
+// chooses, so a test can prove the refusal with a budget it can afford.
+func NewImageAttachmentWithin(name string, data []byte, limit ImageLimit) (Attachment, error) {
+	info, err := InspectImage(name, data, limit)
+	if err != nil {
+		return Attachment{}, err
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return Attachment{}, fmt.Errorf("%s is not an image fx can read (PNG, JPEG, GIF or WebP)", name)
 	}
 	bounds := img.Bounds()
 	return Attachment{
 		Name:     name,
-		MimeType: mimeType,
+		MimeType: info.MimeType,
 		Data:     data,
 		Preview:  thumbnail(img),
 		Width:    bounds.Dx(),
@@ -146,18 +262,9 @@ func (a Attachment) Dimensions() string {
 
 // HumanSize is the human-readable form of a byte count, so the shell and the
 // app describe the same limit in the same words.
-func HumanSize(n int) string { return humanSize(n) }
+func HumanSize(n int) string { return workspace.HumanSize(n) }
 
-func humanSize(n int) string {
-	switch {
-	case n >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
-	case n >= 1<<10:
-		return fmt.Sprintf("%.0f KB", float64(n)/(1<<10))
-	default:
-		return fmt.Sprintf("%d B", n)
-	}
-}
+func humanSize(n int) string { return workspace.HumanSize(n) }
 
 // attachmentsRow draws the images waiting to be sent, inside the composer so
 // they read as part of the message being written rather than as a panel. The

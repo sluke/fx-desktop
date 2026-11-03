@@ -29,7 +29,7 @@ type fileEntry struct {
 }
 
 // fileBrowser is the Files tab's cache and expansion state. Every map is
-// guarded by the owning Session's mu: directory reads finish on their own
+// guarded by the owning window's mu: directory reads finish on their own
 // goroutine, and the frame reads what they left behind.
 type fileBrowser struct {
 	entries   map[string][]fileEntry // absolute folder -> ordered entries
@@ -54,31 +54,31 @@ func newFileBrowser() *fileBrowser {
 // ensureFiles starts reading a folder unless it has already been read or a
 // read is in flight. It is safe to call while a frame builds: the disk call
 // runs on its own goroutine and repaints when it answers.
-func (c *Coordinator) ensureFiles(s *Session, dir string) {
+func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 	if s == nil || dir == "" {
 		return
 	}
-	s.mu.Lock()
-	if s.files == nil {
-		s.files = newFileBrowser()
+	s.workspace.mu.Lock()
+	if s.workspace.files == nil {
+		s.workspace.files = newFileBrowser()
 	}
-	fb := s.files
+	fb := s.workspace.files
 	if fb.read[dir] || fb.loading[dir] {
-		s.mu.Unlock()
+		s.workspace.mu.Unlock()
 		return
 	}
 	fb.loading[dir] = true
-	s.mu.Unlock()
+	s.workspace.mu.Unlock()
 
 	s.invalidate()
 	go func() {
 		entries, total, err := readFileEntries(dir)
-		s.mu.Lock()
+		s.workspace.mu.Lock()
 		// A refresh replaces the browser while a read is in flight. The
 		// answer belongs to the browser that asked for it; filing it into
 		// its successor would resurrect rows the refresh discarded.
-		if s.files != fb {
-			s.mu.Unlock()
+		if s.workspace.files != fb {
+			s.workspace.mu.Unlock()
 			return
 		}
 		delete(fb.loading, dir)
@@ -91,7 +91,7 @@ func (c *Coordinator) ensureFiles(s *Session, dir string) {
 				fb.truncated[dir] = extra
 			}
 		}
-		s.mu.Unlock()
+		s.workspace.mu.Unlock()
 		s.invalidate()
 	}()
 }
@@ -189,7 +189,7 @@ func flattenFiles(root string, fb *fileBrowser, dir string, depth int) []chrome.
 
 // sessionFiles projects the cache into the panel. The read pass must not walk
 // the disk; it only starts the root's first read if nothing has asked yet.
-func (c *Coordinator) sessionFiles(s *Session) chrome.FileBrowserData {
+func (c *Coordinator) sessionFiles(s *ProjectWindow) chrome.FileBrowserData {
 	if s == nil || s.project == "" {
 		return chrome.FileBrowserData{}
 	}
@@ -201,9 +201,9 @@ func (c *Coordinator) sessionFiles(s *Session) chrome.FileBrowserData {
 	}
 	c.ensureFiles(s, s.project)
 	d := chrome.FileBrowserData{Root: s.project}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	fb := s.files
+	s.workspace.mu.Lock()
+	defer s.workspace.mu.Unlock()
+	fb := s.workspace.files
 	if fb == nil {
 		return d
 	}
@@ -218,7 +218,7 @@ func (c *Coordinator) sessionFiles(s *Session) chrome.FileBrowserData {
 // selectInspectorTab moves the right rail to the tab that was chosen and
 // starts the files read on the way in, so the first frame of the browser is
 // not an empty folder.
-func (c *Coordinator) selectInspectorTab(s *Session, tab int) {
+func (c *Coordinator) selectInspectorTab(s *ProjectWindow, tab int) {
 	if s == nil {
 		return
 	}
@@ -235,7 +235,7 @@ func (c *Coordinator) selectInspectorTab(s *Session, tab int) {
 
 // toggleFileDir expands or collapses one folder. Expanding starts its read on
 // the first visit; collapsing keeps the listing, so reopening it is instant.
-func (c *Coordinator) toggleFileDir(s *Session, path string) {
+func (c *Coordinator) toggleFileDir(s *ProjectWindow, path string) {
 	if s == nil {
 		return
 	}
@@ -243,11 +243,11 @@ func (c *Coordinator) toggleFileDir(s *Session, path string) {
 	if !ok {
 		return
 	}
-	s.mu.Lock()
-	if s.files == nil {
-		s.files = newFileBrowser()
+	s.workspace.mu.Lock()
+	if s.workspace.files == nil {
+		s.workspace.files = newFileBrowser()
 	}
-	fb := s.files
+	fb := s.workspace.files
 	opened := !fb.expanded[abs]
 	if opened {
 		fb.expanded[abs] = true
@@ -255,7 +255,7 @@ func (c *Coordinator) toggleFileDir(s *Session, path string) {
 		delete(fb.expanded, abs)
 	}
 	needRead := opened && !fb.read[abs] && !fb.loading[abs]
-	s.mu.Unlock()
+	s.workspace.mu.Unlock()
 
 	if needRead {
 		c.ensureFiles(s, abs)
@@ -266,7 +266,7 @@ func (c *Coordinator) toggleFileDir(s *Session, path string) {
 // openFileWithDefaultApp hands one row to the platform: a file opens in its
 // default application, a folder opens in the file manager. It is deferred past
 // the frame because launching an application can spin the event loop.
-func (c *Coordinator) openFileWithDefaultApp(s *Session, path string) {
+func (c *Coordinator) openFileWithDefaultApp(s *ProjectWindow, path string) {
 	if s == nil {
 		return
 	}
@@ -285,7 +285,7 @@ func (c *Coordinator) openFileWithDefaultApp(s *Session, path string) {
 // to the application that owns its type. Resolving the editor can run a
 // desktop query on Linux, so it happens off the frame, and a failure comes
 // back as a dialog instead of a menu item that silently did nothing.
-func (c *Coordinator) openFileInTextEditor(s *Session, path string) {
+func (c *Coordinator) openFileInTextEditor(s *ProjectWindow, path string) {
 	if s == nil {
 		return
 	}
@@ -309,15 +309,15 @@ func (c *Coordinator) openFileInTextEditor(s *Session, path string) {
 // refreshFiles discards the cached listings and re-reads the root and every
 // folder the user has open. The expansion itself survives: refreshing should
 // show a file added a moment ago, not close the tree the user built.
-func (c *Coordinator) refreshFiles(s *Session) {
+func (c *Coordinator) refreshFiles(s *ProjectWindow) {
 	if s == nil || s.project == "" {
 		return
 	}
-	s.mu.Lock()
+	s.workspace.mu.Lock()
 	var expanded []string
-	if s.files != nil {
-		expanded = make([]string, 0, len(s.files.expanded))
-		for dir := range s.files.expanded {
+	if s.workspace.files != nil {
+		expanded = make([]string, 0, len(s.workspace.files.expanded))
+		for dir := range s.workspace.files.expanded {
 			expanded = append(expanded, dir)
 		}
 	}
@@ -325,8 +325,8 @@ func (c *Coordinator) refreshFiles(s *Session) {
 	for _, dir := range expanded {
 		fb.expanded[dir] = true
 	}
-	s.files = fb
-	s.mu.Unlock()
+	s.workspace.files = fb
+	s.workspace.mu.Unlock()
 
 	c.ensureFiles(s, s.project)
 	for _, dir := range expanded {

@@ -690,7 +690,7 @@ func TestChatRestoresUsageOnResume(t *testing.T) {
 func TestChatViewProtocolRoundTrip(t *testing.T) {
 	testutil.IsolateHome(t)
 	chat := chatFixture(t)
-	session := &Session{coord: NewCoordinator(), project: chat.project, chat: chat, started: time.Now(), shell: chrome.DefaultShell()}
+	session := &ProjectWindow{coord: NewCoordinator(), project: chat.project, chat: chat, started: time.Now(), shell: chrome.DefaultShell()}
 	ts := ui.NewTester(session.view, 1000, 800)
 	if err := ts.Click("Message fx"); err != nil {
 		t.Fatal(err)
@@ -734,7 +734,7 @@ func TestChatSwitchKeepsProjectWindow(t *testing.T) {
 	previous := chatFixture(t)
 	coord := NewCoordinator()
 	coord.fxPath = previous.executable
-	session := &Session{coord: coord, project: previous.project, chat: previous, shell: chrome.DefaultShell()}
+	session := &ProjectWindow{coord: coord, project: previous.project, chat: previous, shell: chrome.DefaultShell()}
 	coord.addSession(session)
 	session.replaceConversation([]string{"--resume", "fixture-session"})
 	t.Cleanup(session.chat.Close)
@@ -864,5 +864,92 @@ func TestChatStatusMatchesSnapshot(t *testing.T) {
 	}
 	if !st.Permission || s.Permission == nil {
 		t.Fatalf("status permission = %v; snapshot permission = %v", st.Permission, s.Permission)
+	}
+}
+
+// N3: Close must hold the total shutdown budget from the moment it is asked
+// for, handshake included. A child that has read the first request and then
+// keeps stdout open without answering is a stalled initialize, not a closed
+// connection: the test waits for the request to arrive before closing.
+func TestReviewCloseDuringHandshakeIsBounded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is not available")
+	}
+	marker := filepath.Join(t.TempDir(), "initialize")
+	body := "#!/bin/sh\n" +
+		"read line\n" +
+		": > \"$FX_TEST_HANDSHAKE_MARKER\"\n" +
+		"trap '' TERM\n" +
+		"exec /bin/sleep 30\n"
+	executable := filepath.Join(t.TempDir(), "fx")
+	if err := os.WriteFile(executable, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FX_TEST_HANDSHAKE_MARKER", marker)
+
+	c := newChatSession(executable, t.TempDir(), nil, nil)
+	// Whatever the outcome, do not leave the child behind: cancelling the
+	// session's context is what exec.CommandContext kills it with.
+	t.Cleanup(c.cancel)
+	go c.connect()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stalled child never received initialize")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	started := time.Now()
+	c.Close()
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Close blocked the caller for %v", elapsed)
+	}
+	select {
+	case <-c.closedDone:
+		if elapsed := time.Since(started); elapsed > shutdownTimeout+2*time.Second {
+			t.Fatalf("the close was confirmed after %v, beyond the shutdown budget", elapsed)
+		}
+	case <-time.After(shutdownTimeout + 2*time.Second):
+		t.Fatalf("a stalled handshake kept Close waiting past the %v budget", shutdownTimeout+2*time.Second)
+	}
+	if problem := c.ExitProblem(); problem != nil {
+		t.Fatalf("the process was not confirmed reaped: %v", problem)
+	}
+}
+
+// N3: an object that was closed before its connection was ever attempted must
+// not start a process afterwards. The late connect attempt finds the closed
+// flag and does nothing.
+func TestClosedSessionNeverStartsAProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	marker := filepath.Join(t.TempDir(), "started")
+	body := "#!/bin/sh\n: > \"$FX_TEST_START_MARKER\"\nexec /bin/cat > /dev/null\n"
+	executable := filepath.Join(t.TempDir(), "fx")
+	if err := os.WriteFile(executable, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FX_TEST_START_MARKER", marker)
+
+	c := newChatSession(executable, t.TempDir(), nil, nil)
+	c.Close()
+	go c.connect()
+	time.Sleep(100 * time.Millisecond)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a closed session started a process")
+	}
+	select {
+	case <-c.closedDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a closed session left its close signal waiting")
 	}
 }

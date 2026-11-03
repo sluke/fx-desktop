@@ -167,13 +167,13 @@ func TestHandleSecondInstanceWithoutTargetsIsSafe(t *testing.T) {
 
 func TestRemoveSession(t *testing.T) {
 	c := NewCoordinator()
-	a, b := &Session{project: "/a"}, &Session{project: "/b"}
-	c.sessions = []*Session{a, b}
+	a, b := &ProjectWindow{project: "/a"}, &ProjectWindow{project: "/b"}
+	c.sessions = []*ProjectWindow{a, b}
 	c.removeSession(a)
 	if len(c.sessions) != 1 || c.sessions[0] != b {
 		t.Fatalf("sessions: %v", c.sessions)
 	}
-	c.removeSession(&Session{}) // unknown session: no-op
+	c.removeSession(&ProjectWindow{}) // unknown session: no-op
 	if len(c.sessions) != 1 {
 		t.Fatalf("sessions: %v", c.sessions)
 	}
@@ -199,8 +199,8 @@ func TestFxVersionLabel(t *testing.T) {
 func TestSessionForFindsOwningSession(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	a := &Session{project: "/p/one"}
-	b := &Session{project: "/p/two"}
+	a := &ProjectWindow{project: "/p/one"}
+	b := &ProjectWindow{project: "/p/two"}
 	c.addSession(a)
 	c.addSession(b)
 	if got := c.sessionFor("/p/two"); got != b {
@@ -224,8 +224,8 @@ func TestSessionForFindsOwningSession(t *testing.T) {
 func TestSessionsSnapshotIsACopy(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	a := &Session{project: "/p/one"}
-	b := &Session{project: "/p/two"}
+	a := &ProjectWindow{project: "/p/one"}
+	b := &ProjectWindow{project: "/p/two"}
 	c.addSession(a)
 	c.addSession(b)
 

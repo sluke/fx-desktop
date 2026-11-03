@@ -5,25 +5,14 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo/ui"
+
+	"fx-desktop/internal/conversation"
 )
 
-// ConfigOption is one session-level setting fx published when the session
-// opened. The shell renders whatever fx sends: "model" is not special-cased,
-// so the day fx adds an option it appears on its own (§4.4.1).
-type ConfigOption struct {
-	ID, Name, Category, Type, CurrentValue string
-	Options                                []ConfigChoice
-}
-
-// ConfigChoice is one selectable value: Value is what the protocol takes,
-// Name is what fx calls it.
-type ConfigChoice struct{ Value, Name string }
-
-// ModeOption is one ACP mode. fx reports the mode twice — once as a config
-// option, once as this list — and this list is the richer one because it
-// carries the description, so the strip renders the mode from here and
-// dispatches it through the same session/set_config_option path as the rest.
-type ModeOption struct{ ID, Name, Description string }
+// The session configuration model is the conversation package's.
+type ConfigOption = conversation.ConfigOption
+type ConfigChoice = conversation.ConfigChoice
+type ModeOption = conversation.ModeOption
 
 // configLabel never renders an empty control: fx names its options, but an
 // unnamed one has to stay usable.
@@ -60,24 +49,14 @@ func shortChoice(s string) string {
 
 // findConfig returns the option with this id.
 func findConfig(options []ConfigOption, id string) (ConfigOption, bool) {
-	for _, o := range options {
-		if o.ID == id {
-			return o, true
-		}
-	}
-	return ConfigOption{}, false
+	return conversation.FindConfig(options, id)
 }
 
 // ModeConfig is the option fx uses for the ACP mode: the one whose category
 // says so. Matching the category first keeps a renamed id working, and both
 // the settings overview and the app resolve the same published option.
 func ModeConfig(options []ConfigOption) (ConfigOption, bool) {
-	for _, o := range options {
-		if o.Category == "mode" {
-			return o, true
-		}
-	}
-	return findConfig(options, "mode")
+	return conversation.ModeConfig(options)
 }
 
 // selectableConfigs are the options that become a strip button. The mode is

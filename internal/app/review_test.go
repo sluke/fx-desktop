@@ -32,13 +32,13 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 func TestToggleReviewOpensSelectsAndAcknowledges(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
-	s.mu.Lock()
-	s.git = &GitInfo{Branch: "main", Changes: []chrome.Change{
+	s := &ProjectWindow{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
+	s.workspace.mu.Lock()
+	s.workspace.git = &GitInfo{Branch: "main", Changes: []chrome.Change{
 		{Path: "a.go", Kind: "M", Adds: 2, Dels: 1},
 		{Path: "b.go", Kind: "A", Adds: 9},
 	}}
-	s.mu.Unlock()
+	s.workspace.mu.Unlock()
 
 	c.toggleReview(s)
 	if !s.shell.ReviewOpen {
@@ -47,9 +47,9 @@ func TestToggleReviewOpensSelectsAndAcknowledges(t *testing.T) {
 	if s.shell.ReviewPath != "a.go" {
 		t.Fatalf("selected = %q, want the first changed path", s.shell.ReviewPath)
 	}
-	s.mu.Lock()
-	acked := !s.reviewedAt.IsZero()
-	s.mu.Unlock()
+	s.workspace.mu.Lock()
+	acked := !s.workspace.reviewedAt.IsZero()
+	s.workspace.mu.Unlock()
 	if !acked {
 		t.Fatal("opening the drawer is the acknowledgement §5 asks for")
 	}
@@ -70,12 +70,12 @@ func TestToggleReviewOpensSelectsAndAcknowledges(t *testing.T) {
 func TestCloseReviewKeepsTheSelectionAndWatermark(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
 	c.toggleReview(s)
 	s.shell.ReviewPath = "b.go"
-	s.mu.Lock()
-	s.reviewedAt = time.Time{}
-	s.mu.Unlock()
+	s.workspace.mu.Lock()
+	s.workspace.reviewedAt = time.Time{}
+	s.workspace.mu.Unlock()
 
 	c.closeReview(s)
 	if s.shell.ReviewOpen {
@@ -84,9 +84,9 @@ func TestCloseReviewKeepsTheSelectionAndWatermark(t *testing.T) {
 	if s.shell.ReviewPath != "b.go" {
 		t.Fatalf("closing lost the open file: %q", s.shell.ReviewPath)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.reviewedAt.IsZero() {
+	s.workspace.mu.Lock()
+	defer s.workspace.mu.Unlock()
+	if !s.workspace.reviewedAt.IsZero() {
 		t.Fatal("closing the drawer should not move the watermark")
 	}
 }
@@ -107,7 +107,7 @@ func TestSelectChangeLoadsTheWholeDiff(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "b.go"), "brand new\n")
 
 	c := NewCoordinator()
-	s := &Session{coord: c, project: dir, shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, project: dir, shell: chrome.DefaultShell()}
 	s.refreshGit()
 	c.toggleReview(s)
 
@@ -151,7 +151,7 @@ func TestSelectChangeDropsAStaleRead(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "b.go"), "brand new\n")
 
 	c := NewCoordinator()
-	s := &Session{coord: c, project: dir, shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, project: dir, shell: chrome.DefaultShell()}
 	s.refreshGit()
 
 	c.selectChange(s, "a.go")
@@ -177,14 +177,14 @@ func TestSummaryRaisesChangesNewerThanTheWatermark(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
 	now := time.Now()
-	s := &Session{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
-	s.mu.Lock()
-	s.git = &GitInfo{
+	s := &ProjectWindow{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
+	s.workspace.mu.Lock()
+	s.workspace.git = &GitInfo{
 		Changes:    []chrome.Change{{Path: "a.go", Kind: "M"}},
 		Modified:   map[string]time.Time{"a.go": now},
 		LastCommit: now.Add(-time.Hour),
 	}
-	s.mu.Unlock()
+	s.workspace.mu.Unlock()
 
 	if got := s.summary().Status; got != chrome.AttentionDoneUnreviewed {
 		t.Fatalf("status = %s, want done-unreviewed", got)
@@ -204,14 +204,14 @@ func TestSummaryLeavesOldChangesAlone(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
 	now := time.Now()
-	s := &Session{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
-	s.mu.Lock()
-	s.git = &GitInfo{
+	s := &ProjectWindow{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
+	s.workspace.mu.Lock()
+	s.workspace.git = &GitInfo{
 		Changes:    []chrome.Change{{Path: "a.go", Kind: "M"}},
 		Modified:   map[string]time.Time{"a.go": now.Add(-2 * time.Hour)},
 		LastCommit: now.Add(-time.Hour),
 	}
-	s.mu.Unlock()
+	s.workspace.mu.Unlock()
 	if got := s.summary().Status; got != chrome.AttentionIdle {
 		t.Fatalf("status = %s, want idle", got)
 	}
@@ -220,10 +220,10 @@ func TestSummaryLeavesOldChangesAlone(t *testing.T) {
 func TestReviewDataReportsAReadFailure(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, project: "/nowhere", shell: chrome.DefaultShell()}
-	s.mu.Lock()
-	s.gitErr = os.ErrNotExist
-	s.mu.Unlock()
+	s := &ProjectWindow{coord: c, project: "/nowhere", shell: chrome.DefaultShell()}
+	s.workspace.mu.Lock()
+	s.workspace.gitErr = os.ErrNotExist
+	s.workspace.mu.Unlock()
 	d := c.sessionReview(s)
 	if d.Workspace != chrome.WorkspaceFailed {
 		t.Fatalf("a failed read must say so: %+v", d)
@@ -236,10 +236,10 @@ func TestReviewDataReportsAReadFailure(t *testing.T) {
 func TestReviewDataSeparatesNoRepositoryFromFailure(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, project: "/nowhere", shell: chrome.DefaultShell()}
-	s.mu.Lock()
-	s.gitErr = errNoRepo
-	s.mu.Unlock()
+	s := &ProjectWindow{coord: c, project: "/nowhere", shell: chrome.DefaultShell()}
+	s.workspace.mu.Lock()
+	s.workspace.gitErr = errNoRepo
+	s.workspace.mu.Unlock()
 	d := c.sessionReview(s)
 	if d.Workspace != chrome.WorkspaceNotRepo {
 		t.Fatalf("a workspace without git must say so: %+v", d)
@@ -251,7 +251,7 @@ func TestReviewDataSeparatesNoRepositoryFromFailure(t *testing.T) {
 func TestReviewKeepsTheSelectionAcrossAReread(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
 	c.toggleReview(s)
 	c.selectChange(s, "keep/me.go")
 	if got := c.sessionReview(s).Selected; got != "keep/me.go" {
@@ -266,13 +266,13 @@ func TestReviewKeepsTheSelectionAcrossAReread(t *testing.T) {
 func TestCommandSessionOffersNoReviewDrawer(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, title: "fx doctor", shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, title: "fx doctor", shell: chrome.DefaultShell()}
 	a := c.sessionActions(s)
 	if a.ToggleReview != nil || a.CloseReview != nil || a.RefreshChanges != nil || a.Commit != nil {
 		t.Fatalf("a command window cannot review a tree: %+v", a)
 	}
 
-	project := &Session{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
+	project := &ProjectWindow{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
 	p := c.sessionActions(project)
 	if p.ToggleReview == nil || p.CloseReview == nil || p.RefreshChanges == nil || p.SelectChange == nil {
 		t.Fatal("a project session can review its tree")
@@ -286,10 +286,10 @@ func TestCommandSessionOffersNoReviewDrawer(t *testing.T) {
 func TestProjectWithoutGitOffersNoReviewEntryPoint(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
-	s.mu.Lock()
-	s.gitErr = errNoRepo
-	s.mu.Unlock()
+	s := &ProjectWindow{coord: c, project: t.TempDir(), shell: chrome.DefaultShell()}
+	s.workspace.mu.Lock()
+	s.workspace.gitErr = errNoRepo
+	s.workspace.mu.Unlock()
 	a := c.sessionActions(s)
 	if a.ToggleReview != nil {
 		t.Fatal("a workspace without git has no review drawer to open")

@@ -21,7 +21,7 @@ func TestFileBrowserListsExpandsAndRefreshes(t *testing.T) {
 	writeFiles(t, root,
 		"README.md", "zeta.txt", "src/app/main.go",
 	)
-	s := &Session{coord: c, project: root, shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
 
 	// Selecting the tab is what asks for the listing.
 	c.selectInspectorTab(s, chrome.InspectorTabFiles)
@@ -85,13 +85,13 @@ func TestFileBrowserRowsDoNotReadWhileTabIsClosed(t *testing.T) {
 	c := NewCoordinator()
 	root := t.TempDir()
 	writeFiles(t, root, "a.txt")
-	s := &Session{coord: c, project: root, shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
 
 	d := c.sessionFiles(s)
 	if d.Loading || len(d.Rows) != 0 {
 		t.Fatalf("a closed tab read the disk: %+v", d)
 	}
-	if s.files != nil {
+	if s.workspace.files != nil {
 		t.Fatal("a closed tab built a browser")
 	}
 }
@@ -132,7 +132,7 @@ func writeFiles(t *testing.T, root string, paths ...string) {
 	}
 }
 
-func waitForFiles(t *testing.T, c *Coordinator, s *Session, cond func(chrome.FileBrowserData) bool) chrome.FileBrowserData {
+func waitForFiles(t *testing.T, c *Coordinator, s *ProjectWindow, cond func(chrome.FileBrowserData) bool) chrome.FileBrowserData {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {

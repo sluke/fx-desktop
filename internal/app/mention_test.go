@@ -30,9 +30,9 @@ func TestResolveMentionsReadsTheFilesAMessageNames(t *testing.T) {
 	write("main.go", "package main\n")
 	write("internal/app/console.go", "package app\n")
 
-	mentions, problem := resolveMentions(dir, "look at @main.go and @internal/app/console.go")
-	if problem != "" {
-		t.Fatal(problem)
+	mentions, err := resolveMentions(dir, "look at @main.go and @internal/app/console.go")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(mentions) != 2 {
 		t.Fatalf("mentions = %+v", mentions)
@@ -44,8 +44,8 @@ func TestResolveMentionsReadsTheFilesAMessageNames(t *testing.T) {
 		t.Fatalf("second mention = %+v", mentions[1])
 	}
 	// A message with no mention reads no file at all.
-	if mentions, problem := resolveMentions(dir, "look at the whole project"); problem != "" || len(mentions) != 0 {
-		t.Fatalf("a plain message = %+v, %q", mentions, problem)
+	if mentions, err := resolveMentions(dir, "look at the whole project"); err != nil || len(mentions) != 0 {
+		t.Fatalf("a plain message = %+v, %v", mentions, err)
 	}
 }
 
@@ -66,9 +66,9 @@ func TestResolveMentionsPassesOverWhatIsNotAMention(t *testing.T) {
 		"look at @/etc/hosts",    // absolute: not a file of ours
 		"look at @dir",           // a directory is not a file to read
 	} {
-		mentions, problem := resolveMentions(dir, text)
-		if problem != "" || len(mentions) != 0 {
-			t.Errorf("resolveMentions(%q) = %+v, %q; want nothing and no refusal", text, mentions, problem)
+		mentions, err := resolveMentions(dir, text)
+		if err != nil || len(mentions) != 0 {
+			t.Errorf("resolveMentions(%q) = %+v, %v; want nothing and no refusal", text, mentions, err)
 		}
 	}
 }
@@ -90,29 +90,29 @@ func TestResolveMentionsRefusesWhatFxCannotTake(t *testing.T) {
 	write("binary.bin", []byte{0xff, 0xfe, 0x00, 0x01})
 
 	// The limit is the limit: a file of exactly the size fx takes is taken.
-	mentions, problem := resolveMentions(dir, "read @exactly.txt")
-	if problem != "" || len(mentions) != 1 {
-		t.Fatalf("a file of exactly the limit = %+v, %q", mentions, problem)
+	mentions, err := resolveMentions(dir, "read @exactly.txt")
+	if err != nil || len(mentions) != 1 {
+		t.Fatalf("a file of exactly the limit = %+v, %v", mentions, err)
 	}
-	mentions, problem = resolveMentions(dir, "read @toobig.txt")
-	if len(mentions) != 0 || !strings.Contains(problem, "toobig.txt") || !strings.Contains(problem, "larger than") {
-		t.Fatalf("an oversized file = %+v, %q", mentions, problem)
+	mentions, err = resolveMentions(dir, "read @toobig.txt")
+	if len(mentions) != 0 || err == nil || !strings.Contains(err.Error(), "toobig.txt") || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("an oversized file = %+v, %v", mentions, err)
 	}
-	mentions, problem = resolveMentions(dir, "read @binary.bin")
-	if len(mentions) != 0 || !strings.Contains(problem, "not a text file") {
-		t.Fatalf("a binary file = %+v, %q", mentions, problem)
+	mentions, err = resolveMentions(dir, "read @binary.bin")
+	if len(mentions) != 0 || err == nil || !strings.Contains(err.Error(), "not a text file") {
+		t.Fatalf("a binary file = %+v, %v", mentions, err)
 	}
 	// Together they have a limit too: two files of the per-file size fit a
 	// message, a third does not.
 	write("second.txt", filler)
 	write("third.txt", filler)
-	mentions, problem = resolveMentions(dir, "read @exactly.txt and @second.txt")
-	if problem != "" || len(mentions) != 2 {
-		t.Fatalf("two files of the per-file size = %+v, %q", mentions, problem)
+	mentions, err = resolveMentions(dir, "read @exactly.txt and @second.txt")
+	if err != nil || len(mentions) != 2 {
+		t.Fatalf("two files of the per-file size = %+v, %v", mentions, err)
 	}
-	mentions, problem = resolveMentions(dir, "read @exactly.txt @second.txt @third.txt")
-	if len(mentions) != 0 || !strings.Contains(problem, "more than") {
-		t.Fatalf("a message over the total = %+v, %q", mentions, problem)
+	mentions, err = resolveMentions(dir, "read @exactly.txt @second.txt @third.txt")
+	if len(mentions) != 0 || err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("a message over the total = %+v, %v", mentions, err)
 	}
 	// A refusal holds the whole message: nothing half-attached goes out.
 	if mentions != nil {
@@ -169,7 +169,7 @@ func TestWorkspaceFilesListsTheProject(t *testing.T) {
 
 // awaitMentionFiles waits for the read the picker asked for, and reports what
 // it found — or why the project could not be listed.
-func awaitMentionFiles(t *testing.T, c *Coordinator, s *Session) ([]chrome.MentionFile, string) {
+func awaitMentionFiles(t *testing.T, c *Coordinator, s *ProjectWindow) ([]chrome.MentionFile, string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -191,21 +191,21 @@ func TestOpenMentionsReadsTheProjectForThePicker(t *testing.T) {
 		t.Fatal(err)
 	}
 	coord := NewCoordinator()
-	s := &Session{coord: coord, project: dir}
+	s := &ProjectWindow{coord: coord, project: dir}
 	coord.openMentions(s)
 	files, problem := awaitMentionFiles(t, coord, s)
 	if problem != "" || len(files) != 1 || files[0].Path != "main.go" {
 		t.Fatalf("files = %+v, %q", files, problem)
 	}
 	// A project that cannot be listed says so, rather than reading forever.
-	missing := &Session{coord: coord, project: filepath.Join(dir, "gone")}
+	missing := &ProjectWindow{coord: coord, project: filepath.Join(dir, "gone")}
 	coord.openMentions(missing)
 	if files, problem := awaitMentionFiles(t, coord, missing); problem == "" || len(files) != 0 {
 		t.Fatalf("an unreadable project = %+v, %q", files, problem)
 	}
 	// A session with no project at all is not asked for anything.
-	coord.openMentions(&Session{coord: coord})
-	if _, loading, _ := coord.sessionMentionFiles(&Session{coord: coord}); loading {
+	coord.openMentions(&ProjectWindow{coord: coord})
+	if _, loading, _ := coord.sessionMentionFiles(&ProjectWindow{coord: coord}); loading {
 		t.Fatal("a session with no project was left reading")
 	}
 }
@@ -224,9 +224,9 @@ func TestChatSendsMentionedFiles(t *testing.T) {
 	if !chat.snapshot().Files {
 		t.Fatal("fx advertises promptCapabilities.embeddedContext")
 	}
-	mentions, problem := resolveMentions(chat.project, "look at @main.go please")
-	if problem != "" || len(mentions) != 1 {
-		t.Fatalf("resolveMentions = %+v, %q", mentions, problem)
+	mentions, err := resolveMentions(chat.project, "look at @main.go please")
+	if err != nil || len(mentions) != 1 {
+		t.Fatalf("resolveMentions = %+v, %v", mentions, err)
 	}
 	if !chat.submit("look at @main.go please", nil, mentions) {
 		t.Fatal("not submitted")

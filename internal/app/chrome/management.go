@@ -7,32 +7,27 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo/ui"
+
+	"fx-desktop/internal/management"
 )
 
 type ManagementState struct {
-	Open, Busy                                                                                                                           bool
-	Page, Provider, Name, Transport, Command, Arguments, URL, Directory, Period, SessionID, Model, Ultra, LogPath, Channel, Effort, Fast string
-	ContextLimits, AddDirs, ProviderOverride                                                                                             string
-	// MCP form extras. Headers apply to HTTP servers, Environment to stdio;
-	// MCPProject writes ./.mcp.json instead of the profile file.
-	Headers     string
-	Environment string
-	MCPProject  bool
-	// ProviderDefault is the fx-wide default used for new sessions. It is
-	// separate from Provider, which only picks the account to sign in or out.
-	ProviderDefault  string
-	NoAdditionalDirs bool
-	Output           string
-	Generation       uint64
-	Details          []DetailSection
-	Doctor           []DoctorCheck
-	Credits          string
-	Slack            SlackStatus
-	SlackProblem     string
-	GitHub           GitHubState
-	Models           []ModelInfo
-	ModelQuery       string
-	ModelsProblem    string
+	// The request form is the management package's; the panel renders it and
+	// the app validates the same fields.
+	management.Form
+	Open, Busy    bool
+	Page          string
+	Output        string
+	Generation    uint64
+	Details       []DetailSection
+	Doctor        []DoctorCheck
+	Credits       string
+	Slack         SlackStatus
+	SlackProblem  string
+	GitHub        GitHubState
+	Models        []ModelInfo
+	ModelQuery    string
+	ModelsProblem string
 	// MCP reads are structured from fx's --json output, never guessed.
 	MCPServers     []MCPServerInfo
 	MCPDetail      *MCPServerDetail
@@ -51,7 +46,6 @@ type ManagementState struct {
 	Skills       []SkillInfo
 	SkillQuery   string
 	SkillProblem string
-	Project      string
 }
 
 // SkillInfo is one skill found in fx's workspace or global discovery roots.

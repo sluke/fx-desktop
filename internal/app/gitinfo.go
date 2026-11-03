@@ -10,14 +10,14 @@ import (
 	"strings"
 	"time"
 
-	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/workspace"
 )
 
 // GitInfo is the working-tree state of a project, read from git. Changes is
 // capped so a huge repository cannot flood the rail.
 type GitInfo struct {
 	Branch  string
-	Changes []chrome.Change
+	Changes []workspace.Change
 	// Modified is each changed path's last write time, and LastCommit is when
 	// git last recorded a commit. Together they are the reviewed watermark
 	// §5 and §12.0 define: a change older than both has already been through a
@@ -101,7 +101,7 @@ func gitInfo(ctx context.Context, dir string) (*GitInfo, error) {
 		if fi, statErr := os.Stat(filepath.Join(dir, path)); statErr == nil {
 			info.Modified[path] = fi.ModTime()
 		}
-		info.Changes = append(info.Changes, chrome.Change{
+		info.Changes = append(info.Changes, workspace.Change{
 			Path: path,
 			Kind: gitMark(xy),
 			Adds: adds[path],
@@ -155,7 +155,7 @@ func gitLastCommit(ctx context.Context, dir string) time.Time {
 // maxReviewDiffLines bounds how much of one file's diff is read into memory.
 // The drawer draws fewer still; past this the app stops reading rather than
 // holding a megabyte of text it will never show.
-const maxReviewDiffLines = 4000
+const maxReviewDiffLines = workspace.MaxUnifiedDiffLines
 
 // gitFileDiff reads one path's full change as classified lines, returning the
 // lines, how many past the cap were not read, and an error.
@@ -163,7 +163,7 @@ const maxReviewDiffLines = 4000
 // An untracked file has no diff against HEAD, so it is compared against
 // /dev/null: the drawer then shows what would be added instead of an empty
 // pane that looks like "nothing changed here".
-func gitFileDiff(ctx context.Context, dir, path string) ([]chrome.DiffLine, int, error) {
+func gitFileDiff(ctx context.Context, dir, path string) ([]workspace.DiffLine, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -191,43 +191,15 @@ func gitIsUntracked(ctx context.Context, dir, path string) bool {
 	return cmd.Run() != nil
 }
 
-// classifyUnifiedDiff turns a unified diff into classified lines. Header and
-// hunk lines are kept as context so the reader can see where a change sits;
-// they are not content, but dropping them silently would misrepresent the
-// file.
-func classifyUnifiedDiff(text string) ([]chrome.DiffLine, int) {
-	if text == "" {
-		return nil, 0
-	}
-	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	omitted := 0
-	if len(raw) > maxReviewDiffLines {
-		omitted = len(raw) - maxReviewDiffLines
-		raw = raw[:maxReviewDiffLines]
-	}
-	out := make([]chrome.DiffLine, 0, len(raw))
-	for _, line := range raw {
-		line = strings.TrimRight(line, "\r")
-		out = append(out, chrome.DiffLine{Kind: diffLineKind(line), Text: line})
-	}
-	return out, omitted
+// classifyUnifiedDiff classifies a unified diff. The classification is a fact
+// about the text, so it lives in the workspace package; this wrapper keeps the
+// app's name for it.
+func classifyUnifiedDiff(text string) ([]workspace.DiffLine, int) {
+	return workspace.ClassifyUnifiedDiff(text)
 }
 
-// diffLineKind classifies one unified-diff line by its first character. The
-// three-dash and three-plus file headers are not additions or deletions, so
-// they are checked before the one-character rules.
-func diffLineKind(line string) string {
-	switch {
-	case strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
-		return chrome.DiffContext
-	case strings.HasPrefix(line, "+"):
-		return chrome.DiffAdd
-	case strings.HasPrefix(line, "-"):
-		return chrome.DiffDel
-	default:
-		return chrome.DiffContext
-	}
-}
+// diffLineKind classifies one unified-diff line.
+func diffLineKind(line string) string { return workspace.UnifiedLineKind(line) }
 
 // gitBranch reads the branch from the "## main...origin/main" header.
 func gitBranch(head string) string {

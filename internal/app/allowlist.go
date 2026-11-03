@@ -427,7 +427,7 @@ func allowlistCategoryLabel(category string) (kind, label string) {
 	}
 }
 
-func (c *Coordinator) runAllowlist(s *Session, action, scope, kind, key, pattern string) {
+func (c *Coordinator) runAllowlist(s *ProjectWindow, action, scope, kind, key, pattern string) {
 	state := &s.shell.Tools
 	if state.Busy {
 		return

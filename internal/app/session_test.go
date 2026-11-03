@@ -15,7 +15,7 @@ func timeNow() time.Time { return time.Now() }
 // reports nothing when it has none: an unknown state must not harden into a
 // claim about the user's credentials.
 func TestSessionAuthNoticeComesFromFx(t *testing.T) {
-	s := &Session{}
+	s := &ProjectWindow{}
 	s.fx = &FxStatus{Auth: "missing", AuthHelp: "fx needs access. Run fx login to sign in."}
 	got := s.authNotice()
 	if !got.NeedsSignIn() || got.Auth != "missing" {
@@ -32,7 +32,7 @@ func TestSessionAuthNoticeComesFromFx(t *testing.T) {
 }
 
 func TestAgentStateUsesFxReportedValues(t *testing.T) {
-	s := &Session{started: timeNow()}
+	s := &ProjectWindow{started: timeNow()}
 	s.fx = &FxStatus{Model: "zenmux/deepseek/deepseek-v4.1-flash", PermissionMode: "auto"}
 	s.usage = &FxUsage{}
 	s.usage.Totals.TotalTokens = 128400
@@ -60,7 +60,7 @@ func TestAgentStateUsesFxReportedValues(t *testing.T) {
 }
 
 func TestAgentStatePermissionsOverrideStatus(t *testing.T) {
-	s := &Session{started: timeNow()}
+	s := &ProjectWindow{started: timeNow()}
 	s.fx = &FxStatus{Model: "m", PermissionMode: "auto"}
 	s.perms = &FxPermissions{Mode: "full-access"}
 	if got := s.agentState().Permission; got != "full-access" {
@@ -69,7 +69,7 @@ func TestAgentStatePermissionsOverrideStatus(t *testing.T) {
 }
 
 func TestAgentStateZeroUsageHidesStats(t *testing.T) {
-	s := &Session{started: timeNow()}
+	s := &ProjectWindow{started: timeNow()}
 	a := s.agentState()
 	if a.Tokens != "" || a.Spend != "" {
 		t.Fatalf("empty usage should hide the stats: %+v", a)
@@ -81,7 +81,7 @@ func TestAgentStateZeroUsageHidesStats(t *testing.T) {
 // describe this run, and the account total is unavailable on other
 // providers. Spend remains the account figure, since that is what it is.
 func TestAgentStateUsesConversationTokens(t *testing.T) {
-	s := &Session{started: timeNow(), chat: &chatSession{}}
+	s := &ProjectWindow{started: timeNow(), chat: &chatSession{}}
 	s.chat.inputTokens, s.chat.outputTokens = 1200, 90
 	s.usage = &FxUsage{}
 	s.usage.Totals.TotalTokens = 9_900_000
@@ -97,7 +97,7 @@ func TestAgentStateUsesConversationTokens(t *testing.T) {
 }
 
 func TestAgentStateHidesAccountTokensInConversation(t *testing.T) {
-	s := &Session{started: timeNow(), chat: &chatSession{}}
+	s := &ProjectWindow{started: timeNow(), chat: &chatSession{}}
 	s.usage = &FxUsage{}
 	s.usage.Totals.TotalTokens = 9_900_000
 	s.usage.Totals.Spend = 3.5
@@ -112,7 +112,7 @@ func TestAgentStateHidesAccountTokensInConversation(t *testing.T) {
 }
 
 func TestAgentStateExitedAndAttention(t *testing.T) {
-	s := &Session{started: timeNow()}
+	s := &ProjectWindow{started: timeNow()}
 	s.exited = true
 	if got := s.agentState().Status; got != "Exited" {
 		t.Fatalf("status: %q", got)
@@ -124,7 +124,7 @@ func TestAgentStateExitedAndAttention(t *testing.T) {
 }
 
 func TestAgentStateUsesModelOverride(t *testing.T) {
-	s := &Session{started: timeNow(), model: "codex/gpt-5.5"}
+	s := &ProjectWindow{started: timeNow(), model: "codex/gpt-5.5"}
 	s.fx = &FxStatus{Model: "zenmux/deepseek/deepseek-v4.1-flash"}
 	// FX_DESKTOP_MODEL is what the session was launched with, so it wins.
 	if got := s.agentState().Model; got != "codex/gpt-5.5" {
@@ -135,7 +135,7 @@ func TestAgentStateUsesModelOverride(t *testing.T) {
 func TestRefreshSkipsCommandSessions(t *testing.T) {
 	// Command sessions have no workspace; both loaders must no-op rather
 	// than run fx or git in the process directory.
-	s := &Session{}
+	s := &ProjectWindow{}
 	s.refreshFxInfo()
 	if s.fx != nil || s.saved != nil {
 		t.Fatalf("command session should stay empty: %+v", s)
@@ -143,7 +143,7 @@ func TestRefreshSkipsCommandSessions(t *testing.T) {
 }
 
 func TestInvalidateWithoutWindowIsSafe(t *testing.T) {
-	s := &Session{}
+	s := &ProjectWindow{}
 	s.invalidate() // must not panic
 }
 
@@ -152,7 +152,7 @@ func TestInvalidateWithoutWindowIsSafe(t *testing.T) {
 // the accessors — this test fails under -race if anyone reverts to the bare
 // field.
 func TestWindowSnapshotIsRaceFree(t *testing.T) {
-	s := &Session{}
+	s := &ProjectWindow{}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -168,7 +168,7 @@ func TestWindowSnapshotIsRaceFree(t *testing.T) {
 }
 
 func TestSetStateWithoutWindowIsSafe(t *testing.T) {
-	s := &Session{}
+	s := &ProjectWindow{}
 	s.setExited(0)
 	s.setAttention()
 	if !s.exited || !s.attention {
@@ -189,7 +189,7 @@ func TestFormatElapsedBounds(t *testing.T) {
 // sessions it already has instead of blanking them.
 func TestRefreshFxInfoKeepsSavedOnError(t *testing.T) {
 	testutil.IsolateHome(t)
-	s := &Session{
+	s := &ProjectWindow{
 		coord:   NewCoordinator(),
 		project: "/p/proj",
 		stop:    make(chan struct{}),
@@ -209,12 +209,12 @@ func TestRefreshFxInfoKeepsSavedOnError(t *testing.T) {
 // setExited must carry the exit code: "Exited" and "Exited 1" are
 // different facts for the user reading the agent strip.
 func TestSetExitedRecordsCode(t *testing.T) {
-	s := &Session{stop: make(chan struct{}), started: timeNow()}
+	s := &ProjectWindow{stop: make(chan struct{}), started: timeNow()}
 	s.setExited(1)
 	if a := s.agentState(); a.Status != "Exited 1" {
 		t.Fatalf("status = %q, want \"Exited 1\"", a.Status)
 	}
-	s2 := &Session{stop: make(chan struct{}), started: timeNow()}
+	s2 := &ProjectWindow{stop: make(chan struct{}), started: timeNow()}
 	s2.setExited(0)
 	if a := s2.agentState(); a.Status != "Exited" {
 		t.Fatalf("status = %q, want \"Exited\"", a.Status)
@@ -226,17 +226,16 @@ func TestSetExitedRecordsCode(t *testing.T) {
 // spinning on "Reading workspace…".
 func TestRefreshGitRecordsNoRepository(t *testing.T) {
 	isolateWithGit(t)
-	s := &Session{coord: NewCoordinator(), project: t.TempDir(), stop: make(chan struct{})}
+	s := &ProjectWindow{coord: NewCoordinator(), project: t.TempDir(), stop: make(chan struct{})}
 	s.refreshGit()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.git != nil {
+	git, gitErr := s.workspace.gitSnapshot()
+	if git != nil {
 		t.Fatal("expected no git info outside a repository")
 	}
-	if !errors.Is(s.gitErr, errNoRepo) {
-		t.Fatalf("gitErr = %v, want errNoRepo", s.gitErr)
+	if !errors.Is(gitErr, errNoRepo) {
+		t.Fatalf("gitErr = %v, want errNoRepo", gitErr)
 	}
-	if got := workspaceState(s.git, s.gitErr); got != chrome.WorkspaceNotRepo {
+	if got := workspaceState(git, gitErr); got != chrome.WorkspaceNotRepo {
 		t.Fatalf("workspace state = %v, want %v", got, chrome.WorkspaceNotRepo)
 	}
 }

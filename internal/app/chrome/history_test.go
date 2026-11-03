@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+
+	"fx-desktop/internal/history"
 )
 
 func TestSidebarHistoryLimitsAndCollapsesRecentSessions(t *testing.T) {
@@ -36,7 +38,7 @@ func TestSidebarHistoryLimitsAndCollapsesRecentSessions(t *testing.T) {
 func TestHistoryBrowserSearchScopeResumeAndPagination(t *testing.T) {
 	h, sh := testHost()
 	h.Actions.OpenHistory = noop
-	sh.History = HistoryState{Open: true, Loaded: true, Entries: []HistorySession{{ID: "one", Title: "First conversation", Workspace: "/other", UpdatedAtMS: time.Now().UnixMilli()}}}
+	sh.History = HistoryState{Open: true, Paging: history.Paging{Loaded: true, Entries: []HistorySession{{ID: "one", Title: "First conversation", Workspace: "/other", UpdatedAtMS: time.Now().UnixMilli()}}}}
 	var action, id, path string
 	h.History = HistoryHost{Run: func(a string) { action = a }, Resume: func(i, p string) { id, path = i, p }, ActiveID: "one"}
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 720, 560)
@@ -82,7 +84,7 @@ func TestHistoryEmptyAndPartialSearchStatesFitMinimumWindow(t *testing.T) {
 	for _, dark := range []bool{false, true} {
 		h, sh := testHost()
 		h.Data.Saved = nil
-		h.Actions.OpenHistory = func() { sh.History = HistoryState{Open: true, Loaded: true, Exhausted: true} }
+		h.Actions.OpenHistory = func() { sh.History = HistoryState{Open: true, Paging: history.Paging{Loaded: true, Exhausted: true}} }
 		h.History.Run = func(string) {}
 		ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 720, 480)
 		ts.SetDark(dark)
@@ -225,7 +227,7 @@ func TestHistoryDateGroupsAndVirtualizedLongList(t *testing.T) {
 	}
 	h, sh := testHost()
 	h.Actions.OpenHistory = noop
-	sh.History = HistoryState{Open: true, Loaded: true, Exhausted: true}
+	sh.History = HistoryState{Open: true, Paging: history.Paging{Loaded: true, Exhausted: true}}
 	for i := 0; i < 2000; i++ {
 		sh.History.Entries = append(sh.History.Entries, HistorySession{ID: fmt.Sprint(i), Title: fmt.Sprintf("Conversation %04d", i), UpdatedAtMS: now.UnixMilli() - int64(i)*60000})
 	}

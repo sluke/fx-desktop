@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"maps"
-	"slices"
 	"sort"
 	"strings"
 
@@ -14,6 +12,7 @@ import (
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/fxsessions"
+	"fx-desktop/internal/history"
 )
 
 type fxSessionPage struct {
@@ -22,6 +21,9 @@ type fxSessionPage struct {
 	NextCursor string      `json:"next_cursor"`
 }
 
+// readSessionPage reads and validates one page from fx. Validation lives here
+// because it is about the wire — a malformed answer is an adapter problem, not
+// a search rule.
 func readSessionPage(ctx context.Context, executable, dir string, all bool, limit int, cursor string) (fxSessionPage, error) {
 	var page fxSessionPage
 	if limit < 1 || limit > 100 || strings.ContainsRune(cursor, 0) {
@@ -52,113 +54,63 @@ func readSessionPage(ctx context.Context, executable, dir string, all bool, limi
 	return page, nil
 }
 
-type historyRequest struct {
-	All           bool
-	Query, Cursor string
-	Pending       []chrome.HistorySession
-	Seen, Cursors map[string]bool
-	Scanned       int
-	Exhausted     bool
-}
-type historyResult struct {
-	historyRequest
-	Entries []chrome.HistorySession
-	Problem string
-}
-
-// Search walks source pages in bounded batches, retaining surplus matches for
-// the next 20-result batch. Errors retain the last successful source cursor.
-func readHistoryBatch(ctx context.Context, executable, dir string, request historyRequest) historyResult {
-	r := historyResult{historyRequest: request}
-	r.Seen = maps.Clone(request.Seen)
-	if r.Seen == nil {
-		r.Seen = map[string]bool{}
-	}
-	r.Cursors = maps.Clone(request.Cursors)
-	if r.Cursors == nil {
-		r.Cursors = map[string]bool{}
-	}
-	queue := slices.Clone(request.Pending)
-	r.Pending = nil
-	budget := 1
-	if request.Query != "" {
-		budget = 10
-	}
-	for n := 0; n < budget && len(queue) < 20 && !r.Exhausted; n++ {
-		page, err := readSessionPage(ctx, executable, dir, request.All, 20, r.Cursor)
+// historyReader adapts a specific fx/workspace pair to history.Reader, so the
+// rules never hold an executable path or a directory of their own.
+func historyReader(executable, dir string) history.Reader {
+	return func(ctx context.Context, all bool, limit int, cursor string) (history.Page, error) {
+		page, err := readSessionPage(ctx, executable, dir, all, limit, cursor)
 		if err != nil {
-			r.Problem = err.Error()
-			break
+			return history.Page{}, err
 		}
-		if page.NextCursor != "" && r.Cursors[page.NextCursor] {
-			r.Problem = "History cursor repeated; refresh or retry."
-			break
-		}
-		r.Cursors[r.Cursor] = true
-		r.Scanned += len(page.Sessions)
+		records := make([]history.Record, 0, len(page.Sessions))
 		for _, entry := range page.Sessions {
-			if entry.ID == "" || r.Seen[entry.ID] {
-				continue
-			}
-			r.Seen[entry.ID] = true
-			title := entry.Title
-			if title == "" {
-				title = entry.ID
-			}
-			if !strings.Contains(strings.ToLower(title), strings.ToLower(request.Query)) {
-				continue
-			}
-			queue = append(queue, chrome.HistorySession{ID: entry.ID, Title: entry.Title, Workspace: entry.WorkspaceRoot, UpdatedAtMS: entry.UpdatedAtMS})
+			records = append(records, history.Record{
+				ID: entry.ID, Title: entry.Title, WorkspaceRoot: entry.WorkspaceRoot, UpdatedAtMS: entry.UpdatedAtMS,
+			})
 		}
-		r.Cursor = page.NextCursor
-		r.Exhausted = page.NextCursor == ""
+		return history.Page{Sessions: records, HasMore: page.HasMore, NextCursor: page.NextCursor}, nil
 	}
-	r.Entries = slices.Clone(queue[:min(20, len(queue))])
-	r.Pending = slices.Clone(queue[min(20, len(queue)):])
-	return r
 }
 
-// readAllHistorySessions walks every page in one scope. Clear-all must not be
-// limited to the rows already loaded or to the current search. A repeated
-// cursor is an error rather than a loop: the source may be slow, never
-// infinite.
+// readHistoryBatch is the app's name for one bounded search batch.
+func readHistoryBatch(ctx context.Context, executable, dir string, request history.Request) history.Result {
+	return history.ReadBatch(ctx, historyReader(executable, dir), request)
+}
+
+// readAllHistorySessions walks every page in one scope, for clear-all.
 func readAllHistorySessions(ctx context.Context, executable, dir string, all bool) ([]FxSession, error) {
-	var sessions []FxSession
-	seenIDs := map[string]bool{}
-	seenCursors := map[string]bool{}
-	cursor := ""
-	for {
-		if seenCursors[cursor] {
-			return nil, fmt.Errorf("History cursor repeated; refresh or retry.")
-		}
-		seenCursors[cursor] = true
-		page, err := readSessionPage(ctx, executable, dir, all, 100, cursor)
-		if err != nil {
-			return nil, err
-		}
-		for _, session := range page.Sessions {
-			if session.ID == "" || seenIDs[session.ID] {
-				continue
-			}
-			seenIDs[session.ID] = true
-			sessions = append(sessions, session)
-		}
-		if !page.HasMore {
-			return sessions, nil
-		}
-		cursor = page.NextCursor
+	records, err := history.ReadAll(ctx, historyReader(executable, dir), all)
+	if err != nil {
+		return nil, err
 	}
+	sessions := make([]FxSession, 0, len(records))
+	for _, record := range records {
+		sessions = append(sessions, FxSession{ID: record.ID, Title: record.Title, WorkspaceRoot: record.WorkspaceRoot, UpdatedAtMS: record.UpdatedAtMS})
+	}
+	return sessions, nil
 }
 
-func (c *Coordinator) openHistory(s *Session) {
+// deletableHistoryIDs names the rows clear-all may delete.
+func deletableHistoryIDs(sessions []FxSession, live map[string]bool) []string {
+	records := make([]history.Record, 0, len(sessions))
+	for _, session := range sessions {
+		records = append(records, history.Record{ID: session.ID})
+	}
+	return history.Deletable(records, live)
+}
+
+// historySessionName makes a title safe for one line of a native dialog.
+func historySessionName(title, id string) string { return history.SessionName(title, id) }
+
+func (c *Coordinator) openHistory(s *ProjectWindow) {
 	s.shell.Tools.Open = false
 	state := &s.shell.History
 	generation := state.Generation + 1
-	*state = chrome.HistoryState{Open: true, Generation: generation}
+	*state = chrome.HistoryState{Open: true, Paging: history.Paging{Generation: generation}}
 	c.loadHistory(s, true)
 }
 
-func (c *Coordinator) sessionHistory(s *Session) chrome.HistoryHost {
+func (c *Coordinator) sessionHistory(s *ProjectWindow) chrome.HistoryHost {
 	h := chrome.HistoryHost{
 		Run:    func(action string) { mygo.App.WhenReady(func() { c.loadHistory(s, action != "more") }) },
 		Resume: c.sessionManagement(s).Resume,
@@ -172,35 +124,28 @@ func (c *Coordinator) sessionHistory(s *Session) chrome.HistoryHost {
 	return h
 }
 
-// liveSessionIDs names conversations open in any app window. History may
-// still show their rows, but deletion must wait until the owning window
-// closes: fx is writing that directory. Call this on the app loop, where
-// Session.chat is assigned.
+// liveSessionIDs names the conversations this app may still write to: the ones
+// open in a window, the ones still starting, and the ones whose window is gone
+// but whose fx process is not yet confirmed reaped. It is read from the app's
+// session registry rather than from the window list, because a window
+// disappears before its process does (T9, R3).
 func (c *Coordinator) liveSessionIDs() map[string]bool {
-	ids := map[string]bool{}
-	for _, s := range c.sessionsSnapshot() {
-		if s.chat == nil {
-			continue
-		}
-		if id := s.chat.status().SessionID; id != "" {
-			ids[id] = true
-		}
-	}
-	return ids
+	return c.sessionUse.snapshot()
 }
 
-// deletableHistoryIDs drops conversations that are open in a window. It also
-// drops an empty ID, which is not a row fx could have produced but must never
-// become a path.
-func deletableHistoryIDs(sessions []FxSession, live map[string]bool) []string {
-	ids := make([]string, 0, len(sessions))
-	for _, session := range sessions {
-		if session.ID == "" || live[session.ID] {
+// reserveDeletes claims the IDs a clear-all is about to remove. An ID a window
+// opened after the list was read is skipped rather than deleted under it, and
+// the claim itself refuses a restore for the whole deletion (T9).
+func (c *Coordinator) reserveDeletes(ids []string) (reserved []string, releases []func()) {
+	for _, id := range ids {
+		finish, ok := c.sessionUse.beginDelete(id)
+		if !ok {
 			continue
 		}
-		ids = append(ids, session.ID)
+		reserved = append(reserved, id)
+		releases = append(releases, finish)
 	}
-	return ids
+	return reserved, releases
 }
 
 // deleteHistorySessions performs the disk work after a confirmation. It also
@@ -217,22 +162,7 @@ func (c *Coordinator) deleteHistorySessions(ids []string) ([]string, error) {
 	return deleted, err
 }
 
-// historySessionName makes a session title safe for one line of a native
-// dialog. Titles come from prompts, so they can contain newlines and can be
-// arbitrarily long; an empty title falls back to the ID.
-func historySessionName(title, id string) string {
-	name := strings.Join(strings.Fields(title), " ")
-	if name == "" {
-		name = id
-	}
-	const maxLen = 120
-	if runes := []rune(name); len(runes) > maxLen {
-		name = string(runes[:maxLen-1]) + "…"
-	}
-	return name
-}
-
-func (c *Coordinator) deleteHistorySession(s *Session, id, title string) {
+func (c *Coordinator) deleteHistorySession(s *ProjectWindow, id, title string) {
 	mygo.App.WhenReady(func() {
 		w := s.winSnapshot()
 		if w == nil || w.IsDestroyed() {
@@ -242,9 +172,11 @@ func (c *Coordinator) deleteHistorySession(s *Session, id, title string) {
 			mygo.Dialog.Error("Delete saved session", "This saved session has an invalid ID.")
 			return
 		}
-		// The row is disabled for live sessions; check again because another
-		// window may have resumed this conversation since that frame.
-		if c.liveSessionIDs()[id] {
+		// The row was disabled for live sessions when the panel drew; ask the
+		// registry again because another window may have opened it since.
+		// This check is only the early answer — the claim below is the one
+		// that decides.
+		if c.sessionUse.inUse(id) {
 			mygo.Dialog.Error("Delete saved session", "This conversation is open in a window. Close it before deleting it.")
 			return
 		}
@@ -262,18 +194,28 @@ func (c *Coordinator) deleteHistorySession(s *Session, id, title string) {
 		if err != nil || result.Button != 1 {
 			return
 		}
+		// The user confirmed; now take the claim. Between the dialog and here
+		// another window may have resumed this conversation — the claim is
+		// what makes "one of the two" true instead of "both, in sequence"
+		// (T9).
+		finish, claimed := c.sessionUse.beginDelete(id)
+		if !claimed {
+			mygo.Dialog.Error("Delete saved session", "This conversation is open in a window. Close it before deleting it.")
+			return
+		}
 		state := &s.shell.History
 		if state.Deleting {
+			finish()
 			return
 		}
 		state.Deleting = true
 		s.invalidate()
 		go func() {
 			_, delErr := c.deleteHistorySessions([]string{id})
-			mygo.App.WhenReady(func() {
-				if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-					return
-				}
+			// Release on every path: a failed deletion must not leave the
+			// ID unusable (T9).
+			finish()
+			s.dispatch(func() {
 				state := &s.shell.History
 				state.Deleting = false
 				if delErr != nil {
@@ -291,7 +233,7 @@ func (c *Coordinator) deleteHistorySession(s *Session, id, title string) {
 // toggle is on. The list is re-read from fx rather than taken from the UI, so
 // unloaded pages and search-hidden sessions are included. Conversations open
 // in a window are always kept.
-func (c *Coordinator) clearHistory(s *Session, all bool) {
+func (c *Coordinator) clearHistory(s *ProjectWindow, all bool) {
 	mygo.App.WhenReady(func() {
 		w := s.winSnapshot()
 		if w == nil || w.IsDestroyed() {
@@ -322,13 +264,10 @@ func (c *Coordinator) clearHistory(s *Session, all bool) {
 		s.invalidate()
 		executable, dir := c.fxPathSnapshot(), s.project
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), fxTimeout)
+			ctx, cancel := context.WithTimeout(s.lifetime(), fxTimeout)
 			defer cancel()
 			sessions, listErr := readAllHistorySessions(ctx, executable, dir, all)
-			mygo.App.WhenReady(func() {
-				if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-					return
-				}
+			s.dispatch(func() {
 				state := &s.shell.History
 				if listErr != nil {
 					state.Deleting = false
@@ -337,7 +276,8 @@ func (c *Coordinator) clearHistory(s *Session, all bool) {
 					return
 				}
 				ids := deletableHistoryIDs(sessions, c.liveSessionIDs())
-				if len(ids) == 0 {
+				reserved, releases := c.reserveDeletes(ids)
+				if len(reserved) == 0 {
 					state.Deleting = false
 					s.invalidate()
 					_, _ = mygo.Dialog.Message(mygo.MessageOptions{
@@ -350,11 +290,14 @@ func (c *Coordinator) clearHistory(s *Session, all bool) {
 					return
 				}
 				go func() {
-					_, delErr := c.deleteHistorySessions(ids)
-					mygo.App.WhenReady(func() {
-						if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-							return
-						}
+					_, delErr := c.deleteHistorySessions(reserved)
+					// Every claimed ID is released, whatever happened on
+					// disk: a partial failure must not leave the survivors
+					// undeletable (T9).
+					for _, release := range releases {
+						release()
+					}
+					s.dispatch(func() {
 						state := &s.shell.History
 						state.Deleting = false
 						if delErr != nil {
@@ -369,20 +312,15 @@ func (c *Coordinator) clearHistory(s *Session, all bool) {
 	})
 }
 
-func applyHistoryResult(state *chrome.HistoryState, generation uint64, result historyResult) bool {
-	if !state.Open || state.Generation != generation {
+// applyHistoryResult publishes a batch against the panel it belongs to.
+func applyHistoryResult(state *chrome.HistoryState, generation uint64, result history.Result) bool {
+	if !state.Open {
 		return false
 	}
-	state.Busy = false
-	state.Loaded = true
-	state.Entries = append(state.Entries, result.Entries...)
-	sort.SliceStable(state.Entries, func(i, j int) bool { return state.Entries[i].UpdatedAtMS > state.Entries[j].UpdatedAtMS })
-	state.Pending, state.Seen, state.Cursors = result.Pending, result.Seen, result.Cursors
-	state.Cursor, state.Exhausted, state.Scanned, state.Problem = result.Cursor, result.Exhausted, result.Scanned, result.Problem
-	return true
+	return state.Apply(generation, result)
 }
 
-func (c *Coordinator) loadHistory(s *Session, reset bool) {
+func (c *Coordinator) loadHistory(s *ProjectWindow, reset bool) {
 	if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
 		return
 	}
@@ -391,26 +329,29 @@ func (c *Coordinator) loadHistory(s *Session, reset bool) {
 		return
 	}
 	if reset {
-		open, all, query, generation := state.Open, state.All, strings.TrimSpace(state.DraftQuery), state.Generation
-		*state = chrome.HistoryState{Open: open, All: all, DraftQuery: query, Query: query, Generation: generation}
+		open := state.Open
+		state.Reset(strings.TrimSpace(state.DraftQuery), state.All)
+		state.Open = open
 	} else if state.Busy || state.Loaded && !state.HasMore() && state.Problem == "" {
 		return
 	}
-	state.Generation++
+	state.Paging.Generation++
 	generation := state.Generation
 	state.Busy = true
 	state.Problem = ""
-	req := historyRequest{All: state.All, Query: state.Query, Cursor: state.Cursor, Pending: slices.Clone(state.Pending), Seen: maps.Clone(state.Seen), Cursors: maps.Clone(state.Cursors), Scanned: state.Scanned, Exhausted: state.Exhausted}
+	request := state.Request()
 	executable, dir := c.fxPathSnapshot(), s.project
 	s.invalidate()
+	// A newer search or refresh retires this one: the read stops instead of
+	// finishing for a result the generation check would drop. The scope is
+	// claimed before the worker starts, so the newer query wins the race.
+	scope, stop := s.scope("history")
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), fxTimeout)
+		defer stop()
+		ctx, cancel := context.WithTimeout(scope, fxTimeout)
 		defer cancel()
-		result := readHistoryBatch(ctx, executable, dir, req)
-		mygo.App.WhenReady(func() {
-			if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-				return
-			}
+		result := readHistoryBatch(ctx, executable, dir, request)
+		s.dispatch(func() {
 			if !applyHistoryResult(&s.shell.History, generation, result) {
 				return
 			}

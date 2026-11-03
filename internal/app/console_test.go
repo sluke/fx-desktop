@@ -7,16 +7,18 @@ import (
 	"fx-desktop/internal/testutil"
 )
 
-func consoleSession() *Session {
-	return &Session{shell: chrome.DefaultShell()}
+func consoleSession() *ProjectWindow {
+	s := &ProjectWindow{shell: chrome.DefaultShell()}
+	s.console.window = s
+	return s
 }
 
 // A run that starts must be visible: starting one is the whole affordance for
 // finding the console at all, and the newest run is the one the user means.
 func TestAttachConsoleRunShowsTheDrawerAndSelectsIt(t *testing.T) {
 	s := consoleSession()
-	first := s.attachConsoleRun(&consoleRun{title: "fx doctor"})
-	second := s.attachConsoleRun(&consoleRun{title: "fx credits"})
+	first := s.console.attach(&consoleRun{title: "fx doctor"})
+	second := s.console.attach(&consoleRun{title: "fx credits"})
 	if !s.shell.ConsoleOpen {
 		t.Fatal("starting a run should open the drawer")
 	}
@@ -26,7 +28,7 @@ func TestAttachConsoleRunShowsTheDrawerAndSelectsIt(t *testing.T) {
 	if first.id == second.id {
 		t.Fatal("runs need ids of their own")
 	}
-	if got := s.activeConsole(); got != second {
+	if got := s.console.active(); got != second {
 		t.Fatalf("activeConsole = %v, want the newest run", got)
 	}
 }
@@ -38,8 +40,8 @@ func TestSessionConsoleProjectsEveryRunInOrder(t *testing.T) {
 	testutil.IsolateHome(t)
 	coord := NewCoordinator()
 	s := consoleSession()
-	s.attachConsoleRun(&consoleRun{title: "fx doctor", command: "fx doctor", exited: true, exit: 2})
-	s.attachConsoleRun(&consoleRun{title: "fx pr", command: "fx pr"})
+	s.console.attach(&consoleRun{title: "fx doctor", command: "fx doctor", exited: true, exit: 2})
+	s.console.attach(&consoleRun{title: "fx pr", command: "fx pr"})
 
 	d := coord.sessionConsole(s)
 	if len(d.Runs) != 2 {
@@ -65,7 +67,7 @@ func TestFinishConsoleRunRecordsTheExitCode(t *testing.T) {
 	testutil.IsolateHome(t)
 	coord := NewCoordinator()
 	s := consoleSession()
-	run := s.attachConsoleRun(&consoleRun{title: "fx doctor"})
+	run := s.console.attach(&consoleRun{title: "fx doctor"})
 	var told int
 	run.done = func(code int) { told = code }
 
@@ -77,7 +79,7 @@ func TestFinishConsoleRunRecordsTheExitCode(t *testing.T) {
 		t.Fatalf("done was told %d, want 2", told)
 	}
 
-	closed := s.attachConsoleRun(&consoleRun{title: "fx login"})
+	closed := s.console.attach(&consoleRun{title: "fx login"})
 	closed.removed = true
 	called := false
 	closed.done = func(int) { called = true }
@@ -93,14 +95,14 @@ func TestToggleConsoleKeepsTheRuns(t *testing.T) {
 	testutil.IsolateHome(t)
 	coord := NewCoordinator()
 	s := consoleSession()
-	s.attachConsoleRun(&consoleRun{title: "fx doctor"})
+	s.console.attach(&consoleRun{title: "fx doctor"})
 
 	coord.toggleConsole(s)
 	if s.shell.ConsoleOpen {
 		t.Fatal("toggle-console should hide the drawer")
 	}
-	if len(s.consoles) != 1 {
-		t.Fatalf("runs = %d, want the run to survive hiding", len(s.consoles))
+	if len(s.console.runs) != 1 {
+		t.Fatalf("runs = %d, want the run to survive hiding", len(s.console.runs))
 	}
 	coord.toggleConsole(s)
 	if !s.shell.ConsoleOpen {
@@ -114,9 +116,9 @@ func TestCloseConsoleRunFallsToANeighbourThenCloses(t *testing.T) {
 	testutil.IsolateHome(t)
 	coord := NewCoordinator()
 	s := consoleSession()
-	r1 := s.attachConsoleRun(&consoleRun{title: "one"})
-	r2 := s.attachConsoleRun(&consoleRun{title: "two"})
-	r3 := s.attachConsoleRun(&consoleRun{title: "three"})
+	r1 := s.console.attach(&consoleRun{title: "one"})
+	r2 := s.console.attach(&consoleRun{title: "two"})
+	r3 := s.console.attach(&consoleRun{title: "three"})
 
 	coord.closeConsoleRun(s, r2.id)
 	if !r2.removed {
@@ -125,8 +127,8 @@ func TestCloseConsoleRunFallsToANeighbourThenCloses(t *testing.T) {
 	if s.shell.ConsoleRun != r3.id {
 		t.Fatalf("selection = %d, want the run that took its place", s.shell.ConsoleRun)
 	}
-	if len(s.consoles) != 2 || s.consoles[0] != r1 || s.consoles[1] != r3 {
-		t.Fatalf("runs = %+v", s.consoles)
+	if len(s.console.runs) != 2 || s.console.runs[0] != r1 || s.console.runs[1] != r3 {
+		t.Fatalf("runs = %+v", s.console.runs)
 	}
 
 	coord.closeConsoleRun(s, r3.id)
@@ -135,8 +137,8 @@ func TestCloseConsoleRunFallsToANeighbourThenCloses(t *testing.T) {
 	}
 
 	coord.closeConsoleRun(s, r1.id)
-	if len(s.consoles) != 0 || s.shell.ConsoleOpen {
-		t.Fatalf("an emptied drawer should close itself: runs=%d open=%v", len(s.consoles), s.shell.ConsoleOpen)
+	if len(s.console.runs) != 0 || s.shell.ConsoleOpen {
+		t.Fatalf("an emptied drawer should close itself: runs=%d open=%v", len(s.console.runs), s.shell.ConsoleOpen)
 	}
 }
 
@@ -146,8 +148,8 @@ func TestSelectConsoleShowsTheDrawer(t *testing.T) {
 	testutil.IsolateHome(t)
 	coord := NewCoordinator()
 	s := consoleSession()
-	r1 := s.attachConsoleRun(&consoleRun{title: "one"})
-	s.attachConsoleRun(&consoleRun{title: "two"})
+	r1 := s.console.attach(&consoleRun{title: "one"})
+	s.console.attach(&consoleRun{title: "two"})
 	coord.toggleConsole(s)
 
 	coord.selectConsole(s, r1.id)
@@ -162,7 +164,7 @@ func TestSelectConsoleShowsTheDrawer(t *testing.T) {
 func TestSessionActionsWireTheConsoleOnlyForAProject(t *testing.T) {
 	testutil.IsolateHome(t)
 	coord := NewCoordinator()
-	project := coord.sessionActions(&Session{project: "/p", shell: chrome.DefaultShell()})
+	project := coord.sessionActions(&ProjectWindow{project: "/p", shell: chrome.DefaultShell()})
 	if project.ToggleConsole == nil || project.SelectConsole == nil || project.CloseConsoleRun == nil {
 		t.Fatalf("a project window needs the console: %+v", project)
 	}
@@ -170,7 +172,7 @@ func TestSessionActionsWireTheConsoleOnlyForAProject(t *testing.T) {
 		t.Fatal("a project window signs in through the console")
 	}
 
-	command := coord.sessionActions(&Session{shell: chrome.DefaultShell()})
+	command := coord.sessionActions(&ProjectWindow{shell: chrome.DefaultShell()})
 	if command.ToggleConsole != nil || command.SelectConsole != nil || command.CloseConsoleRun != nil {
 		t.Fatalf("a command window has no drawer to offer: %+v", command)
 	}
@@ -185,20 +187,20 @@ func TestSessionActionsWireTheConsoleOnlyForAProject(t *testing.T) {
 func TestConsoleTabsStayBoundedWithoutKillingRunningRuns(t *testing.T) {
 	s := consoleSession()
 	for i := 0; i < 12; i++ {
-		s.attachConsoleRun(&consoleRun{title: "run"})
+		s.console.attach(&consoleRun{title: "run"})
 	}
-	if len(s.consoles) != 12 {
-		t.Fatalf("dropped a running run: %d tabs", len(s.consoles))
+	if len(s.console.runs) != 12 {
+		t.Fatalf("dropped a running run: %d tabs", len(s.console.runs))
 	}
-	for _, run := range s.consoles {
+	for _, run := range s.console.runs {
 		run.exited = true
 	}
-	newest := s.attachConsoleRun(&consoleRun{title: "fresh"})
-	if len(s.consoles) != consoleRunLimit {
-		t.Fatalf("drawer holds %d runs; want %d", len(s.consoles), consoleRunLimit)
+	newest := s.console.attach(&consoleRun{title: "fresh"})
+	if len(s.console.runs) != consoleRunLimit {
+		t.Fatalf("drawer holds %d runs; want %d", len(s.console.runs), consoleRunLimit)
 	}
-	kept := make(map[uint64]bool, len(s.consoles))
-	for _, run := range s.consoles {
+	kept := make(map[uint64]bool, len(s.console.runs))
+	for _, run := range s.console.runs {
 		kept[run.id] = true
 	}
 	if !kept[newest.id] {

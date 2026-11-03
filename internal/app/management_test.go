@@ -176,7 +176,7 @@ func TestChatRetainsSupportedAdvancedLaunchArguments(t *testing.T) {
 func TestAdvancedLaunchKeepsCurrentModelWithoutOverride(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-local-stub")
 	previous := newChatSession(path, t.TempDir(), []string{"--model", "current/model"}, nil)
-	s := &Session{coord: &Coordinator{fxPath: path}, project: t.TempDir(), chat: previous}
+	s := &ProjectWindow{coord: &Coordinator{fxPath: path}, project: t.TempDir(), chat: previous}
 	s.replaceConversation([]string{"--ultrafast"})
 	defer s.chat.Close()
 	if s.chat.model != "current/model" {

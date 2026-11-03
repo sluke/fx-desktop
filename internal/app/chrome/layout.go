@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/egoist/mygo/ui"
+
+	"fx-desktop/internal/workspace"
 )
 
 // projectAgentCommands is where the palette's "Project & agent" group ends
@@ -16,12 +18,7 @@ const projectAgentCommands = 19
 
 // Change is one modified path in the rail's changes section (and, later, the
 // review drawer).
-type Change struct {
-	Path string
-	Kind string // "M", "A", "D", "R" or "?"
-	Adds int
-	Dels int
-}
+type Change = workspace.Change
 
 // SavedSession is one conversation fx saved for the workspace, read from
 // `fx sessions --json`. Resuming uses the owning project's window.
@@ -711,6 +708,11 @@ func agentBar(c *ui.Context, a Agent, p Palette) {
 	// and the drawer have already taken their share of. Nothing is measured
 	// on the first frame, which fitAgent answers with the width ladder.
 	room := row.Bounds().W
+	if agentStripRoom != nil {
+		// A test reads the room the strip actually got, so its expectations
+		// follow this pane instead of assuming a width from the window.
+		agentStripRoom(room)
+	}
 	row.Children(func() {
 		fit := fitAgent(c, a, room)
 		statBlock(c, p, "", a.Status, false)
@@ -747,6 +749,13 @@ func agentBar(c *ui.Context, a Agent, p Palette) {
 		}
 	})
 }
+
+// agentStripRoom, when a test sets it, receives the width the strip measured
+// for itself on the frame it drew. It exists because that number — the pane's
+// width after the rail and the drawer took their share — is the premise of the
+// fixed-width layout tests, and a test must read it from the layout rather than
+// assume it from the window width. It is nil in the app.
+var agentStripRoom func(float32)
 
 // agentFit is what the agent strip shows of the run: the model name to print
 // (empty for none) and which optional blocks fit beside it.

@@ -50,8 +50,8 @@ func TestViewMenuBindsAdvertisedAccelerators(t *testing.T) {
 func TestViewShortcutsTargetFocusedWindow(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, shell: chrome.DefaultShell()}
-	c.sessions = []*Session{s}
+	s := &ProjectWindow{coord: c, shell: chrome.DefaultShell()}
+	c.sessions = []*ProjectWindow{s}
 
 	c.toggleSidebar(nilForTest())
 	if s.shell.SidebarOpen {
@@ -98,7 +98,7 @@ func nilForTest() *mygo.Window { return nil }
 func TestSessionForWindowSkipsWindowlessSessions(t *testing.T) {
 	testutil.IsolateHome(t)
 	c := NewCoordinator()
-	s := &Session{coord: c, shell: chrome.DefaultShell()}
+	s := &ProjectWindow{coord: c, shell: chrome.DefaultShell()}
 	c.addSession(s)
 	if got := c.sessionForWindow(nil); got != nil {
 		t.Fatalf("sessionForWindow(nil) = %v, want nil for a windowless session", got)

@@ -15,10 +15,40 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/app/presenter"
 )
 
-// Session is one fx terminal window.
-type Session struct {
+// ProjectWindow is one window of the app. It owns a window handle, a workspace and
+// (for a project window) one live conversation; each of those has its own
+// generation, so a late result from an older workspace, conversation or
+// history query can never be published as if it were current (§4.4).
+type ProjectWindow struct {
+	// windowID names this window for the lifetime of the app. It is assigned
+	// on the app loop and never reused, so a queued closure that names a
+	// window cannot reach a different one.
+	windowID uint64
+	// ctx is the window's lifetime. Every background task — history, git,
+	// files, fx queries, submit preparation — derives from it, so closing
+	// the window cancels them all instead of leaving each to invent its own
+	// scope.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// swap serializes conversation replacement and owns the conversation
+	// generation and the process barrier (§B1, §B4).
+	swap conversationSwap
+	// loop is the app loop a test owns. When nil, dispatch uses the toolkit's
+	// loop (or runs inline for a window that has none); a test sets it to a
+	// queue it drains itself, so "UI work happens on one goroutine" is a
+	// property the test can actually observe rather than inherit from the
+	// inline fallback (§2.1).
+	loop func(func())
+	// draftVersion names submissions; draftRevision counts composer edits and
+	// draftSeen is the text the last count was taken at (§B5). App loop only,
+	// like chatUI.
+	draftVersion    uint64
+	draftRevision   uint64
+	draftSeen       string
+	preparing       *submitRequest
 	conversationKey uint64
 	coord           *Coordinator
 	appearance      terminalAppearance
@@ -36,11 +66,28 @@ type Session struct {
 	// attachmentSeq names the composer's attachments. It is only touched on
 	// the app loop, alongside chatUI.
 	attachmentSeq uint64
-	// consoles are the command runs this window's console drawer holds, in
-	// the order they started, and consoleSeq names them (§4.7). App loop
-	// only, like chatUI.
-	consoles   []*consoleRun
-	consoleSeq uint64
+	// images are the attachment reads this window started and has not
+	// published yet. A conversation swap or a close retires them, so a result
+	// that arrives later is not attached to another draft (N1).
+	images []*imageBatch
+	// imageBudget is how much decoded image memory this window holds at once
+	// and how many images it decodes in parallel (R5). Every batch, the
+	// clipboard paste included, shares this one budget: per-batch accounting
+	// cannot bound the window.
+	imageBudget imageDecodeBudget
+	// imagePending is the window's admission for the compressed bytes of
+	// images that are being added: the files a batch is reading, the clipboard
+	// bytes a paste holds, and the reads waiting to be adopted. It sits in
+	// front of imageBudget, so several drops share one ceiling instead of
+	// each taking a batch's worth (S5).
+	imagePending imagePendingBudget
+	// console is the command drawer this window owns (§4.7). It is app-loop
+	// state, like chatUI: a terminal's goroutine reports to it by asking the
+	// app to run the change.
+	console consoleController
+	// scopes holds one cancellable child of ctx per feature (git, history,
+	// fx queries, review, …), so a newer query retires the older one.
+	scopes featureScopes
 	// title is the command session's window title (fx doctor, fx ask …). A
 	// project session leaves it empty and derives its name from the path.
 	title string
@@ -49,43 +96,33 @@ type Session struct {
 	started time.Time
 	model   string
 
-	mu        sync.Mutex
-	git       *GitInfo
-	fx        *FxStatus
-	usage     *FxUsage
-	perms     *FxPermissions
-	saved     []FxSession
+	mu    sync.Mutex
+	fx    *FxStatus
+	usage *FxUsage
+	perms *FxPermissions
+	saved []FxSession
+	// fxGen names the newest fx status/usage/permission read; savedGen names
+	// the newest read that may write `saved`, whichever feature started it.
+	// A feature's cancel retires the command, but a result already computed
+	// still arrives — the generation is the admission check, and it lives
+	// beside the state it publishes (N4).
+	fxGen     uint64
+	savedGen  uint64
 	attention bool
 	exited    bool
 	exitCode  int
-	// reviewedAt is when the user last opened the review drawer. With the
-	// last commit time it forms the "已审水位" §5 defines: changes newer than
-	// both are what the rail raises.
-	reviewedAt time.Time
-	// review is the diff the drawer has loaded: the path it belongs to, the
-	// classified lines, what the read cap left out, and why it may be empty.
-	reviewPath string
-	reviewDiff []chrome.DiffLine
-	reviewMore int
-	reviewNote string
-	reviewBusy bool
-	// gitErr records that the last read failed, so the panel can say so
-	// instead of showing "Reading workspace…" forever.
-	gitErr error
-	// files is the right rail's Files tab: the listings it has read and the
-	// folders the user opened. Reads finish off the app loop, so it is
-	// guarded by mu like the other data they produce.
-	files *fileBrowser
-	// mentionFiles are the project's files the @ picker offers, read when the
-	// picker opens; mentionErr is why they could not be.
-	mentionFiles   []chrome.MentionFile
-	mentionLoading bool
-	mentionErr     error
+	// workspace is everything read about this window's directory. It has its
+	// own lock; the fields above are the window's own facts.
+	workspace workspaceController
 
 	stop chan struct{}
 }
 
-func (s *Session) view(ctx *ui.Context) {
+func (s *ProjectWindow) view(ctx *ui.Context) {
+	// Every pass sees the draft the composer will render, so an edit since
+	// the last frame is counted even if the user submits before it repaints
+	// (§B5).
+	s.observeDraft()
 	term := s.term
 	c := s.coord
 	agent := s.agentState()
@@ -143,27 +180,17 @@ func (s *Session) view(ctx *ui.Context) {
 					MentionFiles: mentionFiles, MentionLoading: mentionLoading, MentionProblem: mentionProblem,
 					CanMention:   snapshot.Files,
 					OpenMentions: func() { s.coord.openMentions(s) },
-					// A mention names a file in the message, so it is read
-					// here: what cannot be attached refuses the message, with
-					// the reason, rather than being sent as a name fx cannot
-					// open.
-					Send: func(text string, attachments []chrome.Attachment) bool {
-						var mentions []promptMention
-						if snapshot.Files {
-							var problem string
-							mentions, problem = resolveMentions(s.project, text)
-							if problem != "" {
-								s.coord.setAttachError(s, problem)
-								return false
-							}
-						}
-						if s.chatUI.AttachError != "" {
-							s.chatUI.AttachError = ""
-							s.invalidate()
-						}
-						return s.chat.submit(text, toPromptImages(attachments), mentions)
-					},
-					Stop: s.chat.stopTurn, ChoosePermission: s.chat.choosePermission, SetConfig: s.chat.setConfig,
+					// Submitting never does file I/O on this thread: the draft
+					// is handed to a preparation step whose result comes back
+					// through dispatch, checked against the draft and
+					// conversation generations (§4.2).
+					Preparing: s.preparingSubmit(),
+					Send:      s.sendDraft,
+					// An edit is an event, not a difference the next frame
+					// happens to notice: the draft's revision follows the
+					// control's own changes (§B5, N2).
+					DraftEdited: s.draftEdited,
+					Stop:        s.chat.stopTurn, ChoosePermission: s.chat.choosePermission, SetConfig: s.chat.setConfig,
 					// The copy-feedback revert fires from a timer goroutine;
 					// Invalidate is documented goroutine-safe.
 					Changed: s.invalidate,
@@ -187,7 +214,7 @@ func (s *Session) view(ctx *ui.Context) {
 // fx asks with CSI ?997 and answers fx's OSC 11 probe with its own colors; the
 // send is deferred to the end of the frame so the terminal sees the colors the
 // frame just applied.
-func (s *Session) syncTerminalAppearance(dark bool) {
+func (s *ProjectWindow) syncTerminalAppearance(dark bool) {
 	changed, generation := s.appearance.observe(dark)
 	if !changed {
 		return
@@ -200,7 +227,7 @@ func (s *Session) syncTerminalAppearance(dark bool) {
 		if s.term != nil {
 			s.term.Send(report)
 		}
-		for _, run := range s.consoles {
+		for _, run := range s.console.runs {
 			if run.term != nil {
 				run.term.Send(report)
 			}
@@ -212,7 +239,7 @@ func (s *Session) syncTerminalAppearance(dark bool) {
 // working-tree state. The branch and the permission mode are deliberately
 // left out — they already appear, closer to the work, in the session bar
 // and the agent strip.
-func (s *Session) statusLeft(version string) []string {
+func (s *ProjectWindow) statusLeft(version string) []string {
 	if version == "" {
 		return nil
 	}
@@ -220,13 +247,8 @@ func (s *Session) statusLeft(version string) []string {
 }
 
 // statusHi highlights the working-tree state, or nothing when clean.
-func (s *Session) statusHi() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := 0
-	if s.git != nil {
-		n = len(s.git.Changes)
-	}
+func (s *ProjectWindow) statusHi() string {
+	n := s.workspace.changeCount()
 	if n == 0 {
 		return ""
 	}
@@ -236,7 +258,7 @@ func (s *Session) statusHi() string {
 // statusRight is the right group: where the session is rooted. Terminal
 // font and encoding used to sit here too; they are IDE habits that no one
 // reads in an agent client, so they were dropped rather than repeated.
-func (s *Session) statusRight() []string {
+func (s *ProjectWindow) statusRight() []string {
 	if s.project == "" {
 		return nil
 	}
@@ -245,19 +267,19 @@ func (s *Session) statusRight() []string {
 
 // setWin publishes the window; winSnapshot is how every other goroutine
 // reads it, including the terminal's own title and exit callbacks.
-func (s *Session) setWin(w *mygo.Window) {
+func (s *ProjectWindow) setWin(w *mygo.Window) {
 	s.winMu.Lock()
 	s.win = w
 	s.winMu.Unlock()
 }
 
-func (s *Session) winSnapshot() *mygo.Window {
+func (s *ProjectWindow) winSnapshot() *mygo.Window {
 	s.winMu.Lock()
 	defer s.winMu.Unlock()
 	return s.win
 }
 
-func (s *Session) invalidate() {
+func (s *ProjectWindow) invalidate() {
 	if w := s.winSnapshot(); w != nil && !w.IsDestroyed() {
 		w.Invalidate()
 	}
@@ -268,7 +290,7 @@ func (s *Session) invalidate() {
 // process state, git branch and session uptime.
 // authNotice is fx's sign-in state for this session, read the same way
 // agentState reads its fx info.
-func (s *Session) authNotice() chrome.AuthNotice {
+func (s *ProjectWindow) authNotice() chrome.AuthNotice {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.fx == nil {
@@ -277,7 +299,7 @@ func (s *Session) authNotice() chrome.AuthNotice {
 	return chrome.AuthNotice{Auth: s.fx.Auth, Help: s.fx.AuthHelp, Providers: s.fx.ConnectedProviders}
 }
 
-func (s *Session) agentState() chrome.Agent {
+func (s *ProjectWindow) agentState() chrome.Agent {
 	a := chrome.Agent{
 		Model:   s.model,
 		Elapsed: formatElapsed(time.Since(s.started)),
@@ -313,10 +335,12 @@ func (s *Session) agentState() chrome.Agent {
 	if s.attention {
 		a.Status = "Attention"
 	}
-	if s.git != nil {
-		a.Branch = s.git.Branch
-	}
 	s.mu.Unlock()
+	// Read outside the window lock: the workspace has its own, and the two
+	// are never nested (§4.4).
+	if branch := s.workspace.branch(); branch != "" {
+		a.Branch = branch
+	}
 	if s.chat != nil {
 		st := s.chat.status()
 		if st.Model != "" {
@@ -356,16 +380,37 @@ func (s *Session) agentState() chrome.Agent {
 	return a
 }
 
-// refreshGit re-reads the working tree off the UI thread and repaints. It
-// records what came back, including "this is not a repository": a panel that
-// keeps saying "Reading workspace…" after an answer is lying to the user.
-func (s *Session) refreshGit() {
-	info, err := gitInfo(context.Background(), s.project)
-	s.mu.Lock()
-	s.git = info
-	s.gitErr = err
-	s.mu.Unlock()
-	s.invalidate()
+// startGitRefresh starts a working-tree read off the UI thread. The
+// generation is allocated here — where the refresh is asked for — rather than
+// inside the goroutine, so a read that starts late cannot claim to be newer
+// than one requested after it (N4).
+func (s *ProjectWindow) startGitRefresh() {
+	ctx, stop := s.scope("git")
+	gen := s.workspace.beginGitRead()
+	go func() {
+		defer stop()
+		s.readGit(ctx, gen)
+	}()
+}
+
+// refreshGit is the synchronous form: the caller already runs it on a worker.
+func (s *ProjectWindow) refreshGit() {
+	ctx, stop := s.scope("git")
+	defer stop()
+	s.readGit(ctx, s.workspace.beginGitRead())
+}
+
+// readGit performs one read and publishes it only while it is still the
+// newest. A result that lost the race is dropped instead of repainting a
+// snapshot that a newer read already replaced.
+func (s *ProjectWindow) readGit(ctx context.Context, gen uint64) {
+	info, err := gitInfo(ctx, s.project)
+	if ctx.Err() != nil {
+		return
+	}
+	if s.workspace.publishGit(gen, info, err) {
+		s.invalidate()
+	}
 }
 
 // workspaceState maps a git read into the vocabulary the rail and the drawer
@@ -384,27 +429,66 @@ func workspaceState(git *GitInfo, err error) chrome.WorkspaceState {
 	}
 }
 
-// workspace is this session's git state, read under the lock the render pass
-// has to respect.
-func (s *Session) workspace() chrome.WorkspaceState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return workspaceState(s.git, s.gitErr)
-}
-
-// refreshFxInfo re-reads fx's own state off the UI thread and repaints.
-// Command sessions have no workspace, so they are skipped.
-func (s *Session) refreshFxInfo() {
+// startFxRefresh starts fx's own state read off the UI thread. Command
+// sessions have no workspace, so they are skipped. The generations are
+// allocated at the request, before the goroutine runs (N4).
+func (s *ProjectWindow) startFxRefresh() {
 	if s.project == "" {
 		return
 	}
-	ctx := context.Background()
+	ctx, stop := s.scope("fx")
+	fxGen, savedGen := s.beginFxRead()
+	go func() {
+		defer stop()
+		s.readFxInfo(ctx, fxGen, savedGen)
+	}()
+}
+
+// refreshFxInfo is the synchronous form. It publishes nothing that is no
+// longer the newest read.
+func (s *ProjectWindow) refreshFxInfo() {
+	if s.project == "" {
+		return
+	}
+	ctx, stop := s.scope("fx")
+	defer stop()
+	fxGen, savedGen := s.beginFxRead()
+	s.readFxInfo(ctx, fxGen, savedGen)
+}
+
+// beginFxRead tickets one fx read. It shares savedGen with beginSavedRead
+// because both features write the same `saved` field: whichever was asked for
+// last is the one whose answer stands (N4).
+func (s *ProjectWindow) beginFxRead() (fxGen, savedGen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fxGen++
+	s.savedGen++
+	return s.fxGen, s.savedGen
+}
+
+func (s *ProjectWindow) readFxInfo(ctx context.Context, fxGen, savedGen uint64) {
 	fxPath := s.coord.fxPathSnapshot()
 	st, _ := fxStatus(ctx, fxPath, s.project)
 	us, _ := fxUsage(ctx, fxPath, s.project)
 	pm, _ := fxPermissions(ctx, fxPath, s.project)
 	sv, svErr := fxSessions(ctx, fxPath, s.project)
+	if ctx.Err() != nil {
+		return
+	}
+	if s.publishFx(fxGen, savedGen, st, us, pm, sv, svErr) {
+		s.invalidate()
+	}
+}
+
+// publishFx replaces as much of fx's state as this read may still own. The
+// generation check and the writes are one critical section.
+func (s *ProjectWindow) publishFx(fxGen, savedGen uint64, st *FxStatus, us *FxUsage, pm *FxPermissions, sv []FxSession, svErr error) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if fxGen != s.fxGen {
+		return false
+	}
 	if st != nil {
 		s.fx = st
 	}
@@ -416,29 +500,63 @@ func (s *Session) refreshFxInfo() {
 	}
 	// A failed query is not an empty result: keep what we already have
 	// rather than blanking the panel.
-	if svErr == nil {
+	if svErr == nil && savedGen == s.savedGen {
 		s.saved = sv
 	}
-	s.mu.Unlock()
-	s.invalidate()
+	return true
 }
 
-// refreshSavedList rereads the five most recent saved conversations without
+// startSavedRefresh rereads the five most recent saved conversations without
 // the status, usage and permission queries refreshFxInfo also makes. Deleting
 // history changes only this list, and every open window may show the removed
 // row in its sidebar.
-func (s *Session) refreshSavedList() {
+func (s *ProjectWindow) startSavedRefresh() {
 	if s.project == "" {
 		return
 	}
-	saved, err := fxSessions(context.Background(), s.coord.fxPathSnapshot(), s.project)
-	if err != nil {
+	ctx, stop := s.scope("fx-saved")
+	gen := s.beginSavedRead()
+	go func() {
+		defer stop()
+		s.readSavedList(ctx, gen)
+	}()
+}
+
+// refreshSavedList is the synchronous form.
+func (s *ProjectWindow) refreshSavedList() {
+	if s.project == "" {
 		return
 	}
+	ctx, stop := s.scope("fx-saved")
+	defer stop()
+	s.readSavedList(ctx, s.beginSavedRead())
+}
+
+func (s *ProjectWindow) beginSavedRead() uint64 {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.savedGen++
+	return s.savedGen
+}
+
+func (s *ProjectWindow) readSavedList(ctx context.Context, gen uint64) {
+	saved, err := fxSessions(ctx, s.coord.fxPathSnapshot(), s.project)
+	if err != nil || ctx.Err() != nil {
+		return
+	}
+	if s.publishSaved(gen, saved) {
+		s.invalidate()
+	}
+}
+
+func (s *ProjectWindow) publishSaved(gen uint64, saved []FxSession) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if gen != s.savedGen {
+		return false
+	}
 	s.saved = saved
-	s.mu.Unlock()
-	s.invalidate()
+	return true
 }
 
 // refreshSavedLists updates the sidebar history of every open window after a
@@ -447,12 +565,12 @@ func (s *Session) refreshSavedList() {
 func (c *Coordinator) refreshSavedLists() {
 	for _, s := range c.sessionsSnapshot() {
 		if s.project != "" {
-			go s.refreshSavedList()
+			s.startSavedRefresh()
 		}
 	}
 }
 
-func (s *Session) setAttention() {
+func (s *ProjectWindow) setAttention() {
 	s.mu.Lock()
 	s.attention = true
 	s.mu.Unlock()
@@ -462,7 +580,7 @@ func (s *Session) setAttention() {
 // setExited records the process end and, with it, the exit status. The
 // agent strip shows "Exited 1" rather than a bare "Exited": a failed run
 // and a clean one are different facts.
-func (s *Session) setExited(code int) {
+func (s *ProjectWindow) setExited(code int) {
 	s.mu.Lock()
 	s.exited = true
 	s.exitCode = code
@@ -470,22 +588,25 @@ func (s *Session) setExited(code int) {
 	s.invalidate()
 }
 
-func (c *Coordinator) openSession(project string) *Session {
-	return c.openSessionWithFlags(project)
-}
-
 // openSessionWithFlags opens a session, passing extra launch flags such as
 // --model <id>, -c or --resume <id> straight through to fx.
-func (c *Coordinator) openSessionWithFlags(project string, args ...string) *Session {
+func (c *Coordinator) openSessionWithFlags(project string, args ...string) *ProjectWindow {
 	project = filepath.Clean(project)
 	modelFlag := os.Getenv("FX_DESKTOP_MODEL")
 	if modelFlag != "" {
 		args = append([]string{"--model", modelFlag}, args...)
 	}
-	s := &Session{coord: c, project: project, shell: chrome.DefaultShell(), started: time.Now(), model: modelFlag, stop: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &ProjectWindow{coord: c, project: project, ctx: ctx, cancel: cancel, shell: chrome.DefaultShell(), started: time.Now(), model: modelFlag, stop: make(chan struct{})}
+	s.console.window = s
+	s.windowID = c.nextWindowID()
 	p := c.prefs
+	// The connection owns its own lifetime: the window's ctx cancels the
+	// window's tasks, while fx is stopped through Close's bounded shutdown
+	// (stdin EOF, then a grace period) rather than by cancellation (§2.1).
 	s.chat = newChatSession(c.fxPathSnapshot(), project, args, s.invalidate)
 	s.chat.stats = c.stats
+	s.swap.window = s
 
 	s.setWin(mygo.NewWindow(mygo.WindowOptions{
 		Title:                sessionTitle(project),
@@ -502,9 +623,14 @@ func (c *Coordinator) openSessionWithFlags(project string, args ...string) *Sess
 	if w := s.winSnapshot(); w != nil {
 		w.SetRepresentedFile(project)
 		w.OnClosed(func() {
+			// Closing the window ends every task it owns: the submit
+			// preparation, the history queries, the periodic refresh.
+			s.cancel()
+			s.abandonSubmit()
+			s.retireImageBatches()
 			close(s.stop)
 			s.chat.Close()
-			s.closeConsoles()
+			s.console.closeAll()
 			c.removeSession(s)
 		})
 		if p.CloseToTray {
@@ -515,10 +641,10 @@ func (c *Coordinator) openSessionWithFlags(project string, args ...string) *Sess
 		}
 	}
 	c.addSession(s)
-	go s.chat.connect()
+	s.startConversation(s.chat)
 
-	go s.refreshGit()
-	go s.refreshFxInfo()
+	s.startGitRefresh()
+	s.startFxRefresh()
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -540,13 +666,18 @@ func (c *Coordinator) openSessionWithFlags(project string, args ...string) *Sess
 
 func (c *Coordinator) openCommandSession(title, dir string, args ...string) {
 	cmd := append([]string{c.fxPathSnapshot()}, args...)
-	s := &Session{
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &ProjectWindow{
 		coord:   c,
 		title:   title,
+		ctx:     ctx,
+		cancel:  cancel,
 		shell:   chrome.DefaultShell(),
 		started: time.Now(),
 		stop:    make(chan struct{}),
 	}
+	s.windowID = c.nextWindowID()
+	s.console.window = s
 	// A command session has no workspace, so it opens without the rail; the
 	// user can still bring it up from the title bar if they want context.
 	s.shell.SidebarOpen = false
@@ -560,17 +691,21 @@ func (c *Coordinator) openCommandSession(title, dir string, args ...string) {
 		// working directory they run against whatever the app was launched
 		// from, which is never the project the user is looking at.
 		Dir: dir,
+		// Both callbacks run on the terminal's own goroutine. Touching a
+		// window from anywhere but the app loop is unsafe, so both go
+		// through the window controller, which checks the window is alive
+		// and does the work on the app loop (§2).
 		OnTitle: func(t string) {
-			if w := s.winSnapshot(); w != nil && !w.IsDestroyed() {
-				w.SetTitle(t)
-			}
+			s.dispatch(func() {
+				if w := s.winSnapshot(); w != nil {
+					w.SetTitle(t)
+				}
+			})
 		},
-		// OnExit runs on the terminal's own goroutine. Touching a window
-		// from anywhere but the app loop is unsafe, so hop back to it.
 		OnExit: func(code int) {
 			s.setExited(code)
-			mygo.App.WhenReady(func() {
-				if w := s.winSnapshot(); w != nil && !w.IsDestroyed() {
+			s.dispatch(func() {
+				if w := s.winSnapshot(); w != nil {
 					w.Close()
 				}
 			})
@@ -592,6 +727,7 @@ func (c *Coordinator) openCommandSession(title, dir string, args ...string) {
 	}))
 	if w := s.winSnapshot(); w != nil {
 		w.OnClosed(func() {
+			s.cancel()
 			close(s.stop)
 			term.Close()
 			c.removeSession(s)
@@ -600,7 +736,7 @@ func (c *Coordinator) openCommandSession(title, dir string, args ...string) {
 	c.addSession(s)
 }
 
-func (c *Coordinator) removeSession(s *Session) {
+func (c *Coordinator) removeSession(s *ProjectWindow) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i, x := range c.sessions {
@@ -611,19 +747,8 @@ func (c *Coordinator) removeSession(s *Session) {
 	}
 }
 
-// formatElapsed renders an uptime as m:ss or h:mm:ss.
-func formatElapsed(d time.Duration) string {
-	sec := int(d.Seconds())
-	if sec < 0 {
-		sec = 0
-	}
-	h, rest := sec/3600, sec%3600
-	m, s := rest/60, rest%60
-	if h > 0 {
-		return itoa3(h) + ":" + pad2(m) + ":" + pad2(s)
-	}
-	return pad2(m) + ":" + pad2(s)
-}
+// formatElapsed renders an uptime for the agent strip.
+func formatElapsed(d time.Duration) string { return presenter.Elapsed(d) }
 
 func itoa3(n int) string {
 	if n > 999 {
@@ -642,16 +767,9 @@ func itoa3(n int) string {
 	return string(b[i:])
 }
 
-func pad2(n int) string {
-	var b [2]byte
-	b[0] = byte('0' + (n/10)%10)
-	b[1] = byte('0' + n%10)
-	return string(b[:])
-}
-
 // replaceConversation keeps one project window while fx owns each saved thread.
 // The prior process finishes shutdown before its replacement is started.
-func (s *Session) replaceConversation(args []string) {
+func (s *ProjectWindow) replaceConversation(args []string) {
 	previous := s.chat
 	model := os.Getenv("FX_DESKTOP_MODEL")
 	inheritModel := true
@@ -670,20 +788,76 @@ func (s *Session) replaceConversation(args []string) {
 	next.stats = s.coord.stats
 	s.chat = next
 	s.conversationKey++
+	// A submission prepared against the old conversation must not land in
+	// the new one, and neither may an image still being read: both belong to
+	// a draft that is no longer on screen (N1).
+	s.abandonSubmit()
+	s.retireImageBatches()
 	s.chatUI = chrome.ConversationState{}
+	s.draftSeen = ""
 	if previous != nil {
 		previous.Close()
 	}
 	s.invalidate()
-	go func() {
-		if previous != nil {
-			<-previous.closedDone
-		}
-		if w := s.winSnapshot(); w != nil && w.IsDestroyed() {
-			next.Close()
+	// The swap owns admission and the process barrier: a request waits for the
+	// last conversation that actually started, not merely the one it replaced
+	// (§B4). The registry claims the saved ID on the same path, so the window
+	// is protected before the handshake (T9).
+	s.startConversation(next)
+	s.startFxRefresh()
+}
+
+// startConversation admits a conversation into this window. The saved
+// conversation it names is claimed first — before any process exists, because
+// fx starts writing the directory as soon as it accepts the open — and a
+// deletion that owns that ID refuses the conversation here rather than after it
+// has begun writing (T9, R3).
+func (s *ProjectWindow) startConversation(next *chatSession) {
+	if next == nil {
+		return
+	}
+	if s.coord != nil {
+		if err := next.attachRegistry(&s.coord.sessionUse); err != nil {
+			// The window still shows why; no process is started.
+			next.abandon(err)
 			return
 		}
-		next.connect()
-	}()
-	go s.refreshFxInfo()
+	}
+	s.swap.request(next)
+}
+
+// lifetime is the window's context. A window built by a test may not have one;
+// it gets a background context rather than a panic, and loses nothing because
+// such a window is closed explicitly.
+func (s *ProjectWindow) lifetime() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+// dispatch runs fn on the app loop, but only while the window is alive. It is
+// the one place a background task hands its result back: the closure re-checks
+// the window and, where it matters, its own generation, because a cancel
+// cannot retract a callback that has already been queued (§4.4).
+func (s *ProjectWindow) dispatch(fn func()) {
+	if s.loop != nil {
+		s.loop(fn)
+		return
+	}
+	if s.winSnapshot() == nil {
+		// A window that was never created (unit tests) has no app loop to
+		// hand the work to; the closure runs where the work finished.
+		fn()
+		return
+	}
+	mygo.App.WhenReady(func() {
+		if s.lifetime().Err() != nil {
+			return
+		}
+		if w := s.winSnapshot(); w != nil && w.IsDestroyed() {
+			return
+		}
+		fn()
+	})
 }

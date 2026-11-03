@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/egoist/mygo"
-
 	"fx-desktop/internal/app/chrome"
 )
 
@@ -130,7 +128,7 @@ func parseSkillHeader(path string) (name, description string) {
 	return name, description
 }
 
-func (c *Coordinator) runSkills(s *Session) {
+func (c *Coordinator) runSkills(s *ProjectWindow) {
 	state := &s.shell.Tools
 	if state.Busy {
 		return
@@ -147,10 +145,7 @@ func (c *Coordinator) runSkills(s *Session) {
 			home = ""
 		}
 		skills := scanSkills(workspace, home)
-		mygo.App.WhenReady(func() {
-			if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
-				return
-			}
+		s.dispatch(func() {
 			if state.Generation != generation || !state.Open {
 				return
 			}
