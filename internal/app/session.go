@@ -131,6 +131,10 @@ func (s *ProjectWindow) view(ctx *ui.Context) {
 	// their own. It also puts them on the app loop, where they belong.
 	summaries := c.sessionSummaries()
 	c.notifyAttention(summaries)
+	// Only the panels the shell will actually draw get projected. Frame hides
+	// a closed panel by its switch, and a hidden panel reads none of its Host
+	// data, so building all of them every frame was pure waste (§4.2).
+	review, files, management, history := s.optionalHosts(c)
 	chrome.Frame(ctx, chrome.Host{
 		Title:        sessionTitle(s.project),
 		Conversation: s.chat != nil,
@@ -148,14 +152,17 @@ func (s *ProjectWindow) view(ctx *ui.Context) {
 			Count:   c.sessionCount(),
 			Running: agent.Status == "Running",
 		},
-		Sessions:   summaries,
-		Active:     s.railID(),
-		Shell:      &s.shell,
-		Review:     c.sessionReview(s),
+		Sessions: summaries,
+		Active:   s.railID(),
+		Shell:    &s.shell,
+		Review:   review,
+		// Console is the exception: the title bar, the inspector's telemetry
+		// tab and the status strip read h.Console.Runs even when the drawer is
+		// closed, so its projection is always needed.
 		Console:    c.sessionConsole(s),
-		Files:      c.sessionFiles(s),
-		Management: c.sessionManagement(s),
-		History:    c.sessionHistory(s),
+		Files:      files,
+		Management: management,
+		History:    history,
 		Main: func(c *ui.Context) {
 			if s.chat != nil {
 				snapshot := s.chat.snapshotForView()
@@ -208,6 +215,35 @@ func (s *ProjectWindow) view(ctx *ui.Context) {
 	if s.project != "" {
 		s.syncTerminalAppearance(ctx.Theme().Dark)
 	}
+}
+
+// optionalHosts projects the panels Frame draws only when a switch is on.
+// A closed review drawer never reads h.Review, a closed tools dialog never
+// reads h.Management, a closed history dialog never reads h.History, and a
+// hidden inspector never reads h.Files. Their projections can therefore stay
+// zero values until their switch flips — which also keeps the per-frame work
+// of sessionHistory's live-session map copy and sessionFiles' tree walk out
+// of the common case.
+func (s *ProjectWindow) optionalHosts(c *Coordinator) (
+	chrome.ReviewData, chrome.FileBrowserData, chrome.ManagementHost, chrome.HistoryHost,
+) {
+	var review chrome.ReviewData
+	var files chrome.FileBrowserData
+	var management chrome.ManagementHost
+	var history chrome.HistoryHost
+	if s.shell.ReviewOpen {
+		review = c.sessionReview(s)
+	}
+	if s.shell.InspectorOpen && s.shell.InspectorTab == chrome.InspectorTabFiles {
+		files = c.sessionFiles(s)
+	}
+	if s.shell.Tools.Open {
+		management = c.sessionManagement(s)
+	}
+	if s.shell.History.Open {
+		history = c.sessionHistory(s)
+	}
+	return review, files, management, history
 }
 
 // syncTerminalAppearance tells the window's terminals which scheme is showing.

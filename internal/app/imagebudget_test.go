@@ -236,6 +236,43 @@ func TestCancelledPrepareImageDoesNotDecode(t *testing.T) {
 	}
 }
 
+// T25: the preview is scaled while the decoded image is still in scope, and
+// the decoder has a working set of its own. A reservation of just the pixel
+// buffer is therefore smaller than the window's real peak; the budget has to
+// be given the peak, not the floor.
+func TestDecodeBudgetReservesTheWholeDecodePeak(t *testing.T) {
+	data := pngBytes(t, 40, 30)
+	info, err := chrome.InspectImage("shot.png", data, chrome.DefaultImageLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pixels, peak := info.EstimatedDecodeBytes(), info.EstimatedDecodePeakBytes()
+	if peak <= pixels {
+		t.Fatalf("the peak estimate %d is not above the pixel buffer %d", peak, pixels)
+	}
+
+	// A window that holds exactly the pixel buffer cannot hold the peak. An
+	// implementation that reserves only EstimatedDecodeBytes prepares the
+	// image anyway and leaves the window paying for memory it never counted.
+	tight, _ := decodeWindow(func(b *imageDecodeBudget) { b.maxBytes = pixels; b.slots = 1 })
+	if _, err := tight.coord.prepareImage(tight, context.Background(), "shot.png", data); !errors.Is(err, errImageBudgetTooLarge) {
+		t.Fatalf("an image whose peak exceeds the window's budget was prepared: %v", err)
+	}
+	if used, inFlight := tight.imageBudget.state(); used != 0 || inFlight != 0 {
+		t.Fatalf("a refused image kept a reservation: used=%d inFlight=%d", used, inFlight)
+	}
+
+	// With the peak admitted, the very same image goes through and gives the
+	// whole reservation back.
+	roomy, _ := decodeWindow(func(b *imageDecodeBudget) { b.maxBytes = peak; b.slots = 1 })
+	if _, err := roomy.coord.prepareImage(roomy, context.Background(), "shot.png", data); err != nil {
+		t.Fatalf("an image that fits the peak budget was refused: %v", err)
+	}
+	if used, inFlight := roomy.imageBudget.state(); used != 0 || inFlight != 0 {
+		t.Fatalf("a successful decode kept its reservation: used=%d inFlight=%d", used, inFlight)
+	}
+}
+
 // The refusal names both numbers, so a person can tell an impossible image from
 // a broken one: how much this image costs and what the window allows.
 func TestImageTooLargeRefusalNamesBothNumbers(t *testing.T) {

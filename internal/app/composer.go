@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"fx-desktop/internal/app/chrome"
@@ -58,6 +59,38 @@ func toPromptImages(attachments []chrome.Attachment) []promptImage {
 	return images
 }
 
+// promptSizeBytes is what one session/prompt will cost ACP: the typed text,
+// every image after base64, and the contents of every @ file. ACP bounds the
+// message as a whole, not the pieces, so all three have to be counted together
+// (N6).
+//
+// It is a logical byte count, not json.Marshal's output: building the real
+// prompt just to measure it would allocate another copy of every image on the
+// UI thread. The JSON envelope is a few KB at most; fx stays the authority on
+// the wire size.
+func promptSizeBytes(text string, images []promptImage, mentions []promptMention) int {
+	size := len(text)
+	for _, image := range images {
+		size += encodedSize(len(image.Data))
+	}
+	for _, mention := range mentions {
+		size += len(mention.Text)
+	}
+	return size
+}
+
+// promptOversizeProblem is the composer's answer to a message fx cannot read.
+// It names both numbers and every way to make the message smaller, because the
+// problem may have appeared long after the last image was added.
+func promptOversizeProblem(text string, images []promptImage, mentions []promptMention) string {
+	size := promptSizeBytes(text, images, mentions)
+	if size <= chrome.MaxPromptBytes {
+		return ""
+	}
+	return fmt.Sprintf("This message is %s, over the %s fx reads in one prompt. Shorten the text, remove an image, or drop an @ file.",
+		chrome.HumanSize(size), chrome.HumanSize(chrome.MaxPromptBytes))
+}
+
 // sendDraft is the composer's submit path. It validates cheaply, then prepares
 // the message off the UI thread. It reports false because the draft is not
 // consumed yet: the composer keeps what the user typed until the prompt is
@@ -73,6 +106,7 @@ func (s *ProjectWindow) sendDraft(text string, attachments []chrome.Attachment) 
 	if text == "" && len(attachments) == 0 {
 		return false
 	}
+	images := toPromptImages(attachments)
 	if s.preparingRequest() != nil {
 		// A submission is already being prepared; a second Enter must not
 		// start a second read of the same draft.
@@ -91,13 +125,20 @@ func (s *ProjectWindow) sendDraft(text string, attachments []chrome.Attachment) 
 	if !st.Files || len(workspace.MentionPaths(text)) == 0 {
 		// Nothing to read: the message is already complete, so it goes
 		// straight to the conversation and the composer may clear it.
+		// The size is re-checked here because the draft can have grown since
+		// the last image chip was admitted (N6).
+		if problem := promptOversizeProblem(text, images, nil); problem != "" {
+			s.chatUI.AttachError = problem
+			s.invalidate()
+			return false
+		}
 		s.chatUI.AttachError = ""
-		return s.chat.submit(text, toPromptImages(attachments), nil)
+		return s.chat.submit(text, images, nil)
 	}
 	ctx, cancel := context.WithTimeout(s.lifetime(), mentionTimeout)
 	request := &submitRequest{
 		text:          text,
-		images:        toPromptImages(attachments),
+		images:        images,
 		sentIDs:       attachmentIDs(attachments),
 		draftRevision: s.draftRevision,
 		mentions:      st.Files,
@@ -191,6 +232,14 @@ func (s *ProjectWindow) acceptSubmit(request *submitRequest, mentions []promptMe
 		s.observeDraft()
 	}
 	if problem != "" {
+		s.chatUI.AttachError = problem
+		s.invalidate()
+		return
+	}
+	// The @ blocks are only known now that the files have been read. Their
+	// content counts toward the same prompt limit as the text and the images,
+	// so the final size check belongs here, not in sendDraft alone (N6).
+	if problem := promptOversizeProblem(request.text, request.images, mentions); problem != "" {
 		s.chatUI.AttachError = problem
 		s.invalidate()
 		return

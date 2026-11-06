@@ -2,6 +2,7 @@ package chrome
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
@@ -84,11 +85,18 @@ type ImageInfo struct {
 	// image's own colour model, taken from the header. It is not a constant:
 	// a 16-bit PNG decodes to eight bytes per pixel, not four (S2).
 	bytesPerPixel int
+	// peakBytesPerPixel is only set for WebP, whose decoders can hold a
+	// second image-sized buffer while they work (S10/S11). It is an upper
+	// bound on all the per-pixel buffers that are live at the same moment,
+	// including bytesPerPixel. Zero for the other formats, whose decoders'
+	// working set is bounded by the fixed allowance in
+	// EstimatedDecodePeakBytes instead.
+	peakBytesPerPixel int
 }
 
-// EstimatedDecodeBytes is what decoding this image is expected to cost: the
-// pixel buffer the preview is scaled from, at the image's own depth. It is the
-// number the window's decode budget reserves.
+// EstimatedDecodeBytes is the pixel buffer the preview is scaled from, at the
+// image's own depth. It is the floor of what the window reserves; the number
+// actually handed to the budget is EstimatedDecodePeakBytes below.
 //
 // It is a reservation, not a measurement: a decoder's own working set and the
 // thumbnail add to it, and the budget it feeds is logical bytes, not resident
@@ -102,6 +110,53 @@ func (i ImageInfo) EstimatedDecodeBytes() int {
 		return maxInt
 	}
 	return int(bytes)
+}
+
+// EstimatedPreviewBytes bounds the display bitmap and its scaler's temporary
+// buffers, both alive while the decoded image is still in scope. Measured at
+// ~33 KB for a 96×77 preview with ApproxBiLinear (the destination RGBA is
+// 29 KB); two full preview-sized bitmaps leave room for the renderer to keep
+// a copy. It is a constant: the preview is capped at previewPixels on a side
+// whatever the source image claims, and the scaler no longer allocates a
+// source-sized intermediate (T25).
+func EstimatedPreviewBytes() int { return 2 * previewPixels * previewPixels * 4 }
+
+// EstimatedDecodePeakBytes is what the window must reserve for one image.
+// While NewImageAttachmentWithin runs, the decoded pixel buffer, the decoder's
+// own working set and the preview bitmap are all live at the same moment. The
+// working set is the measured ~1.6–2% for PNG with a 64 KB floor for small
+// images (GIF has a fixed ~33 KB), so peak/16 plus that floor is a bound, not
+// a guess (T25).
+//
+// WebP is the exception that needs more than that fixed allowance: its
+// decoders can allocate a whole second image-sized buffer — lossless
+// color-indexing, or the NRGBA alpha image a compressed ALPH chunk is decoded
+// into. peakBytesPerPixel is the bound on those simultaneously live
+// per-pixel buffers, read from the container (S10/S11). Reserving only
+// EstimatedDecodeBytes leaves that extra buffer outside the window's budget.
+func (i ImageInfo) EstimatedDecodePeakBytes() int {
+	const maxInt = int(^uint(0) >> 1)
+	base := i.EstimatedDecodeBytes()
+	peak := base
+	if i.peakBytesPerPixel > i.bytesPerPixel {
+		pixels := int64(i.Width) * int64(i.Height)
+		charged := pixels * int64(i.peakBytesPerPixel)
+		if charged > int64(maxInt) {
+			return maxInt
+		}
+		if int(charged) > peak {
+			peak = int(charged)
+		}
+	}
+	overhead := peak / 16
+	if overhead < 64<<10 {
+		overhead = 64 << 10
+	}
+	extra := overhead + EstimatedPreviewBytes()
+	if peak > maxInt-extra {
+		return maxInt
+	}
+	return peak + extra
 }
 
 // decodeBytesPerPixel is the buffer these decoders allocate for one pixel of
@@ -140,6 +195,94 @@ func decodeBytesPerPixel(m color.Model) int {
 	return 4
 }
 
+// Per-pixel peaks of the WebP decoders shipped in x/image@v0.46.0, read from
+// the decoder source rather than guessed from a measurement:
+//
+//   - VP8L (lossless): decodePix allocates the final NRGBA pix slice with a
+//     capacity of 4 bytes/pixel, and inverseColorIndexing allocates another
+//     full 4 bytes/pixel dst before returning it (vp8l/transform.go:247).
+//     Both are live at once, so 8 is the ceiling.
+//   - VP8 + a compressed ALPH chunk: readAlpha decodes the alpha plane into
+//     an entire NRGBA image (4/px), extracts a separate []byte alpha plane
+//     (1/px), and only then decodes the YCbCr frame (3/px). The alpha image
+//     may itself use color-indexing (a second 4/px), so the alpha stage peaks
+//     at 9/px; the final NYCbCrA is 4/px (webp/decode.go:199-246).
+//
+// Uncompressed ALPH has no intermediate NRGBA, so it costs only the final
+// NYCbCrA's four bytes per pixel.
+const (
+	webpLosslessPeakBytesPerPixel        = 8
+	webpCompressedAlphaPeakBytesPerPixel = 9
+	webpWidestPeakBytesPerPixel          = 9
+)
+
+// webpDecodePlan is charged per pixel for a WebP: bytesPerPixel is the image
+// the decoder returns, peakBytesPerPixel is every per-pixel buffer that can be
+// live at the same moment on the way there.
+type webpDecodePlan struct {
+	bytesPerPixel     int
+	peakBytesPerPixel int
+}
+
+// webpDecodePlanFor finds the image chunk inside a WebP container.
+// x/image/webp's DecodeConfig returns as soon as it sees a VP8X header, and
+// reports YCbCr (or NYCbCrA when the alpha flag is set) from that header
+// alone. A VP8X container can instead hold a lossless VP8L image, which
+// decodes to *image.NRGBA: four bytes per pixel where the header advertised
+// three (S8). The same walk also finds the ALPH chunk that decides whether
+// decoding holds a second full-size image in memory (S11).
+//
+// Only chunk headers are read, never pixels, and the walk stops after
+// maxChunks so a hostile container cannot turn a header check into a scan of
+// the whole file. A container that cannot be walked is charged the widest
+// peak: over-reserving is safe, under-reserving is what breaks the budget.
+func webpDecodePlanFor(data []byte, reported color.Model) webpDecodePlan {
+	const maxChunks = 32
+	reportedBytes := decodeBytesPerPixel(reported)
+	losslessBytes := decodeBytesPerPixel(color.NRGBAModel)
+	widest := webpDecodePlan{
+		bytesPerPixel:     max(reportedBytes, losslessBytes),
+		peakBytesPerPixel: webpWidestPeakBytesPerPixel,
+	}
+	if len(data) < 12 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return widest
+	}
+	alphaPresent, alphaCompressed := false, false
+	for off, i := 12, 0; i < maxChunks && off+8 <= len(data); i++ {
+		id := string(data[off : off+4])
+		size := int64(binary.LittleEndian.Uint32(data[off+4 : off+8]))
+		off += 8
+		if size > int64(len(data))-int64(off) {
+			break
+		}
+		payload := data[off : off+int(size)]
+		switch id {
+		case "ALPH":
+			alphaPresent = true
+			// The first byte's low two bits are the compression method; 1
+			// means the alpha plane is a whole VP8L image (decode.go:202).
+			if len(payload) > 0 && payload[0]&0x03 == 1 {
+				alphaCompressed = true
+			}
+		case "VP8L":
+			return webpDecodePlan{losslessBytes, webpLosslessPeakBytesPerPixel}
+		case "VP8 ":
+			bytes := reportedBytes
+			if alphaPresent && bytes < losslessBytes {
+				// YCbCr plus a separate alpha plane is NYCbCrA, four bytes.
+				bytes = losslessBytes
+			}
+			peak := bytes
+			if alphaCompressed && peak < webpCompressedAlphaPeakBytesPerPixel {
+				peak = webpCompressedAlphaPeakBytesPerPixel
+			}
+			return webpDecodePlan{bytes, peak}
+		}
+		off += int(size) + int(size&1) // RIFF chunks are word-aligned
+	}
+	return widest
+}
+
 // InspectImage reads the header of an encoded image and refuses it if its
 // declared canvas is beyond limit. It allocates no pixel buffer, so it is the
 // check that has to come first: decoding is where the memory goes.
@@ -174,11 +317,25 @@ func InspectImage(name string, data []byte, limit ImageLimit) (ImageInfo, error)
 		return ImageInfo{}, fmt.Errorf("%s is %d×%d; this app opens images up to %d pixels on a side",
 			name, w, h, limit.MaxSide)
 	}
-	if limit.MaxPixels > 0 && w*h > limit.MaxPixels {
+	// Widen before multiplying: a decoder's own header may declare a canvas
+	// whose product overflows a 32-bit int even though both sides fit in one.
+	if limit.MaxPixels > 0 && int64(w)*int64(h) > int64(limit.MaxPixels) {
 		return ImageInfo{}, fmt.Errorf("%s is %d×%d, more than the %d megapixels this app opens at once",
 			name, w, h, limit.MaxPixels/1_000_000)
 	}
-	return ImageInfo{MimeType: mimeType, Width: w, Height: h, bytesPerPixel: decodeBytesPerPixel(cfg.ColorModel)}, nil
+	bytesPerPixel := decodeBytesPerPixel(cfg.ColorModel)
+	peakBytesPerPixel := 0
+	if format == "webp" {
+		plan := webpDecodePlanFor(data, cfg.ColorModel)
+		bytesPerPixel, peakBytesPerPixel = plan.bytesPerPixel, plan.peakBytesPerPixel
+	}
+	return ImageInfo{
+		MimeType:          mimeType,
+		Width:             w,
+		Height:            h,
+		bytesPerPixel:     bytesPerPixel,
+		peakBytesPerPixel: peakBytesPerPixel,
+	}, nil
 }
 
 // NewImageAttachment validates one image and prepares it for the composer.
@@ -228,6 +385,13 @@ func mimeForFormat(format string) string {
 // thumbnail decodes a display-sized copy. A chip is 26pt wide; handing the
 // renderer a full-size photo would cost a bitmap many thousand times larger
 // than the pixels it shows.
+//
+// The interpolator matters as much as the destination size: the higher-order
+// kernels (BiLinear, CatmullRom) build an intermediate buffer the size of the
+// whole source image before scaling, measured at 2.6 MB for a 1000×800 photo
+// and 1.0 MB even for a 300×300 GIF. ApproxBiLinear scales from the source
+// directly into the 96-pixel destination, about 33 KB regardless of the
+// source, which is also what keeps the window's peak estimate honest (T25).
 func thumbnail(img image.Image) *ui.Bitmap {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
@@ -243,7 +407,7 @@ func thumbnail(img image.Image) *ui.Bitmap {
 		th = 1
 	}
 	dst := image.NewRGBA(image.Rect(0, 0, tw, th))
-	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
+	xdraw.ApproxBiLinear.Scale(dst, dst.Bounds(), img, b, xdraw.Over, nil)
 	return ui.NewBitmap(dst)
 }
 
@@ -309,19 +473,28 @@ func attachmentChip(c *ui.Context, a Attachment, onRemove func(id uint64), p Pal
 }
 
 // shortName keeps a file name from widening the chip; the full name is still
-// what the wire, the tooltip and the transcript carry.
+// what the wire, the tooltip and the transcript carry. The limit counts
+// characters, not bytes: slicing a Chinese name or an emoji by bytes leaves
+// half a rune in the chip (T33).
 func shortName(name string) string {
 	name = strings.TrimSpace(name)
 	const limit = 18
-	if len(name) <= limit {
+	runes := []rune(name)
+	if len(runes) <= limit {
 		return name
 	}
 	// Trim the middle of the stem, keeping the extension readable.
-	dot := strings.LastIndexByte(name, '.')
-	if dot > 0 && len(name)-dot <= 6 {
-		if keep := limit - (len(name) - dot); keep > 1 {
-			return name[:keep] + "…" + name[dot:]
+	dot := -1
+	for i := len(runes) - 1; i >= 0; i-- {
+		if runes[i] == '.' {
+			dot = i
+			break
 		}
 	}
-	return name[:limit] + "…"
+	if dot > 0 && len(runes)-dot <= 6 {
+		if keep := limit - (len(runes) - dot); keep > 1 {
+			return string(runes[:keep]) + "…" + string(runes[dot:])
+		}
+	}
+	return string(runes[:limit]) + "…"
 }

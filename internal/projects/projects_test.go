@@ -3,7 +3,9 @@ package projects
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -70,6 +72,66 @@ func TestNormalizeDedupesAndSorts(t *testing.T) {
 	}
 	if list[0].Path != "/a" || list[1].Path != "/b" {
 		t.Fatalf("order wrong: %v", list)
+	}
+}
+
+// List is called on every frame. It is a read: normalizing (dedupe, sort,
+// truncate) and writing the result back to the shared Store while drawing is
+// both wasted work and a data race waiting to happen. The write paths already
+// normalize.
+func TestListDoesNotMutateTheStore(t *testing.T) {
+	s := &Store{
+		entries: []Entry{
+			{Path: "/b", LastOpened: time.Unix(1, 0)},
+			{Path: "/a", LastOpened: time.Unix(3, 0)},
+			{Path: "/b", LastOpened: time.Unix(2, 0)},
+		},
+	}
+	before := append([]Entry(nil), s.entries...)
+	first := s.List()
+	second := s.List()
+	if !reflect.DeepEqual(s.entries, before) {
+		t.Fatalf("List rewrote the store: %+v, want %+v", s.entries, before)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("two reads of an unchanged store disagree: %+v / %+v", first, second)
+	}
+	if allocs := testing.AllocsPerRun(10, func() { _ = s.List() }); allocs > 1 {
+		t.Fatalf("a read allocated %.0f times", allocs)
+	}
+}
+
+// Touch, Clear and List may be called from the app loop and from a background
+// path at the same time. The Store owns one mutex for all of them.
+func TestStoreIsSafeUnderConcurrentReadsAndWrites(t *testing.T) {
+	s := &Store{}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for n := 0; n < 100; n++ {
+				switch i % 4 {
+				case 0:
+					_ = s.List()
+				case 1:
+					s.Touch(filepath.Join("/p", "proj-"+strconv.Itoa(n)))
+				case 2:
+					for _, e := range s.List() {
+						if e.Path == "" {
+							t.Error("a reader saw an empty path")
+							return
+						}
+					}
+				case 3:
+					_ = s.List()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	if len(s.List()) > maxRecent {
+		t.Fatalf("concurrent writes left %d entries", len(s.List()))
 	}
 }
 

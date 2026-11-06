@@ -2,10 +2,10 @@ package app
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -494,8 +494,18 @@ func (c *chatSession) markMessageDirtyLocked(index int) {
 
 // finishMessagesLocked marks every live row done. It marks only the rows that
 // changed, so ending a turn does not copy a long transcript into the view.
+//
+// It also retires the streaming builders. Text is a view into a builder's
+// buffer, whose capacity can be much larger than the finished reply; cloning
+// the exact bytes lets that spare capacity be collected. Keeping the builder
+// itself would pin it for the life of the session (T32).
 func (c *chatSession) finishMessagesLocked() {
 	for i := range c.messages {
+		if c.streams[i] != nil {
+			c.messages[i].Text = strings.Clone(c.messages[i].Text)
+			delete(c.streams, i)
+			c.markMessageDirtyLocked(i)
+		}
 		if c.messages[i].Done {
 			continue
 		}
@@ -1405,6 +1415,11 @@ func (c *chatSession) nextQueuedLocked() (activeTurn, bool) {
 // per attachment. The shape is measured, not guessed — fx 0.0.14 accepts
 // {"type":"image","mimeType":…,"data":<base64>} and rejects anything else with
 // -32602 "Invalid image prompt block" (§12.3.2).
+//
+// The image is left as []byte: encoding/json encodes a byte slice as a base64
+// JSON string directly into its output buffer. Encoding it to a string here
+// first would allocate a second full copy of every image before the writer
+// even starts, which is the largest transient in a prompt with a photo.
 func promptBlocks(text string, images []promptImage, mentions []promptMention) []map[string]any {
 	blocks := make([]map[string]any, 0, len(images)+len(mentions)+1)
 	if text != "" {
@@ -1414,7 +1429,7 @@ func promptBlocks(text string, images []promptImage, mentions []promptMention) [
 		blocks = append(blocks, map[string]any{
 			"type":     "image",
 			"mimeType": image.MimeType,
-			"data":     base64.StdEncoding.EncodeToString(image.Data),
+			"data":     image.Data,
 		})
 	}
 	// A mention is a resource block whose text is the file, because that is
@@ -1435,11 +1450,30 @@ func promptBlocks(text string, images []promptImage, mentions []promptMention) [
 // fileURL is a file as fx takes it: a file:// URL of the absolute path. fx
 // resolves it itself and refuses anything outside the workspace, so the path
 // is the one the app already read the file from.
+//
+// The URI is built by net/url, not concatenated: #, ?, %, spaces and non-ASCII
+// characters are all legal in a filename but carry meaning (or are invalid) in
+// a URI. A Windows drive letter belongs to the path, not the authority, so it
+// is given a leading slash to keep the host empty (N7).
 func fileURL(path string) string {
 	if path == "" {
 		return ""
 	}
-	return "file://" + filepath.ToSlash(path)
+	p := filepath.ToSlash(path)
+	if isWindowsDrivePath(p) {
+		// On Unix ToSlash leaves backslashes alone; a drive-letter path always
+		// uses them as separators regardless of the machine running the app.
+		p = "/" + strings.ReplaceAll(p, `\`, "/")
+	}
+	return (&url.URL{Scheme: "file", Path: p}).String()
+}
+
+func isWindowsDrivePath(p string) bool {
+	if len(p) < 2 || p[1] != ':' {
+		return false
+	}
+	c := p[0]
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 // imageNames labels a transcript entry with what was sent with it, so the

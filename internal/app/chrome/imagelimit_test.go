@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // headerOnlyPNG builds a PNG that declares w×h and carries no usable pixel
@@ -159,6 +160,8 @@ func pixelBufferBytes(img image.Image) int {
 		return len(m.Pix)
 	case *image.YCbCr:
 		return len(m.Y) + len(m.Cb) + len(m.Cr)
+	case *image.NYCbCrA:
+		return len(m.Y) + len(m.Cb) + len(m.Cr) + len(m.A)
 	}
 	return 0
 }
@@ -276,6 +279,82 @@ func gifSized(t *testing.T, w, h int) []byte {
 	return buf.Bytes()
 }
 
+// T25: the number the window reserves is the peak, so it has to cover the
+// whole NewImageAttachment path — decode, decoder working set and the preview
+// bitmap — measured, not inferred from the header's arithmetic.
+func TestPeakEstimateCoversTheMeasuredAttachment(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"8-bit PNG", pngImage(t, 1000, 800)},
+		{"16-bit PNG", png16Image(t, 800, 600)},
+		{"GIF", gifSized(t, 300, 300)},
+		// S10/S11: these two are large enough that a WebP decoder's transient
+		// buffers are visible above the fixed 64 KB allowance. The small WebP
+		// fixtures used for the format tests hid both shortfalls.
+		{"large lossless WebP", readWebPFixture(t, "testdata/lossless-large-vp8l.webp")},
+		{"compressed-alpha WebP", readWebPFixture(t, "testdata/lossy-compressed-alpha.webp")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info, err := InspectImage("shot", tc.data, DefaultImageLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			attachment, err := NewImageAttachment("shot", tc.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.ReadMemStats(&after)
+			allocated := int(after.TotalAlloc - before.TotalAlloc)
+			peak := info.EstimatedDecodePeakBytes()
+			t.Logf("peak %d, allocated %d", peak, allocated)
+			if peak < allocated {
+				t.Fatalf("preparing the attachment allocated %d bytes, and the window reserves %d", allocated, peak)
+			}
+			if info.EstimatedDecodeBytes() >= peak {
+				t.Fatal("the peak estimate is not above the pixel buffer")
+			}
+			runtime.KeepAlive(attachment)
+		})
+	}
+}
+
+// T25: the preview kernel used to build a source-sized intermediate buffer
+// before scaling (2.6 MB for a 1000×800 photo). A 96-pixel preview must cost
+// roughly the same whether the source is a screenshot or a 12 MP photo; that
+// independence is what lets EstimatedDecodePeakBytes stay a small constant.
+func TestThumbnailDoesNotAllocateASourceSizedBuffer(t *testing.T) {
+	thumbnailAlloc := func(data []byte) int {
+		t.Helper()
+		img, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		bitmap := thumbnail(img)
+		runtime.ReadMemStats(&after)
+		runtime.KeepAlive(bitmap)
+		runtime.KeepAlive(img)
+		return int(after.TotalAlloc - before.TotalAlloc)
+	}
+	small := thumbnailAlloc(pngImage(t, 64, 64))
+	large := thumbnailAlloc(pngImage(t, 1000, 800))
+	t.Logf("thumbnail allocation: 64×64 = %d, 1000×800 = %d", small, large)
+	if large > 128<<10 {
+		t.Fatalf("scaling a 1000×800 photo allocated %d bytes for a 96-pixel preview", large)
+	}
+	if large > small+64<<10 {
+		t.Fatalf("the preview's cost grew with the source: %d bytes for a small image, %d for a large one", small, large)
+	}
+}
+
 // S7: the estimate is what the window's budget reserves, so it has to be true
 // of a decoder's real work, not only of the arithmetic on the header. This
 // decodes each format and compares what was actually allocated with what the
@@ -315,5 +394,37 @@ func TestDecodeEstimateMeetsTheMeasuredAllocation(t *testing.T) {
 			}
 			runtime.KeepAlive(img)
 		})
+	}
+}
+
+// T33: an attachment chip truncates by bytes if the name is sliced as bytes.
+// A Chinese name or an emoji is three or four bytes each, so the chip used to
+// end in half a character. Count runes, keep the extension, and never emit
+// invalid UTF-8.
+func TestShortNameKeepsUTF8CharactersWhole(t *testing.T) {
+	cases := []struct {
+		name, ext string
+	}{
+		{"这是一份很长的中文设计说明文档.pdf", ".pdf"},
+		{"📄 项目报告 2026 年 11 月 最终版.png", ".png"},
+		{"a very long ascii filename indeed.txt", ".txt"},
+	}
+	for _, tc := range cases {
+		got := shortName(tc.name)
+		if !utf8.ValidString(got) {
+			t.Fatalf("%q became invalid UTF-8: %q", tc.name, got)
+		}
+		if !strings.ContainsRune(got, '…') {
+			t.Fatalf("%q was not shortened: %q", tc.name, got)
+		}
+		if !strings.HasSuffix(got, tc.ext) {
+			t.Fatalf("%q lost its extension: %q", tc.name, got)
+		}
+		if utf8.RuneCountInString(got) > 19 {
+			t.Fatalf("%q is still %d runes long: %q", tc.name, utf8.RuneCountInString(got), got)
+		}
+	}
+	if got := shortName("短.png"); got != "短.png" {
+		t.Fatalf("a short name was changed: %q", got)
 	}
 }

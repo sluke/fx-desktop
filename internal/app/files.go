@@ -38,6 +38,12 @@ type fileBrowser struct {
 	problems  map[string]string      // why a read failed
 	loading   map[string]bool        // a read is in flight
 	truncated map[string]int         // entries the cap left out
+	// rows is the flattened projection of all of the above. A frame draws the
+	// same tree many times between two changes, so it is rebuilt lazily on the
+	// first frame after a write instead of on every repaint. Both fields are
+	// guarded by the owning window's workspace.mu.
+	rows  []chrome.FileRow
+	dirty bool
 }
 
 func newFileBrowser() *fileBrowser {
@@ -48,7 +54,26 @@ func newFileBrowser() *fileBrowser {
 		problems:  map[string]string{},
 		loading:   map[string]bool{},
 		truncated: map[string]int{},
+		dirty:     true,
 	}
+}
+
+// markDirty retires the cached projection. Every write to a listing, an
+// expansion or a read flag goes through it; the caller holds workspace.mu.
+func (fb *fileBrowser) markDirty() {
+	fb.dirty = true
+	fb.rows = nil
+}
+
+// projected returns the visible rows. It walks the tree only when one of its
+// inputs changed; otherwise a frame copies one slice header. Caller holds
+// workspace.mu, because the maps it reads belong to that lock.
+func (fb *fileBrowser) projected(root string) []chrome.FileRow {
+	if fb.dirty || fb.rows == nil {
+		fb.rows = flattenFiles(root, fb, root, 0)
+		fb.dirty = false
+	}
+	return fb.rows
 }
 
 // ensureFiles starts reading a folder unless it has already been read or a
@@ -68,6 +93,7 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 		return
 	}
 	fb.loading[dir] = true
+	fb.markDirty()
 	s.workspace.mu.Unlock()
 
 	s.invalidate()
@@ -91,6 +117,7 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 				fb.truncated[dir] = extra
 			}
 		}
+		fb.markDirty()
 		s.workspace.mu.Unlock()
 		s.invalidate()
 	}()
@@ -148,8 +175,17 @@ func fileReadProblem(err error) string {
 // folders' children sit under their folder, indented by depth. Only expanded
 // folders are walked, so a large workspace costs only what the user opened.
 func flattenFiles(root string, fb *fileBrowser, dir string, depth int) []chrome.FileRow {
+	rows := make([]chrome.FileRow, 0, 16)
+	appendFileRows(&rows, root, fb, dir, depth)
+	return rows
+}
+
+// appendFileRows appends into one shared slice. The old recursive version
+// built a slice per folder and copied the children into its parent with
+// append(rows, flattenFiles(...)...), which is O(rows × depth) in both time
+// and allocations on a deep tree.
+func appendFileRows(rows *[]chrome.FileRow, root string, fb *fileBrowser, dir string, depth int) {
 	entries := fb.entries[dir]
-	rows := make([]chrome.FileRow, 0, len(entries))
 	for _, e := range entries {
 		abs := filepath.Join(dir, e.name)
 		rel, err := filepath.Rel(root, abs)
@@ -172,19 +208,18 @@ func flattenFiles(root string, fb *fileBrowser, dir string, depth int) []chrome.
 				row.Note = fb.problems[abs]
 			}
 		}
-		rows = append(rows, row)
+		*rows = append(*rows, row)
 		if row.Expanded {
-			rows = append(rows, flattenFiles(root, fb, abs, depth+1)...)
+			appendFileRows(rows, root, fb, abs, depth+1)
 		}
 	}
 	if extra := fb.truncated[dir]; extra > 0 {
-		rows = append(rows, chrome.FileRow{
+		*rows = append(*rows, chrome.FileRow{
 			Name:  fmt.Sprintf("… %d more entries", extra),
 			Depth: depth,
 			More:  true,
 		})
 	}
-	return rows
 }
 
 // sessionFiles projects the cache into the panel. The read pass must not walk
@@ -211,7 +246,10 @@ func (c *Coordinator) sessionFiles(s *ProjectWindow) chrome.FileBrowserData {
 		d.Loading = true
 	}
 	d.Problem = fb.problems[s.project]
-	d.Rows = flattenFiles(s.project, fb, s.project, 0)
+	// A repaint that changed nothing reuses the projection. The first frame
+	// after a listing or expansion change still walks the tree here, under
+	// workspace.mu, but that is once per change instead of once per frame.
+	d.Rows = fb.projected(s.project)
 	return d
 }
 
@@ -255,6 +293,7 @@ func (c *Coordinator) toggleFileDir(s *ProjectWindow, path string) {
 		delete(fb.expanded, abs)
 	}
 	needRead := opened && !fb.read[abs] && !fb.loading[abs]
+	fb.markDirty()
 	s.workspace.mu.Unlock()
 
 	if needRead {

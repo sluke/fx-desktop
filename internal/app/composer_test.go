@@ -497,6 +497,111 @@ func TestSubmitTimesOutWithoutSending(t *testing.T) {
 	}
 }
 
+// N6: the size function is shared by adding an image and by submitting, so its
+// boundary has to be exact — text, base64 image, @ file, and nothing counted
+// twice. A message exactly at the limit is still sent; one byte over is not.
+func TestPromptSizeCountsTextImagesAndMentions(t *testing.T) {
+	image := promptImage{Data: make([]byte, 1024)}
+	mention := promptMention{Text: strings.Repeat("m", 100)}
+	if got, want := promptSizeBytes("", []promptImage{image}, []promptMention{mention}),
+		encodedSize(1024)+100; got != want {
+		t.Fatalf("size = %d, want %d", got, want)
+	}
+	atLimit := chrome.MaxPromptBytes - encodedSize(1024) - 100
+	text := strings.Repeat("x", atLimit)
+	if problem := promptOversizeProblem(text, []promptImage{image}, []promptMention{mention}); problem != "" {
+		t.Fatalf("a message exactly at the limit was refused: %s", problem)
+	}
+	if problem := promptOversizeProblem(text+"x", []promptImage{image}, []promptMention{mention}); problem == "" ||
+		!strings.Contains(problem, chrome.HumanSize(chrome.MaxPromptBytes)) {
+		t.Fatalf("a message one byte over the limit was not explained: %q", problem)
+	}
+}
+
+// oversizeComposer is a window ready to submit but unable to start a turn, so
+// a test can tell "the composer refused the message" from "fx happened to
+// decline it": no goroutine, no subprocess, and no message can be delivered.
+func oversizeComposer(t *testing.T) (*ProjectWindow, *chatSession) {
+	t.Helper()
+	chat := &chatSession{project: t.TempDir(), ready: true, files: true, closed: true}
+	s := composerWindow(t, chat)
+	s.project = chat.project
+	return s, chat
+}
+
+func oversizeImage(id uint64, size int) chrome.Attachment {
+	return chrome.Attachment{ID: id, Name: "shot.png", MimeType: "image/png", Data: make([]byte, size)}
+}
+
+// N6: the 8 MB bound used to be checked only when an image chip was added.
+// Typing a long message afterwards pushed the same prompt past the limit, and
+// the composer sent it anyway — fx then rejected the whole turn. Submitting
+// has to re-check the whole message, and a refusal must keep the draft and the
+// chips so the person can shorten it.
+func TestSendDraftRefusesAMessageThatGrewPastTheLimit(t *testing.T) {
+	s, chat := oversizeComposer(t)
+	image := oversizeImage(1, 4<<20) // 5.33 MB once base64-encoded
+	s.chatUI.Attachments = []chrome.Attachment{image}
+	text := strings.Repeat("x", 4<<20)
+	s.chatUI.Draft = text
+
+	if s.sendDraft(text, s.chatUI.Attachments) {
+		t.Fatal("an over-limit message was accepted")
+	}
+	if !strings.Contains(s.chatUI.AttachError, chrome.HumanSize(chrome.MaxPromptBytes)) {
+		t.Fatalf("the refusal does not name the limit: %q", s.chatUI.AttachError)
+	}
+	if s.chatUI.Draft != text {
+		t.Fatal("the draft was cleared by a refused submit")
+	}
+	if len(s.chatUI.Attachments) != 1 {
+		t.Fatal("the image chip was removed by a refused submit")
+	}
+	if n := len(chat.snapshot().Messages); n != 0 {
+		t.Fatalf("a refused submit still put %d rows in the transcript", n)
+	}
+}
+
+// N6 on the asynchronous path: the @ blocks are only known after the file
+// read, so the re-check has to happen in acceptSubmit, where the mentions are
+// finally available — not just in sendDraft.
+func TestAcceptSubmitRefusesAMessageWithLargeMentionFiles(t *testing.T) {
+	s, chat := oversizeComposer(t)
+	image := oversizeImage(1, 4<<20)
+	s.chatUI.Attachments = []chrome.Attachment{image}
+	text := "look at @notes.md"
+	s.chatUI.Draft = text
+	request := &submitRequest{
+		text:          text,
+		images:        toPromptImages(s.chatUI.Attachments),
+		sentIDs:       attachmentIDs(s.chatUI.Attachments),
+		conversation:  s.swap.generation(),
+		draftRevision: s.draftRevision,
+		mentions:      true,
+	}
+	s.preparing = request
+	mentions := []promptMention{{
+		Path: "notes.md",
+		Abs:  filepath.Join(s.project, "notes.md"),
+		Text: strings.Repeat("y", 3<<20),
+	}}
+
+	s.acceptSubmit(request, mentions, "")
+
+	if !strings.Contains(s.chatUI.AttachError, chrome.HumanSize(chrome.MaxPromptBytes)) {
+		t.Fatalf("the refusal does not name the limit: %q", s.chatUI.AttachError)
+	}
+	if s.chatUI.Draft != text {
+		t.Fatal("the draft was cleared by a refused submit")
+	}
+	if len(s.chatUI.Attachments) != 1 {
+		t.Fatal("the image chip was removed by a refused submit")
+	}
+	if n := len(chat.snapshot().Messages); n != 0 {
+		t.Fatalf("a refused submit still put %d rows in the transcript", n)
+	}
+}
+
 // B3: a deadline is the user's business: it says so, and still sends nothing.
 func TestSubmitDeadlineIsReported(t *testing.T) {
 	testutil.IsolateHome(t)

@@ -4,19 +4,57 @@
 /.mygo/
 /.tmp/
 
+# Packaged apps and installers (compiled artifacts, never publish)
+# Covers the app even if it is moved out of outputs/ or built per-platform.
+*.app/
+*.dmg
+*.pkg
+*.exe
+*.msi
+*.deb
+*.rpm
+*.AppImage
+
 # Local agent memory, session state and working notes
 /.workbuddy/
 /ARCHITECTURE.md
+/AGENTS.md
 
 # Local UI captures; already tracked files remain tracked
 /internal/outputs/
 
-# Compiled test binaries
+# Compiled test binaries, coverage and profiling output
 *.test
 *.dSYM/
+*.coverprofile
+coverage.out
+coverage.html
+*.prof
+*.pprof
+
+# Local secrets, env files and Go workspace overrides
+.env
+.env.*
+!.env.example
+go.work
+go.work.sum
+
+# Editor / IDE state and scratch files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+*.log
+*.tmp
 
 # macOS metadata
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
 
 # Platform objects
 mygo_windows_*.syso

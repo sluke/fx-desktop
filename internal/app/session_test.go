@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -10,6 +11,54 @@ import (
 )
 
 func timeNow() time.Time { return time.Now() }
+
+// A frame only draws the panels the shell has open. Building every Host on
+// every repaint used to copy the live-session map, the saved-project list and
+// the file tree even with every drawer closed.
+func TestOptionalHostsFollowTheShellSwitches(t *testing.T) {
+	testutil.IsolateHome(t)
+	c := NewCoordinator()
+	root := t.TempDir()
+	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
+	s.shell.ReviewOpen = false
+	s.shell.InspectorOpen = false
+	s.shell.InspectorTab = chrome.InspectorTabTelemetry
+	s.shell.Tools.Open = false
+	s.shell.History.Open = false
+
+	review, files, management, history := s.optionalHosts(c)
+	if !reflect.DeepEqual(review, chrome.ReviewData{}) {
+		t.Fatalf("a closed review drawer was projected: %+v", review)
+	}
+	if files.Root != "" || len(files.Rows) != 0 {
+		t.Fatalf("a hidden inspector was projected: %+v", files)
+	}
+	if management.Resume != nil {
+		t.Fatal("a closed tools dialog was projected")
+	}
+	if history.Resume != nil {
+		t.Fatal("a closed history dialog was projected")
+	}
+	if s.workspace.files != nil {
+		t.Fatal("a hidden inspector still read the workspace")
+	}
+
+	s.shell.ReviewOpen = true
+	s.shell.InspectorOpen = true
+	s.shell.InspectorTab = chrome.InspectorTabFiles
+	s.shell.Tools.Open = true
+	s.shell.History.Open = true
+	review, files, management, history = s.optionalHosts(c)
+	if !review.Open {
+		t.Fatal("an open review drawer got no data")
+	}
+	if files.Root != root {
+		t.Fatalf("an open Files tab got no root: %+v", files)
+	}
+	if management.Resume == nil || history.Resume == nil {
+		t.Fatal("an open dialog lost its actions")
+	}
+}
 
 // A session reports fx's sign-in state from its own status snapshot, and
 // reports nothing when it has none: an unknown state must not harden into a

@@ -44,13 +44,15 @@ var errImageBudgetTooLarge = errors.New("this image needs more memory than the w
 // rather than being refused, and its wait ends with its own cancellation, so
 // closing the window or replacing the conversation releases it too (R5).
 //
-// What it does not bound, and does not claim to: the decoder's own working set
-// (a measured 1.6–2% of the pixel buffer for PNG, a fixed ~33 KB for GIF), the
-// thumbnail built from the decode, and the resident memory those become. The
-// compressed bytes on their way here are admitted by imagePendingBudget, and the
-// attachments that reached the composer are bounded by the message limit in
-// adoptAttachment; measuring the window's resident memory is a separate job
-// (§4.2, T23).
+// The reservation is now the whole decode peak: chrome.EstimatedDecodePeakBytes
+// adds the decoder's working set (a measured 1.6–2% of the pixel buffer for
+// PNG, a fixed ~33 KB for GIF) and the preview bitmap to the pixel buffer, and
+// the preview scaler no longer builds a source-sized intermediate (T25). What
+// this still does not bound is resident memory: the counters are logical bytes,
+// not RSS, and the fx child process is outside them. The compressed bytes on
+// their way here are admitted by imagePendingBudget, and the attachments that
+// reached the composer are bounded by the message limit in adoptAttachment
+// (§4.2).
 type imageDecodeBudget struct {
 	mu sync.Mutex
 	// limit is what one image may expand to; the package default when zero,

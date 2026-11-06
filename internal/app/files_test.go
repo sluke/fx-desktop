@@ -1,8 +1,10 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -93,6 +95,94 @@ func TestFileBrowserRowsDoNotReadWhileTabIsClosed(t *testing.T) {
 	}
 	if s.workspace.files != nil {
 		t.Fatal("a closed tab built a browser")
+	}
+}
+
+// The frame asks for the file tree on every repaint, but the projection is a
+// pure function of the listings, the expansion state and the read flags. It
+// must be built once per change, not once per frame: 8020 visible rows used to
+// cost 4.2 MB and 8599 allocations per frame, inside workspace.mu.
+func TestFileBrowserProjectionIsReusedUntilStateChanges(t *testing.T) {
+	c := NewCoordinator()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, root, "a.txt", "src/main.go")
+	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
+	s.shell.InspectorTab = chrome.InspectorTabFiles
+
+	first := waitForFiles(t, c, s, func(d chrome.FileBrowserData) bool {
+		return !d.Loading && len(d.Rows) == 2
+	})
+	second := c.sessionFiles(s)
+	if len(second.Rows) != 2 {
+		t.Fatalf("the second frame has %d rows", len(second.Rows))
+	}
+	if &first.Rows[0] != &second.Rows[0] {
+		t.Fatal("an unchanged tree was flattened again on the next frame")
+	}
+
+	// Expanding is a state change: the cached rows must be discarded, and the
+	// children must appear without a refresh.
+	c.toggleFileDir(s, "src")
+	expanded := waitForFiles(t, c, s, func(d chrome.FileBrowserData) bool {
+		return len(d.Rows) == 3 && !d.Loading
+	})
+	if &expanded.Rows[0] == &first.Rows[0] {
+		t.Fatal("expanding a folder served the stale projection")
+	}
+	if expanded.Rows[0].Name != "src" || expanded.Rows[1].Name != "main.go" {
+		t.Fatalf("expanded rows: %v", rowNames(expanded.Rows))
+	}
+
+	// And a refresh — a whole new browser, with new listings — must not keep
+	// the previous browser's rows either.
+	writeFiles(t, root, "b.txt")
+	c.refreshFiles(s)
+	refreshed := waitForFiles(t, c, s, func(d chrome.FileBrowserData) bool {
+		return hasRow(d.Rows, "b.txt") && !d.Loading
+	})
+	if &refreshed.Rows[0] == &expanded.Rows[0] {
+		t.Fatal("a refresh served the old browser's projection")
+	}
+}
+
+// The frame's steady state is the case that matters for scroll smoothness: a
+// tree of 8020 visible rows used to cost 1.57 ms, 4.2 MB and 8599 allocations
+// per repaint. With the projection cached, a repaint that changed nothing must
+// allocate nothing at all.
+func TestFileBrowserSteadyFrameDoesNotAllocate(t *testing.T) {
+	c := NewCoordinator()
+	root := t.TempDir()
+	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
+	s.shell.InspectorTab = chrome.InspectorTabFiles
+	fb := newFileBrowser()
+	var rootEntries []fileEntry
+	for d := 0; d < 20; d++ {
+		dir := filepath.Join(root, fmt.Sprintf("dir%02d", d))
+		rootEntries = append(rootEntries, fileEntry{name: fmt.Sprintf("dir%02d", d), dir: true})
+		fb.expanded[dir] = true
+		fb.read[dir] = true
+		children := make([]fileEntry, 400)
+		for i := range children {
+			children[i] = fileEntry{name: fmt.Sprintf("file%04d.go", i)}
+		}
+		fb.entries[dir] = children
+	}
+	fb.entries[root] = rootEntries
+	fb.read[root] = true
+	s.workspace.files = fb
+
+	if got := len(c.sessionFiles(s).Rows); got != 8020 {
+		t.Fatalf("the probe tree has %d rows, want 8020", got)
+	}
+	allocs := testing.AllocsPerRun(10, func() {
+		d := c.sessionFiles(s)
+		runtime.KeepAlive(d)
+	})
+	if allocs > 0 {
+		t.Fatalf("an unchanged frame allocated %.0f times", allocs)
 	}
 }
 

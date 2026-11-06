@@ -16,9 +16,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"fx-desktop/internal/acp"
 	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/conversation"
 	"fx-desktop/internal/sessionstats"
 	"fx-desktop/internal/testutil"
 	"github.com/egoist/mygo/ui"
@@ -951,5 +953,118 @@ func TestClosedSessionNeverStartsAProcess(t *testing.T) {
 	case <-c.closedDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("a closed session left its close signal waiting")
+	}
+}
+
+// A streaming reply keeps a strings.Builder whose buffer is usually much
+// larger than the final text, and Text is a view into that buffer. Ending the
+// turn must clone the exact text and drop the builder, or a long session holds
+// roughly twice its transcript as spare capacity. A late chunk still has to
+// work after the turn ends.
+func TestFinishedTurnReleasesStreamBuilders(t *testing.T) {
+	c := &chatSession{messages: []conversation.Message{{}}}
+	c.appendStreamText(0, strings.Repeat("x", 64<<10))
+	c.appendStreamText(0, "tail")
+	want := strings.Repeat("x", 64<<10) + "tail"
+	if len(c.streams) != 1 {
+		t.Fatal("the streaming message has no builder")
+	}
+	before := unsafe.StringData(c.messages[0].Text)
+
+	c.mu.Lock()
+	c.finishMessagesLocked()
+	c.mu.Unlock()
+
+	if len(c.streams) != 0 {
+		t.Fatalf("the turn ended but %d builders are still held", len(c.streams))
+	}
+	if c.messages[0].Text != want || !c.messages[0].Done {
+		t.Fatalf("the finished message changed: len=%d done=%v", len(c.messages[0].Text), c.messages[0].Done)
+	}
+	if after := unsafe.StringData(c.messages[0].Text); after == before {
+		t.Fatal("the transcript still points into the builder's buffer")
+	}
+	// A late chunk creates a fresh builder from the cloned text; nothing is
+	// lost and no stale buffer is resurrected.
+	c.appendStreamText(0, " more")
+	if c.messages[0].Text != want+" more" || len(c.streams) != 1 {
+		t.Fatalf("a late chunk broke the finished message (streams=%d)", len(c.streams))
+	}
+}
+
+// The prompt's image data used to be base64-encoded into a string before the
+// JSON writer saw it: one whole extra copy of every image, per turn. Go's JSON
+// encoder writes []byte straight into its output buffer as base64, so handing
+// it the bytes removes that copy without changing a byte on the wire.
+func TestPromptBlocksHandImageBytesToTheJSONEncoder(t *testing.T) {
+	data := bytes.Repeat([]byte{0x89, 0x50, 0x4e, 0x47}, 256<<10) // 1 MiB
+	blocks := promptBlocks("look", []promptImage{{Name: "shot.png", MimeType: "image/png", Data: data}}, nil)
+	if len(blocks) != 2 {
+		t.Fatalf("expected text + image, got %d blocks", len(blocks))
+	}
+	if _, ok := blocks[1]["data"].([]byte); !ok {
+		t.Fatalf("image data was copied into a %T before the JSON writer saw it", blocks[1]["data"])
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire []promptBlock
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire) != 2 || wire[1].Data != base64.StdEncoding.EncodeToString(data) {
+		t.Fatal("the base64 image block on the wire changed")
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	out, err := json.Marshal(blocks)
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("JSON-encoded a %d-byte image with %d bytes allocated", len(data), int(after.TotalAlloc-before.TotalAlloc))
+}
+
+// N7: a file:// URI is a structured string. Concatenating "file://" with a
+// raw path turns spaces, #, ?, %, non-ASCII names and Windows drives into URI
+// syntax (or an invalid URI), so fx either resolves the wrong file or refuses
+// the resource block. net/url owns the escaping.
+func TestFileURIEscapesPathCharacters(t *testing.T) {
+	cases := []struct {
+		name, path, want, decoded string
+	}{
+		{"empty", "", "", ""},
+		{"plain Unix path", "/tmp/main.go", "file:///tmp/main.go", "/tmp/main.go"},
+		{"spaces", "/tmp/My Project/report.md", "file:///tmp/My%20Project/report.md", "/tmp/My Project/report.md"},
+		{"hash", "/tmp/a#b.md", "file:///tmp/a%23b.md", "/tmp/a#b.md"},
+		{"question mark", "/tmp/a?b.md", "file:///tmp/a%3Fb.md", "/tmp/a?b.md"},
+		{"percent", "/tmp/100%.md", "file:///tmp/100%25.md", "/tmp/100%.md"},
+		{"Chinese", "/tmp/报告.md", "file:///tmp/%E6%8A%A5%E5%91%8A.md", "/tmp/报告.md"},
+		{"emoji", "/tmp/📄.md", "file:///tmp/%F0%9F%93%84.md", "/tmp/📄.md"},
+		{"Windows drive", `C:\work\read me.md`, "file:///C:/work/read%20me.md", "/C:/work/read me.md"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fileURL(tc.path)
+			if got != tc.want {
+				t.Fatalf("fileURL(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+			if tc.want == "" {
+				return
+			}
+			u, err := url.Parse(got)
+			if err != nil {
+				t.Fatalf("the URI does not parse: %v", err)
+			}
+			if u.Scheme != "file" || u.Host != "" {
+				t.Fatalf("the URI has the wrong authority: scheme=%q host=%q", u.Scheme, u.Host)
+			}
+			if u.Path != tc.decoded {
+				t.Fatalf("the URI resolves to %q, want %q", u.Path, tc.decoded)
+			}
+		})
 	}
 }

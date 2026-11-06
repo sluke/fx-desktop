@@ -197,7 +197,9 @@ func (c *Coordinator) prepareImage(s *ProjectWindow, ctx context.Context, name s
 	if err != nil {
 		return chrome.Attachment{}, err
 	}
-	release, err := s.imageBudget.reserve(ctx, info.EstimatedDecodeBytes())
+	// The peak, not just the pixel buffer: the decoder's working set and the
+	// preview bitmap are alive at the same time as the decoded image (T25).
+	release, err := s.imageBudget.reserve(ctx, info.EstimatedDecodePeakBytes())
 	if err != nil {
 		if ctx.Err() != nil {
 			return chrome.Attachment{}, ctx.Err()
@@ -366,13 +368,12 @@ func (c *Coordinator) attachImage(s *ProjectWindow, name string, data []byte) er
 // message has to fit ACP's input limit, and base64 inflates an image by a
 // third: several allowed images can still add up to a prompt fx will not read.
 // Checking here means the answer arrives while the user is still composing,
-// not after they hit send.
+// not after they hit send. It uses the same size function as the submit path,
+// so "adding an image" and "sending the message" cannot disagree about the
+// limit; the latter also re-checks text and @ blocks added afterwards (N6).
 func (c *Coordinator) adoptAttachment(s *ProjectWindow, attachment chrome.Attachment) error {
-	encoded := encodedSize(len(attachment.Data))
-	for _, existing := range s.chatUI.Attachments {
-		encoded += encodedSize(len(existing.Data))
-	}
-	if encoded+len(s.chatUI.Draft) > chrome.MaxPromptBytes {
+	withNew := append(append([]chrome.Attachment(nil), s.chatUI.Attachments...), attachment)
+	if promptSizeBytes(s.chatUI.Draft, toPromptImages(withNew), nil) > chrome.MaxPromptBytes {
 		return fmt.Errorf("that would make the message over %s, which is all fx reads; remove an image first",
 			chrome.HumanSize(chrome.MaxPromptBytes))
 	}
