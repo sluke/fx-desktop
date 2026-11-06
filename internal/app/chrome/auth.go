@@ -66,8 +66,10 @@ func AuthNoticeCard(c *ui.Context, n AuthNotice, onSignIn func()) {
 				ui.Text(c, strings.TrimSpace(n.Help)).FontSize(12).TextColor(p.InkMuted).
 					LineHeight(1.5).Wrap()
 				ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
+					// The button's "fx" and the CLI's own help above it
+					// say where sign-in goes; a caption under the button
+					// would explain the button instead.
 					PrimaryButton(c, "Sign in with fx…", onSignIn)
-					mono(ui.Text(c, "opens fx login in a terminal window")).FontSize(9).TextColor(p.InkMuted)
 				})
 			})
 		})

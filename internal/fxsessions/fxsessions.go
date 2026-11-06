@@ -1,14 +1,18 @@
 // Package fxsessions removes fx's saved conversations. fx has no delete
-// command: a conversation is the directory ~/.fx/sessions/<id>, so deleting
-// it is the supported removal path. The app owns the confirmation; this
-// package only performs the validated disk work and cleans the per-workspace
-// "continue here" pointers that would otherwise name a conversation that no
-// longer exists.
+// command: a conversation is the directory holding its transcript inside the
+// sessions store, so deleting it is the supported removal path — fx lists
+// sessions by scanning the store, so a removed directory disappears from
+// every listing. The app owns the confirmation; this package only performs
+// the validated disk work and cleans the per-workspace "continue here"
+// pointers that would otherwise name a conversation that no longer exists.
 //
-// fx 0.0.15 moved every saved session to the current store and removed the
-// experimental v2 flag: ~/.fx/sessions/<id> is now the only root. A stale
-// FX_SESSIONS_V2 in the environment no longer changes where fx stores
-// sessions, so deletion must ignore it too.
+// fx 0.0.16 keeps sessions in the v2 substore, ~/.fx/sessions/v2/<id>, and
+// the flat ~/.fx/sessions/<id> layout is the store earlier builds converted
+// away from. Both are deleted from: a delete that only touched the flat path
+// succeeded on a path that did not exist (os.RemoveAll is nil on ENOENT) and
+// the session reappeared on the next refresh. A stale FX_SESSIONS_V2 in the
+// environment never changes where fx stores sessions, so deletion ignores it
+// too.
 package fxsessions
 
 import (
@@ -41,8 +45,10 @@ func ValidID(id string) bool {
 	return true
 }
 
-// root returns the directory holding one subdirectory per saved session.
-// fx 0.0.15+ uses this store unconditionally; FX_SESSIONS_V2 is obsolete.
+// root returns the directory that anchors the sessions store. fx keeps the
+// current store in the v2 subdirectory of this path and the converted-away
+// flat layout beside it; both must exist under one anchor for the store to
+// be recognized.
 func root() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -51,25 +57,36 @@ func root() (string, error) {
 	return filepath.Join(home, ".fx", "sessions"), nil
 }
 
+// storeDirs names the directories that may hold one session directory each,
+// newest store first. Reserved store-internal entries are never treated as
+// sessions: "v2" is the current substore itself and "trash+v1" is fx's own
+// recovery area, and neither is a conversation ID fx would report.
+func storeDirs(base string) []string {
+	return []string{filepath.Join(base, "v2"), base}
+}
+
+var reservedStoreNames = map[string]bool{"v2": true, "trash+v1": true}
+
 // DeleteMany removes each saved conversation and returns the IDs whose
-// directory was removed. A missing session counts as removed: a stale row
-// then disappears on the next refresh instead of failing forever. Invalid
-// IDs are reported and skipped. The app must never call this without the
-// user's confirmation.
+// directory was removed. A session is looked up in every store: the v2
+// substore first, then the flat layout. A missing session counts as removed:
+// a stale row then disappears on the next refresh instead of failing
+// forever. Invalid IDs are reported and skipped. The app must never call
+// this without the user's confirmation.
 func DeleteMany(ids []string) (deleted []string, err error) {
-	dir, err := root()
+	base, err := root()
 	if err != nil {
 		return nil, err
 	}
-	st, err := os.Stat(dir)
+	st, err := os.Stat(base)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("fx has no saved sessions at %s", dir)
+			return nil, fmt.Errorf("fx has no saved sessions at %s", base)
 		}
 		return nil, fmt.Errorf("read fx sessions: %w", err)
 	}
 	if !st.IsDir() {
-		return nil, fmt.Errorf("fx sessions path is not a directory: %s", dir)
+		return nil, fmt.Errorf("fx sessions path is not a directory: %s", base)
 	}
 
 	var problems []error
@@ -84,11 +101,30 @@ func DeleteMany(ids []string) (deleted []string, err error) {
 			problems = append(problems, errors.New("refusing to delete an invalid session id"))
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(dir, id)); err != nil {
-			problems = append(problems, fmt.Errorf("delete session %s: %w", id, err))
-			continue
+		removed, failed := false, false
+		for _, dir := range storeDirs(base) {
+			if dir == base && reservedStoreNames[id] {
+				continue
+			}
+			target := filepath.Join(dir, id)
+			if _, err := os.Lstat(target); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				problems = append(problems, fmt.Errorf("delete session %s: %w", id, err))
+				failed = true
+				continue
+			}
+			if err := os.RemoveAll(target); err != nil {
+				problems = append(problems, fmt.Errorf("delete session %s: %w", id, err))
+				failed = true
+				continue
+			}
+			removed = true
 		}
-		deleted = append(deleted, id)
+		if removed || !failed {
+			deleted = append(deleted, id)
+		}
 	}
 	if len(deleted) > 0 {
 		if err := removeContinuePointers(deleted); err != nil {

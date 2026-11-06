@@ -181,7 +181,9 @@ func reviewDiff(c *ui.Context, h Host, p Palette) {
 			return
 		}
 		ui.Row(c).FillWidth().Grow(1).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
-			mono(ui.Text(c, "Select a file to read its diff")).FontSize(10).TextColor(p.InkMuted)
+			// The file list on the left is the affordance. A quiet glyph
+			// marks the empty pane without instructing the reader.
+			ui.Icon(c, IconChanges).Label("No file selected").FontSize(22).TextColor(p.InkFaint)
 		})
 		return
 	}
@@ -223,7 +225,11 @@ func reviewActions(c *ui.Context, h Host, sh *ShellState, p Palette) {
 			ui.Text(c, "Nothing to commit").FontSize(10).TextColor(p.InkMuted)
 			return
 		}
-		ui.TextInput(c, &sh.CommitMsg).Placeholder("Commit message…").FillWidth()
+		// The app's form sizes: a 12px input and 11px buttons, as the
+		// tools pages. At the widget defaults this row rendered several
+		// pixels taller than everything around it and read as a louder,
+		// separate panel.
+		ui.TextInput(c, &sh.CommitMsg).Label("Commit message").Placeholder("Commit message…").FontSize(12).FillWidth()
 		ui.Row(c).FillWidth().Gap(8).Children(func() {
 			// Grow, not FillWidth: FillWidth is width:100% — an absolute
 			// claim on the row — so the button beside it was pushed out of
@@ -231,9 +237,10 @@ func reviewActions(c *ui.Context, h Host, sh *ShellState, p Palette) {
 			// takes the room the sibling leaves. Both keep their text whole
 			// (§4.8.4 W1): Shrink(0) is the same rule as the status word's.
 			ui.PrimaryButton(c, "Commit").Background(p.Accent).TextColor(p.OnInk).
+				FontSize(11).Padding(6, 9).
 				Grow(1).Shrink(0).OnClick(h.Actions.Commit)
 			if h.Actions.StageAll != nil {
-				ui.Button(c, "Stage all").Padding(7, 12).Radius(controlRadius).TextColor(p.Ink).
+				ui.Button(c, "Stage all").FontSize(11).Padding(6, 9).Radius(controlRadius).TextColor(p.Ink).
 					Shrink(0).OnClick(h.Actions.StageAll)
 			}
 		})

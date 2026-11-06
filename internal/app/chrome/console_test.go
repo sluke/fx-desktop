@@ -1,6 +1,7 @@
 package chrome
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -47,9 +48,9 @@ func TestConsoleDrawerListsRunsWithTheirExitCodes(t *testing.T) {
 	mustHave(t, ts,
 		"fx doctor", "exited 0", // a finished run and its code
 		"fx login", "running", // one still going
-		"CONSOLE-BODY",                        // the active run's terminal
-		"running · click the console to type", // and what a click would do
+		"CONSOLE-BODY", // the active run's terminal
 	)
+	mustNotHave(t, ts, "click the console", "click to scroll")
 }
 
 // Clicking a tab shows that run: the drawer is a log with one terminal in it,
@@ -118,22 +119,20 @@ func TestConsoleDrawerSpeaksWhenEmptyAndCanBeHidden(t *testing.T) {
 	}
 }
 
-// The hint is the one thing the drawer has to say about focus: an embedded
-// terminal takes the keyboard on a click, so the running run says so and a
-// finished one explains what a click is still good for.
-func TestConsoleHintSaysWhatAClickWouldDo(t *testing.T) {
-	d := ConsoleData{Runs: []ConsoleRun{{ID: 1}, {ID: 2, Exited: true}}}
-	sh := &ShellState{ConsoleRun: 1}
-	if got := consoleHint(d, sh); got != "running · click the console to type" {
-		t.Fatalf("running hint = %q", got)
-	}
-	sh.ConsoleRun = 2
-	if got := consoleHint(d, sh); got != "click the console to scroll it" {
-		t.Fatalf("exited hint = %q", got)
-	}
-	sh.ConsoleRun = 99
-	if got := consoleHint(d, sh); got != "" {
-		t.Fatalf("no selection should say nothing, got %q", got)
+// Focus is not taught in prose. Each tab carries its run's own coloured
+// state, and the terminal has a caret of its own; a sentence about what a
+// click would do is a sign neither was visible enough.
+func TestConsoleDoesNotExplainClicksInProse(t *testing.T) {
+	h, sh := consoleTestHost(ConsoleData{Runs: []ConsoleRun{
+		{ID: 1, Title: "fx doctor"},
+		{ID: 2, Title: "fx credits", Exited: true, Exit: 0},
+	}, Body: func(c *ui.Context) { ui.Text(c, "CONSOLE-BODY") }})
+	ts := consoleTester(&h, sh)
+	mustHave(t, ts, "running", "exited 0")
+	for _, s := range ts.Texts() {
+		if strings.Contains(strings.ToLower(s), "click") {
+			t.Fatalf("the drawer explains a click in prose: %q", s)
+		}
 	}
 }
 

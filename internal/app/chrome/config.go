@@ -230,8 +230,8 @@ func advancedSettings(c *ui.Context, state *ConversationState, h ConversationHos
 		})
 		ui.Scroll(c).FillWidth().MaxHeight(245).Children(func() {
 			ui.Column(c).FillWidth().Padding(2, 10, 10, 10).Gap(8).Children(func() {
-				ui.Text(c, "These settings depend on the active model. fx reports an error here when a model does not support one; the conversation stays open.").
-					FontSize(11).TextColor(p.InkMuted).Wrap()
+				// A model that rejects one of these reports its own error
+				// below; the panel does not need to predict it in prose.
 				mono(ui.Text(c, "Reasoning effort")).FontSize(9).TextColor(p.InkMuted)
 				ui.RadioGroup(c, func() {
 					for _, level := range []string{"auto", "minimal", "low", "medium", "high", "xhigh"} {

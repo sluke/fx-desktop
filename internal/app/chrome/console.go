@@ -79,9 +79,8 @@ func consoleTabs(c *ui.Context, h Host, sh *ShellState, p Palette) {
 					consoleTab(c, h, p, run, run.ID == sh.ConsoleRun)
 				}
 			})
-			if hint := consoleHint(d, sh); hint != "" {
-				mono(ui.Text(c, hint)).FontSize(9).TextColor(p.InkMuted).Shrink(0).SingleLine()
-			}
+			// A run's state is on its own tab (coloured, and named), so the
+			// tab strip needs no sentence about what a click would do.
 			if h.Actions.ToggleConsole != nil {
 				ui.Button(c, "✕").Label("Hide console").Tooltip("Hide console (⌘J)").
 					FontSize(11).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
@@ -138,23 +137,6 @@ func consoleRunTooltip(run ConsoleRun) string {
 		return run.Title + " · " + consoleRunState(run)
 	}
 	return run.Command + " · " + consoleRunState(run)
-}
-
-// consoleHint says what the console can do right now. An embedded terminal
-// takes the keyboard on a click, as every embedded terminal does; saying so
-// beats letting a keystroke vanish into a program the user did not mean to
-// type at — the composer keeps the keyboard until then.
-func consoleHint(d ConsoleData, sh *ShellState) string {
-	for _, run := range d.Runs {
-		if run.ID != sh.ConsoleRun {
-			continue
-		}
-		if run.Exited {
-			return "click the console to scroll it"
-		}
-		return "running · click the console to type"
-	}
-	return ""
 }
 
 // consoleRunning reports whether any run is still going, which is the one

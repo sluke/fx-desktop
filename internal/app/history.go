@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo"
 
@@ -65,7 +66,7 @@ func historyReader(executable, dir string) history.Reader {
 		records := make([]history.Record, 0, len(page.Sessions))
 		for _, entry := range page.Sessions {
 			records = append(records, history.Record{
-				ID: entry.ID, Title: entry.Title, WorkspaceRoot: entry.WorkspaceRoot, UpdatedAtMS: entry.UpdatedAtMS,
+				ID: entry.ID, Title: entry.Title, WorkspaceRoot: entry.WorkspaceRoot, UpdatedAtMS: entry.UpdatedAtMS, Turns: entry.HistoryLen,
 			})
 		}
 		return history.Page{Sessions: records, HasMore: page.HasMore, NextCursor: page.NextCursor}, nil
@@ -117,6 +118,7 @@ func (c *Coordinator) sessionHistory(s *ProjectWindow) chrome.HistoryHost {
 		Delete: func(id, title string) { c.deleteHistorySession(s, id, title) },
 		Clear:  func(all bool) { c.clearHistory(s, all) },
 		Live:   c.liveSessionIDs(),
+		Rel:    func(ms int64) string { return relTime(ms, time.Now()) },
 	}
 	if s.chat != nil {
 		h.ActiveID = s.chat.status().SessionID

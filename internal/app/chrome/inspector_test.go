@@ -23,7 +23,7 @@ func TestInspectorWorkspacePathOpensInFileManagerWithoutChangingSession(t *testi
 	var opened string
 	resumed, focused := false, false
 	h.Actions.OpenInFileManager = func(path string) { opened = path }
-	h.Actions.ResumeSession = func(string) { resumed = true }
+	h.Actions.ResumeSession = func(string, string) { resumed = true }
 	h.Actions.FocusSession = func(string) { focused = true }
 
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)

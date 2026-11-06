@@ -15,8 +15,11 @@ type ManagementState struct {
 	// The request form is the management package's; the panel renders it and
 	// the app validates the same fields.
 	management.Form
-	Open, Busy    bool
-	Page          string
+	Open, Busy bool
+	Page       string
+	// BodyScroll is the tools body's scroll offset. The page switch resets
+	// it, so a shorter page does not inherit the previous page's position.
+	BodyScroll    ui.ScrollState
 	Output        string
 	Generation    uint64
 	Details       []DetailSection
@@ -136,47 +139,107 @@ type ManagementHost struct {
 	OpenPath  func(path string)
 }
 
+// toolPageRows is the tab strip split into two rows. Eleven pages do not
+// fit one row at the sheet's fixed 560 DIP width: a single row clipped the
+// last pages. Two rows keep every page visible, and keep the strip's height
+// constant so switching pages cannot move the sheet. All rows share one
+// column grid: each tab gets the same fixed width, so the shorter row
+// leaves its trailing cells empty instead of stretching over them.
+var toolPageRows = [][]string{
+	{"Account", "MCP", "Folders", "Details", "Sessions", "Launch"},
+	{"Models", "Rules", "Skills", "Slack", "GitHub"},
+}
+
+const (
+	toolTabGapX      = 2
+	toolTabPaddingX  = 10
+	toolTabMinColumn = 24
+)
+
+// toolPageColumnWidth divides the sheet's inner width into one grid.
+// Grow(1) cannot do this: flex distributes the leftover space on top of
+// each button's intrinsic width, so a row with fewer tabs ends up with
+// wider columns than the row above it.
+func toolPageColumnWidth(windowWidth float32) float32 {
+	columns := 0
+	for _, row := range toolPageRows {
+		if len(row) > columns {
+			columns = len(row)
+		}
+	}
+	panelWidth := min(float32(contentMaxWidth), windowWidth-48)
+	inner := panelWidth - 2*sheetBorderWidth - 2*toolTabPaddingX
+	return max(float32(toolTabMinColumn), (inner-float32(columns-1)*toolTabGapX)/float32(columns))
+}
+
 func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p Palette) {
-	_, height := c.Size()
+	width, height := c.Size()
 	if state.Page == "" {
 		state.Page = "Account"
 	}
-	sheet(c, &state.Open, p, "Workspace tools", func() {
-		ui.Column(c).FillWidth().Children(func() {
-			ui.Row(c).FillWidth().Padding(10, 14).AlignItems(ui.Center).Children(func() {
+	tabColumnWidth := toolPageColumnWidth(width)
+	sheetWithHeight(c, &state.Open, p, "Workspace tools", height-48, func() {
+		ui.Column(c).FillWidth().Grow(1).Children(func() {
+			ui.Row(c).FillWidth().Padding(10, 14).AlignItems(ui.Center).Shrink(0).Children(func() {
 				sheetTitle(c, "Workspace tools", p.InkStrong)
 				ui.Box(c).Grow(1)
 				ui.Button(c, "Close").FontSize(11).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).OnClick(func() { state.Open = false })
 			})
-			ui.Row(c).FillWidth().Padding(0, 10, 8, 10).Gap(2).Children(func() {
-				for _, page := range []string{"Account", "MCP", "Folders", "Details", "Sessions", "Launch", "Models", "Rules", "Skills", "Slack", "GitHub"} {
-					page := page
-					button := ui.Button(c, page).Label("Tools: "+page).Font(MonoFont).FontSize(10).Padding(4, 7).BorderWidth(0).Radius(3).Disabled(state.Busy).OnClick(func() {
-						state.Page = page
-						state.Output = ""
-						if page == "Models" && len(state.Models) == 0 && h.Run != nil {
-							h.Run("models")
-						}
-						if page == "Rules" && len(state.AllowRules) == 0 && h.Run != nil {
-							h.Run("allowlist-load")
-						}
-						if page == "Skills" && len(state.Skills) == 0 && h.Run != nil {
-							h.Run("skills-load")
+			ui.Column(c).FillWidth().Padding(0, toolTabPaddingX, 8, toolTabPaddingX).Gap(toolTabGapX).Shrink(0).Children(func() {
+				for _, row := range toolPageRows {
+					ui.Row(c).FillWidth().Gap(toolTabGapX).Children(func() {
+						for _, page := range row {
+							page := page
+							button := ui.Button(c, page).Label("Tools: "+page).Font(MonoFont).FontSize(10).Padding(4, 7).Width(tabColumnWidth).Shrink(0).BorderWidth(0).Radius(3).Disabled(state.Busy).OnClick(func() {
+								state.Page = page
+								state.Output = ""
+								// A new page starts at its top; the old
+								// page's offset would otherwise land in
+								// the middle of a shorter page.
+								state.BodyScroll.X, state.BodyScroll.Y = 0, 0
+								if page == "Models" && len(state.Models) == 0 && h.Run != nil {
+									h.Run("models")
+								}
+								if page == "Rules" && len(state.AllowRules) == 0 && h.Run != nil {
+									h.Run("allowlist-load")
+								}
+								if page == "Skills" && len(state.Skills) == 0 && h.Run != nil {
+									h.Run("skills-load")
+								}
+							})
+							if state.Page == page {
+								button.Background(p.Sunken).TextColor(p.Accent)
+							} else {
+								button.Background(p.Window).TextColor(p.InkMuted)
+							}
 						}
 					})
-					if state.Page == page {
-						button.Background(p.Sunken).TextColor(p.Accent)
-					} else {
-						button.Background(p.Window).TextColor(p.InkMuted)
-					}
 				}
 			})
-			ui.Scroll(c).FillWidth().MaxHeight(min(float32(450), max(float32(120), height-150))).Children(func() {
+			ui.Scroll(c).FillWidth().Grow(1).Label("Workspace tool page").TrackScroll(&state.BodyScroll).Children(func() {
 				ui.Column(c).FillWidth().Padding(8, 14, 14, 14).Gap(10).Children(func() {
-					note := func(text string) { ui.Text(c, text).FontSize(11).TextColor(p.InkMuted).Wrap() }
+					// statusLine is only for what fx reported or what it is
+					// doing. The pages carry no standing prose: controls,
+					// their labels and the badges below say what they do.
+					statusLine := func(text string) { ui.Text(c, text).FontSize(11).TextColor(p.InkMuted).Wrap() }
+					// badge is a short, structured fact about a setting —
+					// when it takes effect — not an instruction sentence.
+					badge := func(text string) {
+						ui.Row(c).AlignItems(ui.Center).Padding(3, 6).Radius(3).Background(p.Sunken).Children(func() {
+							mono(ui.Text(c, text)).FontSize(9).TextColor(p.Accent).SingleLine()
+						})
+					}
+					// section names a group of controls. It is the design's
+					// structural caption (labelText): one size for every
+					// caption on the sheet, so the page reads as one form.
+					section := func(text string) {
+						ui.Row(c).FillWidth().Padding(2, 0, 0, 0).Children(func() {
+							labelText(c, strings.ToUpper(text), p.InkFaint)
+						})
+					}
 					field := func(label string, value *string) {
 						ui.Column(c).FillWidth().Gap(4).Children(func() {
-							mono(ui.Text(c, label)).FontSize(9).TextColor(p.InkMuted)
+							labelText(c, label, p.InkMuted)
 							ui.TextInput(c, value).Label(label).FontSize(12).FillWidth().Disabled(state.Busy)
 						})
 					}
@@ -206,17 +269,15 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 					}
 					switch state.Page {
 					case "Account":
-						note("Complete provider sign-in and configuration in the fx console.")
-						note("The current conversation keeps its provider; new conversations use the default below.")
+						section("Provider")
 						ui.RadioGroup(c, func() {
 							for _, provider := range []string{"", "vercel", "codex", "grok"} {
 								label := provider
 								if label == "" {
 									label = "Default"
 								}
-								// The choices read at the body's size, like the
-								// note above them: a radio list set larger than
-								// the prose beside it looks like another panel.
+								// A radio list set larger than the fields
+								// beside it reads as another panel.
 								ui.Radio(c, &state.Provider, provider, label).FontSize(11)
 							}
 						})
@@ -225,6 +286,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						ui.Box(c).Height(1)
 						field("Default provider for new conversations", &state.ProviderDefault)
 						ui.Row(c).Gap(8).Children(func() { button("Set default provider", "provider-set") })
+						section("Credits")
 						ui.Row(c).Gap(8).Children(func() { button("Refresh credits", "credits") })
 						if state.Credits != "" {
 							ui.Scroll(c).FillWidth().MaxHeight(100).Children(func() {
@@ -232,7 +294,8 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							})
 						}
 					case "MCP":
-						note("Server changes are saved by fx. Start a new conversation to load changed servers.")
+						badge("Applies to new sessions")
+						section("Servers")
 						ui.Row(c).Gap(8).Children(func() {
 							button("List servers", "mcp-list")
 							button("Check server", "mcp-show")
@@ -241,6 +304,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							button("Add Slack", "mcp-add-slack")
 							button("Approve all project servers", "mcp-approve-all")
 						})
+						section("Add server")
 						field("Server name", &state.Name)
 						ui.RadioGroup(c, func() {
 							ui.Radio(c, &state.Transport, "stdio", "stdio").FontSize(11)
@@ -249,16 +313,20 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						if state.Transport == "http" {
 							field("Server URL", &state.URL)
 							ui.Column(c).FillWidth().Gap(3).Children(func() {
-								mono(ui.Text(c, "HTTP headers (K=V, one per line, optional)")).FontSize(9).TextColor(p.InkMuted)
-								ui.TextArea(c, &state.Headers).Label("HTTP headers").Lines(1, 3).FillWidth().Disabled(state.Busy)
+								labelText(c, "HTTP headers", p.InkMuted)
+								ui.TextArea(c, &state.Headers).Label("HTTP headers").FontSize(12).Placeholder("K=V, one per line").Lines(1, 3).FillWidth().Disabled(state.Busy)
 							})
 						} else {
 							field("Server executable", &state.Command)
-							note("One argument per line; spaces stay inside that argument. No shell expansion.")
-							ui.TextArea(c, &state.Arguments).Label("Server arguments").Lines(1, 3).FillWidth().Disabled(state.Busy)
 							ui.Column(c).FillWidth().Gap(3).Children(func() {
-								mono(ui.Text(c, "Environment (K=V, one per line, optional)")).FontSize(9).TextColor(p.InkMuted)
-								ui.TextArea(c, &state.Environment).Label("Environment").Lines(1, 3).FillWidth().Disabled(state.Busy)
+								labelText(c, "Server arguments", p.InkMuted)
+								// The format belongs in the empty control,
+								// not in a paragraph above it.
+								ui.TextArea(c, &state.Arguments).Label("Server arguments").FontSize(12).Placeholder("one argument per line · spaces preserved").Lines(1, 3).FillWidth().Disabled(state.Busy)
+							})
+							ui.Column(c).FillWidth().Gap(3).Children(func() {
+								labelText(c, "Environment", p.InkMuted)
+								ui.TextArea(c, &state.Environment).Label("Environment").FontSize(12).Placeholder("K=V, one per line").Lines(1, 3).FillWidth().Disabled(state.Busy)
 							})
 						}
 						check("Write to this project's .mcp.json", &state.MCPProject)
@@ -273,11 +341,11 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							button("Reject server", "mcp-reject")
 						})
 						if state.MCPProblem != "" {
-							note(state.MCPProblem)
+							statusLine(state.MCPProblem)
 						}
 						if len(state.MCPServers) > 0 {
 							ui.Column(c).FillWidth().Gap(3).Children(func() {
-								mono(ui.Text(c, "Configured servers")).FontSize(9).TextColor(p.InkMuted)
+								labelText(c, "Configured servers", p.InkMuted)
 								ui.Scroll(c).FillWidth().MaxHeight(220).Children(func() {
 									ui.Column(c).FillWidth().Gap(4).Children(func() {
 										for _, server := range state.MCPServers {
@@ -285,9 +353,9 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 											ui.Column(c).FillWidth().Gap(2).Padding(7, 8).Radius(4).Background(p.Sunken).Children(func() {
 												ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 													ui.Text(c, server.Name).Font(MonoFont).FontSize(11).TextColor(p.Ink).Grow(1).SingleLine()
-													ui.Text(c, server.Transport).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).SingleLine()
-													ui.Text(c, valueOrDash(server.Status)).Font(MonoFont).FontSize(9).TextColor(mcpStatusColor(p, server.Status)).SingleLine()
-													ui.Button(c, "Check "+server.Name).FontSize(9).Padding(3, 6).Disabled(state.Busy || h.Run == nil).OnClick(func() {
+													ui.Text(c, server.Transport).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).SingleLine()
+													ui.Text(c, valueOrDash(server.Status)).Font(MonoFont).FontSize(10).TextColor(mcpStatusColor(p, server.Status)).SingleLine()
+													ui.Button(c, "Check "+server.Name).FontSize(11).Padding(3, 6).Disabled(state.Busy || h.Run == nil).OnClick(func() {
 														state.Name = server.Name
 														if h.Run != nil {
 															h.Run("mcp-show")
@@ -295,10 +363,10 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 													})
 												})
 												if server.Source != "" || server.File != "" {
-													ui.Text(c, strings.TrimSpace(server.Source+" · "+server.File)).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).SingleLine()
+													ui.Text(c, strings.TrimSpace(server.Source+" · "+server.File)).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).SingleLine()
 												}
 												if server.Error != "" {
-													ui.Text(c, server.Error).FontSize(9).TextColor(p.Danger).Wrap()
+													ui.Text(c, server.Error).FontSize(10).TextColor(p.Danger).Wrap()
 												}
 											})
 										}
@@ -327,9 +395,8 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 								}
 							})
 						}
-						note("fx 0.0.15+ removed mcp path, mcp auth and mcp trust; List servers now shows each server's name, transport, status and file. Rejecting a server withdraws its approval; fx has no reset-all command.")
 					case "Folders":
-						note("Additional directories belong to this primary workspace. Start a new conversation after saving changes.")
+						badge("Applies to new sessions")
 						field("Additional directory", &state.Directory)
 						ui.Button(c, "Choose directory…").FontSize(11).Disabled(state.Busy || h.PickDirectory == nil).OnClick(func() {
 							if h.PickDirectory != nil {
@@ -343,7 +410,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						})
 						button("Clear additional directories", "workspace-clear")
 					case "Details":
-						note("Read-only provider data: full status, permission rules/grants, and usage for the selected UTC period. Diagnostics use fx's own preflight.")
+						section("Status")
 						ui.RadioGroup(c, func() {
 							ui.Radio(c, &state.Period, "today", "Today").FontSize(11)
 							ui.Radio(c, &state.Period, "7d", "7 days").FontSize(11)
@@ -387,20 +454,20 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 								case "fail":
 									tone = p.Danger
 								}
-								ui.Text(c, label).Font(MonoFont).FontSize(9).TextColor(tone).Width(44)
+								ui.Text(c, label).Font(MonoFont).FontSize(10).TextColor(tone).Width(44)
 								ui.Text(c, check.Name).FontSize(11).TextColor(p.Ink).Width(100)
 								ui.Text(c, check.Detail).FontSize(10).TextColor(p.InkMuted).Wrap()
 							})
 						}
 						ui.Box(c).Height(1)
-						note("Release channel and upgrade. fx downloads and installs the selected channel.")
+						section("Release channel")
 						ui.RadioGroup(c, func() {
 							ui.Radio(c, &state.Channel, "stable", "Stable").FontSize(11)
 							ui.Radio(c, &state.Channel, "dev", "Dev").FontSize(11)
 						})
 						button("Upgrade on this channel", "upgrade-channel")
 					case "Sessions":
-						note("Browse, search and resume saved conversations. Older sessions convert automatically when opened; session repair and bulk conversion are handled by fx.")
+						section("Saved sessions")
 						button("Browse history…", "sessions")
 						field("Session id", &state.SessionID)
 						ui.Row(c).Gap(8).Children(func() {
@@ -408,10 +475,10 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							button("Recover corrupt session", "session-recover")
 						})
 						ui.Box(c).Height(1)
-						note("Convert every session saved in the previous format. fx leaves unreadable sessions in place and reports anything it could not move.")
+						section("Conversion")
 						button("Convert old sessions", "sessions-convert")
 						if state.SessionProblem != "" {
-							note(state.SessionProblem)
+							statusLine(state.SessionProblem)
 						}
 						if d := state.SessionView; d != nil {
 							ui.Column(c).FillWidth().Gap(4).Padding(8, 10).Radius(4).Background(p.Sunken).Children(func() {
@@ -432,7 +499,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 												if turn.Images > 0 {
 													label += fmt.Sprintf(" · %d image(s)", turn.Images)
 												}
-												mono(ui.Text(c, label)).FontSize(9).TextColor(p.InkMuted)
+												labelText(c, label, p.InkMuted)
 												if turn.User != "" {
 													ui.Text(c, "You: "+turn.User).FontSize(10).TextColor(p.Ink).Wrap()
 												}
@@ -440,7 +507,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 													ui.Text(c, turn.Assistant).FontSize(10).TextColor(p.InkMuted).Wrap()
 												}
 												if len(turn.Tools) > 0 {
-													ui.Text(c, "Tools: "+strings.Join(turn.Tools, ", ")).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).Wrap()
+													ui.Text(c, "Tools: "+strings.Join(turn.Tools, ", ")).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).Wrap()
 												}
 											})
 										}
@@ -449,14 +516,13 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							}
 						}
 					case "Models":
-						note("The model catalog fx reports for this workspace. Selecting a row copies its id into the Launch form; a live conversation uses its own model picker.")
 						field("Filter models", &state.ModelQuery)
 						ui.Row(c).Gap(8).Children(func() {
 							button("Refresh models", "models")
 							button("Clear filter", "models-clear")
 						})
 						if state.ModelsProblem != "" {
-							note(state.ModelsProblem)
+							statusLine(state.ModelsProblem)
 						}
 						query := strings.ToLower(strings.TrimSpace(state.ModelQuery))
 						shown := 0
@@ -484,21 +550,25 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						})
 						ui.Text(c, fmt.Sprintf("%d shown", shown)).FontSize(10).TextColor(p.InkMuted)
 					case "Launch":
-						note("Starts a new conversation in this project. fx retains saved history; the current connection closes.")
+						badge("Applies to new sessions")
 						button("Start new conversation", "launch")
-						field("Provider override (optional)", &state.ProviderOverride)
-						field("Model override (optional)", &state.Model)
-						field("Reasoning effort (auto, minimal, low, medium, high, xhigh)", &state.Effort)
-						ui.Column(c).FillWidth().Gap(3).Children(func() {
-							mono(ui.Text(c, "Additional directories (one absolute path per line)")).FontSize(9).TextColor(p.InkMuted)
-							ui.TextArea(c, &state.AddDirs).Label("Additional directories").Lines(1, 3).FillWidth().Disabled(state.Busy)
+						section("Overrides")
+						field("Provider override", &state.ProviderOverride)
+						field("Model override", &state.Model)
+						ui.Column(c).FillWidth().Gap(4).Children(func() {
+							labelText(c, "Reasoning effort", p.InkMuted)
+							ui.TextInput(c, &state.Effort).Label("Reasoning effort").Placeholder("auto · minimal · low · medium · high · xhigh").FontSize(12).FillWidth().Disabled(state.Busy)
 						})
 						ui.Column(c).FillWidth().Gap(3).Children(func() {
-							mono(ui.Text(c, "Context limit overrides (NAME=BYTES|off, one per line)")).FontSize(9).TextColor(p.InkMuted)
-							ui.TextArea(c, &state.ContextLimits).Label("Context limit overrides").Lines(1, 3).FillWidth().Disabled(state.Busy)
+							labelText(c, "Additional directories", p.InkMuted)
+							ui.TextArea(c, &state.AddDirs).Label("Additional directories").FontSize(12).Placeholder("one absolute path per line").Lines(1, 3).FillWidth().Disabled(state.Busy)
+						})
+						ui.Column(c).FillWidth().Gap(3).Children(func() {
+							labelText(c, "Context limit overrides", p.InkMuted)
+							ui.TextArea(c, &state.ContextLimits).Label("Context limit overrides").FontSize(12).Placeholder("NAME=BYTES|off, one per line").Lines(1, 3).FillWidth().Disabled(state.Busy)
 						})
 						ui.Column(c).FillWidth().Gap(2).Children(func() {
-							mono(ui.Text(c, "Fast mode")).FontSize(9).TextColor(p.InkMuted)
+							labelText(c, "Fast mode", p.InkMuted)
 							ui.RadioGroup(c, func() {
 								ui.Radio(c, &state.Fast, "default", "Default").FontSize(11)
 								ui.Radio(c, &state.Fast, "on", "On").FontSize(11)
@@ -506,7 +576,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							})
 						})
 						ui.Column(c).FillWidth().Gap(2).Children(func() {
-							mono(ui.Text(c, "Ultra mode")).FontSize(9).TextColor(p.InkMuted)
+							labelText(c, "Ultra mode", p.InkMuted)
 							ui.RadioGroup(c, func() {
 								ui.Radio(c, &state.Ultra, "default", "Default").FontSize(11)
 								ui.Radio(c, &state.Ultra, "on", "On").FontSize(11)
@@ -514,11 +584,13 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							})
 						})
 						check("Do not load additional directories", &state.NoAdditionalDirs)
-						field("ACP log path (optional, absolute)", &state.LogPath)
-						note("Effort and fast mode are applied to the new ACP session after it opens; fx accepts them through session configuration even though it does not advertise them as launch flags. Provider and directories can also be changed in a live conversation.")
+						field("ACP log path", &state.LogPath)
 						button("Start with these options", "launch")
 					case "Rules":
-						note("Persistent allow rules live in ~/.fx/settings.json. Local rules belong to this workspace and shadow user rules; changes apply to new conversations.")
+						// The file is a location, not an explanation: naming it
+						// beside the scope controls is enough.
+						labelText(c, "~/.fx/settings.json", p.InkMuted).SingleLine()
+						badge("Applies to new sessions")
 						ui.RadioGroup(c, func() {
 							ui.Radio(c, &state.AllowScope, "local", "This workspace").FontSize(11)
 							ui.Radio(c, &state.AllowScope, "user", "All workspaces").FontSize(11)
@@ -557,20 +629,20 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							ui.Button(c, "Reset scope").FontSize(11).Padding(6, 9).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() { allow("reset-all") })
 						})
 						if state.AllowProblem != "" {
-							note(state.AllowProblem)
+							statusLine(state.AllowProblem)
 						}
 						if len(state.AllowRules) == 0 {
-							note("No persistent allow rules are stored.")
+							statusLine("No rules")
 						} else {
 							ui.Scroll(c).FillWidth().MaxHeight(220).Children(func() {
 								ui.Column(c).FillWidth().Gap(2).Children(func() {
 									for _, rule := range state.AllowRules {
 										rule := rule
 										ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-											ui.Text(c, rule.Scope).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).Width(42)
+											ui.Text(c, rule.Scope).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).Width(42)
 											ui.Text(c, rule.Label).FontSize(10).TextColor(p.InkMuted).Width(120)
 											ui.Text(c, rule.Pattern).Font(MonoFont).FontSize(10).TextColor(p.Ink).Wrap().Grow(1)
-											ui.Button(c, "Remove").FontSize(9).Padding(3, 6).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() {
+											ui.Button(c, "Remove").FontSize(11).Padding(3, 6).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() {
 												if h.Allowlist != nil {
 													h.Allowlist("remove", rule.Scope, rule.Kind, rule.Key, rule.Pattern)
 												}
@@ -581,7 +653,6 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							})
 						}
 					case "Skills":
-						note("Skills listed by fx from this workspace and the user's global discovery roots. Add, install and remove still use fx's own skill workflow; this page is the native catalog and folder entry point.")
 						field("Filter skills", &state.SkillQuery)
 						ui.Row(c).Gap(8).Children(func() {
 							button("Refresh skills", "skills-load")
@@ -592,7 +663,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							})
 						})
 						if state.SkillProblem != "" {
-							note(state.SkillProblem)
+							statusLine(state.SkillProblem)
 						}
 						query := strings.ToLower(strings.TrimSpace(state.SkillQuery))
 						shown := 0
@@ -607,8 +678,8 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 									ui.Column(c).FillWidth().Gap(2).Padding(7, 8).Radius(4).Background(p.Sunken).Children(func() {
 										ui.Row(c).FillWidth().Gap(6).AlignItems(ui.Center).Children(func() {
 											ui.Text(c, skill.Name).FontSize(11).TextColor(p.Ink).Grow(1).SingleLine()
-											ui.Text(c, skill.Source).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).SingleLine()
-											ui.Button(c, "Open").FontSize(9).Padding(3, 6).Disabled(h.OpenPath == nil).OnClick(func() {
+											ui.Text(c, skill.Source).Font(MonoFont).FontSize(10).TextColor(p.InkMuted).SingleLine()
+											ui.Button(c, "Open").FontSize(11).Padding(3, 6).Disabled(h.OpenPath == nil).OnClick(func() {
 												if h.OpenPath != nil {
 													h.OpenPath(skill.Path)
 												}
@@ -626,7 +697,6 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						})
 						ui.Text(c, fmt.Sprintf("%d shown", shown)).FontSize(10).TextColor(p.InkMuted)
 					case "Slack":
-						note("Slack authorization runs through fx and opens your browser. The bot token stays in fx's own credential store.")
 						ui.Row(c).Gap(8).Children(func() {
 							button("Refresh status", "slack-status")
 							button("Install workspace bot", "slack-install")
@@ -634,7 +704,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						})
 						button("Add Slack MCP server", "mcp-add-slack")
 						if state.SlackProblem != "" {
-							note(state.SlackProblem)
+							statusLine(state.SlackProblem)
 						}
 						ui.Column(c).FillWidth().Gap(4).Padding(8, 10).Radius(4).Background(p.Sunken).Children(func() {
 							status := "Not installed"
@@ -649,22 +719,21 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							factRow("Refresh expires", state.Slack.RefreshExpires)
 						})
 					case "GitHub":
-						note("Draft a pull request or issue from the current branch. Publishing runs fx --create and GitHub CLI may require authentication; nothing is published until you confirm.")
 						ui.RadioGroup(c, func() {
 							ui.Radio(c, &state.GitHub.Kind, "pr", "Pull request").FontSize(11)
 							ui.Radio(c, &state.GitHub.Kind, "issue", "Issue").FontSize(11)
 						})
-						ui.TextArea(c, &state.GitHub.Context).Label("Context (optional)").Lines(2, 5).FillWidth().Disabled(state.Busy || state.GitHub.Busy)
+						ui.TextArea(c, &state.GitHub.Context).Label("Context (optional)").FontSize(12).Lines(2, 5).FillWidth().Disabled(state.Busy || state.GitHub.Busy)
 						ui.Column(c).FillWidth().Gap(2).Children(func() {
 							ui.Checkbox(c, &state.GitHub.Auto, "Let fx review permissions automatically").FontSize(11).Disabled(state.Busy || state.GitHub.Busy)
 							ui.Checkbox(c, &state.GitHub.Create, "Publish with GitHub").FontSize(11).Disabled(state.Busy || state.GitHub.Busy)
 						})
 						button("Run GitHub action", "github-run")
 						if state.GitHub.Busy {
-							note("Running fx…")
+							statusLine("Running fx…")
 						}
 						if state.GitHub.Problem != "" {
-							note(state.GitHub.Problem)
+							statusLine(state.GitHub.Problem)
 						}
 						if state.GitHub.Output != "" {
 							ui.Scroll(c).FillWidth().MaxHeight(180).Label("GitHub action output").Children(func() {
@@ -673,7 +742,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						}
 					}
 					if state.Busy {
-						note("Reading fx…")
+						statusLine("Reading fx…")
 					}
 				})
 			})

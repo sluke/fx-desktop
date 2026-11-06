@@ -1,6 +1,9 @@
 package chrome
 
 import (
+	"image"
+	"image/color"
+	"math"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -138,4 +141,110 @@ func TestSidebarEmptyStateKeepsShortNoteOnOneLine(t *testing.T) {
 	if note.H > 20 {
 		t.Fatalf("sidebar note is %.1f high, want one 12px line", note.H)
 	}
+}
+
+// The rail's Workspace tools button used to carry the terminal glyph, while
+// the palette entry for the same sheet carried the sliders. >_ promises a
+// command will run, but the sheet only manages the workspace; the sliders
+// already mean Settings. Both entries must share one distinct tool mark.
+func TestWorkspaceToolsUsesAToolIconInTheRailAndPalette(t *testing.T) {
+	for _, cmd := range Commands {
+		if cmd.ID != "workspace-tools" {
+			continue
+		}
+		if cmd.Icon != IconTools || cmd.Icon == IconTerminal || cmd.Icon == IconSettings {
+			t.Fatalf("palette entry %q does not use the rail's distinct tool mark", cmd.ID)
+		}
+	}
+
+	h, _ := testHost()
+	h.Appearance = "dark"
+	h.Actions.ManageWorkspace = noop
+	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 640, 480)
+	ts.SetDark(true)
+	ts.Frame()
+	button, ok := ts.Find("Workspace tools")
+	if !ok {
+		t.Fatal("the tools button is missing from the rail")
+	}
+	prod := ts.Image()
+
+	// Render the same button three times with the three candidate glyphs and
+	// compare the drawn pixels: this checks what the rail actually draws,
+	// not just which constant the source mentions.
+	render := func(icon *ui.SVG) (*image.RGBA, ui.Rect) {
+		ref := ui.NewTester(func(c *ui.Context) {
+			ApplyTheme(c, "dark")
+			railButton(c, palette(c.Theme()), icon, "Workspace tools", "Workspace tools", false, noop)
+		}, iconRailWide, 34)
+		ref.SetDark(true)
+		ref.Frame()
+		box, found := ref.Find("Workspace tools")
+		if !found {
+			t.Fatal("reference rail button is missing")
+		}
+		return ref.Image(), box
+	}
+	diffs := map[string]int{}
+	for name, icon := range map[string]*ui.SVG{
+		"terminal": IconTerminal,
+		"settings": IconSettings,
+		"tools":    IconTools,
+	} {
+		ref, box := render(icon)
+		diffs[name] = railGlyphDiff(prod, button, ref, box)
+	}
+	if diffs["tools"] >= diffs["terminal"] || diffs["tools"] >= diffs["settings"] {
+		t.Fatalf("rail glyph is not the tool mark: differing pixels %v", diffs)
+	}
+	if diffs["terminal"] < 30 || diffs["settings"] < 30 {
+		t.Fatalf("rail glyph is too close to terminal/settings: differing pixels %v", diffs)
+	}
+	// Both frames could otherwise agree on an empty glyph: prove the tool
+	// mark actually draws strokes inside the icon box.
+	toolsRef, toolsBox := render(IconTools)
+	if ink := railGlyphInk(toolsRef, toolsBox); ink < 20 {
+		t.Fatalf("the tool icon draws only %d ink pixels; its SVG may be empty", ink)
+	}
+}
+
+// railGlyphInk counts the icon-box pixels that differ from the button's
+// background. A parsed but empty SVG would still match itself in the diff
+// comparison above.
+func railGlyphInk(img *image.RGBA, box ui.Rect) int {
+	cx, cy := int(box.X+box.W/2), int(box.Y+box.H/2)
+	bg := img.RGBAAt(int(box.X)+2, int(box.Y)+2)
+	ink := 0
+	for dy := -10; dy <= 10; dy++ {
+		for dx := -10; dx <= 10; dx++ {
+			if pixelDistance(img.RGBAAt(cx+dx, cy+dy), bg) > 24 {
+				ink++
+			}
+		}
+	}
+	return ink
+}
+
+func pixelDistance(a, b color.RGBA) float64 {
+	return math.Abs(float64(a.R)-float64(b.R)) +
+		math.Abs(float64(a.G)-float64(b.G)) +
+		math.Abs(float64(a.B)-float64(b.B))
+}
+
+// railGlyphDiff counts visibly different pixels in the 21×21 icon box,
+// centered on each button. A small tolerance absorbs antialiasing and the
+// half-DIP offset between a full frame and a standalone button.
+func railGlyphDiff(prod *image.RGBA, prodBox ui.Rect, ref *image.RGBA, refBox ui.Rect) int {
+	pcx, pcy := int(prodBox.X+prodBox.W/2), int(prodBox.Y+prodBox.H/2)
+	rcx, rcy := int(refBox.X+refBox.W/2), int(refBox.Y+refBox.H/2)
+	changed := 0
+	for dy := -10; dy <= 10; dy++ {
+		for dx := -10; dx <= 10; dx++ {
+			a, b := prod.RGBAAt(pcx+dx, pcy+dy), ref.RGBAAt(rcx+dx, rcy+dy)
+			if pixelDistance(a, b) > 24 {
+				changed++
+			}
+		}
+	}
+	return changed
 }

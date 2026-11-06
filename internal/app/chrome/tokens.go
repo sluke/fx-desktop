@@ -20,6 +20,7 @@ const (
 	agentBarHeight   = 32
 	terminalInset    = 12
 	sheetRadius      = 10
+	sheetBorderWidth = 1
 	contentMaxWidth  = 560
 	controlRadius    = 5
 	panelPad         = 14

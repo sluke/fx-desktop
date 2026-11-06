@@ -59,6 +59,43 @@ func TestDeleteManyRemovesSessionsAndMatchingContinuePointers(t *testing.T) {
 	}
 }
 
+// fx 0.0.16 keeps saved conversations in ~/.fx/sessions/v2/<id> and lists
+// them by scanning that directory; the flat ~/.fx/sessions/<id> layout is the
+// store earlier builds converted away from. DeleteMany must remove the
+// directory wherever the running fx keeps it — a delete that only touches
+// the flat path silently succeeds on a path that does not exist (os.RemoveAll
+// is nil on ENOENT) and the row reappears on the next refresh.
+func TestDeleteManyRemovesSessionsFromTheV2Store(t *testing.T) {
+	home := testutil.IsolateHome(t)
+	for _, id := range []string{"dropA", "keepB"} {
+		writeFile(t, filepath.Join(home, ".fx", "sessions", "v2", id, "log.jsonl"), "{}")
+	}
+	writeFile(t, filepath.Join(sessionPath(t, home, "dropC"), "session.json"), "{}")
+	writeFile(t, filepath.Join(home, ".fx", "continue", "p"), "dropA\n")
+
+	deleted, err := DeleteMany([]string{"dropA", "dropC", "not-there"})
+	if err != nil {
+		t.Fatalf("DeleteMany: %v", err)
+	}
+	if len(deleted) != 3 {
+		t.Fatalf("deleted = %v, want all three (missing counts as deleted)", deleted)
+	}
+	for _, id := range []string{"dropA", "dropC"} {
+		if _, err := os.Stat(sessionPath(t, home, id)); !os.IsNotExist(err) {
+			t.Fatalf("flat %s still exists: %v", id, err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".fx", "sessions", "v2", id)); !os.IsNotExist(err) {
+			t.Fatalf("v2 %s still exists: %v", id, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, ".fx", "sessions", "v2", "keepB")); err != nil {
+		t.Fatalf("unrelated v2 session removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".fx", "continue", "p")); !os.IsNotExist(err) {
+		t.Fatalf("continue pointer still exists: %v", err)
+	}
+}
+
 func TestDeleteManyMissingSessionCountsAsDeleted(t *testing.T) {
 	home := testutil.IsolateHome(t)
 	if err := os.MkdirAll(filepath.Join(home, ".fx", "sessions"), 0o700); err != nil {

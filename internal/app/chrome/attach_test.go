@@ -136,11 +136,12 @@ func TestComposerSendsAttachments(t *testing.T) {
 	h := ConversationHost{
 		Ready:            true,
 		CanAttach:        true,
+		PickImage:        func() {},
 		RemoveAttachment: func(id uint64) { removed = append(removed, id) },
 		Send:             func(_ string, a []Attachment) bool { sent = a; return true },
 	}
 	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 900, 600)
-	mustHave(t, ts, "one.png", "two.png", "8×8", "drop or paste an image")
+	mustHave(t, ts, "one.png", "two.png", "8×8", "Attach image")
 
 	if err := ts.Click("Remove image one.png"); err != nil {
 		t.Fatalf("remove: %v", err)
@@ -174,8 +175,10 @@ func TestComposerHoldsImagesWhileATurnRuns(t *testing.T) {
 	h := ConversationHost{Ready: true, Busy: true, CanSteer: true, CanAttach: true,
 		Send: func(string, []Attachment) bool { calls++; return true }}
 	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 1000, 600)
-	mustHave(t, ts, "Working… · images wait for the next turn",
-		"Images are attached with the next message · Enter still steers or queues text")
+	// The status strip states the fact; no caption under the composer
+	// explains the keys a second time.
+	mustHave(t, ts, "Working… · images wait for the next turn", "shot.png")
+	mustNotHave(t, ts, "Images are attached with the next message")
 
 	// The arrow is drawn disabled, so clicking it is not an error — it is
 	// simply not a way to send the pictures mid-turn.
@@ -198,17 +201,17 @@ func TestComposerShowsWhyAnImageWasRefused(t *testing.T) {
 	mustHave(t, ts, "huge.png is 6.0 MB; fx takes up to 5.0 MB per image")
 }
 
-// A session whose fx cannot take images never mentions them: advertising an
-// affordance the agent would refuse is worse than not having it (§A.8).
+// A session whose fx cannot take images offers no image button: advertising
+// an affordance the agent would refuse is worse than not having it (§A.8).
 func TestComposerAdvertisesImagesOnlyWhenFxCanTakeThem(t *testing.T) {
 	state := ConversationState{}
-	h := ConversationHost{Ready: true, Send: func(string, []Attachment) bool { return true }}
+	h := ConversationHost{Ready: true, PickImage: func() {}, Send: func(string, []Attachment) bool { return true }}
 	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 900, 500)
-	mustNotHave(t, ts, "drop or paste an image")
+	mustNotHave(t, ts, "Attach image")
 
 	h.CanAttach = true
 	ts.Frame()
-	mustHave(t, ts, "drop or paste an image")
+	mustHave(t, ts, "Attach image")
 }
 
 // A picture already sent is history, so the transcript keeps recording it

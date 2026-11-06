@@ -102,7 +102,7 @@ func TestHistoryEmptyAndPartialSearchStatesFitMinimumWindow(t *testing.T) {
 		sh.History.Query = "missing"
 		sh.History.Exhausted = false
 		ts.Frame()
-		mustHave(t, ts, "No matches yet. Load more to continue searching.")
+		mustHave(t, ts, "No matches yet.")
 		mustNotHaveToken(t, ts, "No matching titles.", "End of history")
 		sh.History.Exhausted = true
 		ts.Frame()
@@ -247,4 +247,74 @@ func TestHistoryDateGroupsAndVirtualizedLongList(t *testing.T) {
 	ts.Frame()
 	ts.Frame()
 	mustHave(t, ts, "Conversation 1999")
+}
+
+// The history drawer's rows used to be bare titles beside a delete button:
+// no clock icon, no turn count, no relative time, so the drawer read as a
+// different, flatter list than the sidebar's History section it expands.
+// The rows now share that section's anatomy — icon, 12px title, 10px turns
+// meta, a 10px relative-time line under the title.
+func TestHistoryRowsMatchTheSidebarRowStyle(t *testing.T) {
+	now := time.Now()
+	h, sh := testHost()
+	h.Appearance = "light"
+	h.Actions.OpenHistory = noop
+	sh.History = HistoryState{Open: true, Loaded: true, Exhausted: true, Entries: []HistorySession{
+		{ID: "a", Title: "First conversation", UpdatedAtMS: now.Add(-2 * time.Minute).UnixMilli(), Turns: 3},
+		{ID: "b", Title: "Second conversation", UpdatedAtMS: now.Add(-5 * time.Minute).UnixMilli(), Turns: 6},
+	}}
+	h.History = HistoryHost{
+		Run:      func(string) {},
+		ActiveID: "b",
+		Now:      now,
+		Rel:      func(int64) string { return "5m ago" },
+	}
+	ts := ui.NewTester(func(c *ui.Context) {
+		ui.Column(c).Children(func() {
+			Frame(c, h)
+			// The reference row is the sidebar's own history row.
+			p := palette(c.Theme())
+			sidebarRow(c, p, IconClock, "ref title", "9 turns", false, nil)
+		})
+	}, 720, 560)
+	ts.SetDark(false)
+	ts.Frame()
+
+	same := func(a, b ui.Rect, what string) {
+		t.Helper()
+		if diff := a.H - b.H; diff > 0.5 || diff < -0.5 {
+			t.Fatalf("%s is %.2f high, want the sidebar row's %.2f", what, a.H, b.H)
+		}
+	}
+	ref, ok := ts.Find("9 turns")
+	if !ok {
+		t.Fatal("the sidebar reference row is missing")
+	}
+	for _, turns := range []string{"3 turns", "6 turns"} {
+		got, ok := ts.Find(turns)
+		if !ok {
+			t.Fatalf("turn meta %q is missing from the drawer rows", turns)
+		}
+		same(got, ref, turns)
+	}
+	when, ok := ts.Find("5m ago")
+	if !ok {
+		t.Fatal("the relative-time line is missing from the drawer rows")
+	}
+	same(when, ref, "relative time")
+	title, ok := ts.Find("First conversation")
+	if !ok {
+		t.Fatal("the row title is missing")
+	}
+	refTitle, ok := ts.Find("ref title")
+	if !ok {
+		t.Fatal("the reference title is missing")
+	}
+	same(title, refTitle, "row title")
+	// The clock icon leads the title: the title starts after the icon and
+	// its gap, not at the row's left padding.
+	rowPad := float32(6)
+	if title.X-refTitle.X < rowPad {
+		t.Fatalf("row title starts at x=%.1f, left of an icon gutter", title.X)
+	}
 }

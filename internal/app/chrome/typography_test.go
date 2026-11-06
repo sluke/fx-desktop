@@ -1,6 +1,7 @@
 package chrome
 
 import (
+	"image"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -92,10 +93,10 @@ func TestWindowTitleKeepsTheBodyFace(t *testing.T) {
 	wantWorkhorseFace(t, "window title", got)
 }
 
-// The provider choices are set at the body's size, like the note above
-// them: a radio list set larger than the prose beside it reads as another
-// panel rather than as part of this one.
-func TestProviderChoicesMatchTheNoteSize(t *testing.T) {
+// The provider choices are one compact control. There is no lede above
+// them to match any more: the page shows what it does through its controls,
+// so the check is that no radio row grows into a panel of its own.
+func TestProviderChoicesShareOneSize(t *testing.T) {
 	h, sh := testHost()
 	h.Appearance = "light"
 	h.Actions.ManageWorkspace = noop
@@ -103,18 +104,119 @@ func TestProviderChoicesMatchTheNoteSize(t *testing.T) {
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
 	ts.SetDark(false)
 	ts.Frame()
-	note, ok := ts.Find("Complete provider sign-in and configuration in the fx console.")
-	if !ok {
-		t.Fatal("the provider note is missing")
-	}
-	for _, label := range []string{"Default", "vercel", "codex", "grok"} {
+	var size float32
+	for i, label := range []string{"Default", "vercel", "codex", "grok"} {
 		choice, ok := ts.Find(label)
 		if !ok {
 			t.Fatalf("provider choice %q is missing", label)
 		}
-		if diff := choice.H - note.H; diff > 0.5 || diff < -0.5 {
-			t.Fatalf("provider choice %q is %.2f high, want the note's %.2f", label, choice.H, note.H)
+		if i == 0 {
+			size = choice.H
+			continue
 		}
+		if diff := choice.H - size; diff > 0.5 || diff < -0.5 {
+			t.Fatalf("provider choice %q is %.2f high, want %.2f", label, choice.H, size)
+		}
+	}
+	if size == 0 || size > 20 {
+		t.Fatalf("provider choices are %.1f high, want a compact body size", size)
+	}
+}
+
+// textLineInk scans a region and returns the ink width of the first text
+// line it meets, skipping full-width rules (a field's hairline border) and
+// empty gaps. Ink is anything well darker than the sunken field fill and
+// the edge stroke, so both stay out of the measurement.
+func textLineInk(t *testing.T, img *image.RGBA, x0, y0, x1, y1 int) int {
+	t.Helper()
+	inkAt := func(x, y int) bool {
+		p := img.RGBAAt(x, y)
+		return p.R < 120 && p.G < 120 && p.B < 120
+	}
+	rowInk := func(y int) (count, first, last int) {
+		for x := x0; x < x1; x++ {
+			if inkAt(x, y) {
+				if first == 0 {
+					first = x
+				}
+				last = x
+				count++
+			}
+		}
+		return count, first, last
+	}
+	for y := y0; y < y1; y++ {
+		count, _, _ := rowInk(y)
+		if count > (x1-x0)*3/5 {
+			continue // a border rule, not text
+		}
+		if count == 0 {
+			continue // still in the gap above the field body
+		}
+		bx0, bx1 := x1, x0
+		for yy := y; yy < y1; yy++ {
+			c, first, last := rowInk(yy)
+			if c == 0 || c > (x1-x0)*3/5 {
+				break // the line ended, or a border rule began
+			}
+			if first < bx0 {
+				bx0 = first
+			}
+			if last > bx1 {
+				bx1 = last
+			}
+		}
+		return bx1 - bx0 + 1
+	}
+	t.Fatal("no text line found in the scanned region")
+	return 0
+}
+
+// The multiline field bodies used to take the theme's 13px default while the
+// single-line inputs beside them sit at the 12px input size, so a Launch
+// page read its placeholders larger than its own values. A monospaced
+// placeholder's ink width scales with its size: each textarea is measured
+// against a reference area at 12px carrying the same placeholder text.
+func TestTextAreasFollowTheInputTypeScale(t *testing.T) {
+	for _, tc := range []struct{ page, caption, line string }{
+		{"Launch", "Additional directories", "one absolute path per line"},
+		{"Launch", "Context limit overrides", "NAME=BYTES|off, one per line"},
+		{"MCP", "HTTP headers", "K=V, one per line"},
+	} {
+		t.Run(tc.page+"/"+tc.caption, func(t *testing.T) {
+			h, sh := testHost()
+			h.Appearance = "light"
+			h.Actions.ManageWorkspace = noop
+			sh.Tools = ManagementState{Open: true, Page: tc.page, Transport: "http"}
+			ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 800, 1100)
+			ts.SetDark(false)
+			ts.Frame()
+			cap, ok := ts.Find(tc.caption)
+			if !ok {
+				t.Fatalf("caption %q is missing", tc.caption)
+			}
+			got := textLineInk(t, ts.Image(), int(cap.X)+8, int(cap.Y+cap.H)+2, int(cap.X+cap.W)-8, int(cap.Y+cap.H)+44)
+
+			// The reference renders in its own frame: the sheet draws a
+			// scrim over the window behind it, and that veil darkens the
+			// page underneath enough to pollute an ink scan.
+			ref := ui.NewTester(func(c *ui.Context) {
+				ApplyTheme(c, "light")
+				ui.Column(c).Padding(20).Children(func() {
+					ui.TextArea(c, new(string)).Label("ref-area").Placeholder(tc.line).Lines(1, 3).FillWidth().FontSize(12)
+				})
+			}, 800, 200)
+			ref.SetDark(false)
+			ref.Frame()
+			area, ok := ref.Find("ref-area")
+			if !ok {
+				t.Fatal("the reference area is missing")
+			}
+			want := textLineInk(t, ref.Image(), int(area.X)+8, int(area.Y)+6, int(area.X+area.W)-8, int(area.Y)+44)
+			if diff := got - want; diff > 2 || diff < -2 {
+				t.Fatalf("textarea under %q draws %q %dpx wide, want the 12px input size's %dpx", tc.caption, tc.line, got, want)
+			}
+		})
 	}
 }
 

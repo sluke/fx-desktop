@@ -181,6 +181,7 @@ func (s *ProjectWindow) view(ctx *ui.Context) {
 					// that refuses one refuses the message it was meant for.
 					CanAttach:        snapshot.Images,
 					AttachFiles:      func(paths []string) { s.coord.attachImageFiles(s, paths) },
+					PickImage:        func() { s.coord.pickImage(s) },
 					RemoveAttachment: func(id uint64) { s.coord.removeAttachment(s, id) },
 					// The @ picker reads the project's own files, so the app
 					// holds them; the picker asks for them when it opens.

@@ -274,7 +274,9 @@ func mentionPicker(c *ui.Context, state *ConversationState, h ConversationHost, 
 				case h.MentionProblem != "":
 					ui.Text(c, h.MentionProblem).FontSize(10).TextColor(p.Warn).SingleLine()
 				case len(rows) > 0:
-					mono(ui.Text(c, "↑↓ choose · ↵ insert · esc dismiss")).FontSize(9).TextColor(p.InkMuted).SingleLine()
+					// A count is data, not a keyboard legend: the marked
+					// row below shows what Enter would take.
+					mono(ui.Text(c, itoa(len(rows))+" files")).FontSize(9).TextColor(p.InkFaint).SingleLine()
 				}
 			})
 			ui.Scroll(c).FillWidth().MaxHeight(220).Children(func() {
@@ -306,6 +308,12 @@ func mentionRow(c *ui.Context, state *ConversationState, h ConversationHost, p P
 		ui.Text(c, file.Name).FontSize(12).TextColor(p.Ink).SingleLine()
 		if file.Dir != "" {
 			ui.Text(c, file.Dir).FontSize(10).TextColor(p.InkMuted).SingleLine()
+		}
+		ui.Box(c).Grow(1)
+		if active {
+			// The return mark sits on the row Enter would take, so the
+			// highlighted row explains the key without a footer sentence.
+			ui.Icon(c, IconReturn).Label("Insert selected file").FontSize(11).TextColor(p.Accent)
 		}
 	})
 }

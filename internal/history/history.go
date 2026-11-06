@@ -17,6 +17,7 @@ import (
 type Session struct {
 	ID, Title, Workspace string
 	UpdatedAtMS          int64
+	Turns                int
 }
 
 // Record is one saved conversation as the store reported it.
@@ -25,6 +26,7 @@ type Record struct {
 	Title         string
 	WorkspaceRoot string
 	UpdatedAtMS   int64
+	Turns         int
 }
 
 // Page is one page of saved conversations.
@@ -106,7 +108,7 @@ func ReadBatch(ctx context.Context, read Reader, request Request) Result {
 			if !strings.Contains(strings.ToLower(title), strings.ToLower(request.Query)) {
 				continue
 			}
-			queue = append(queue, Session{ID: entry.ID, Title: entry.Title, Workspace: entry.WorkspaceRoot, UpdatedAtMS: entry.UpdatedAtMS})
+			queue = append(queue, Session{ID: entry.ID, Title: entry.Title, Workspace: entry.WorkspaceRoot, UpdatedAtMS: entry.UpdatedAtMS, Turns: entry.Turns})
 		}
 		r.Cursor = page.NextCursor
 		r.Exhausted = page.NextCursor == ""

@@ -123,9 +123,11 @@ type ConversationHost struct {
 	CanAttach bool
 	// AttachFiles takes image paths dropped on the composer. AttachClipboard
 	// reads an image off the clipboard; both report failure through
-	// state.AttachError.
+	// state.AttachError. PickImage opens the platform's image chooser, so
+	// the composer has a visible button for what a dropped file would do.
 	AttachFiles      func(paths []string)
 	AttachClipboard  func()
+	PickImage        func()
 	RemoveAttachment func(id uint64)
 	// MentionFiles are the project's files the @ picker offers, as the app
 	// read them; MentionLoading and MentionProblem say whether they are on
@@ -257,10 +259,8 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 					// and the first message read in one voice. Geist is for
 					// top-level headers, modal titles and navigation.
 					ui.Text(c, "What are we working on?").Font(MonoFont).FontSize(27).FontWeight(500).LetterSpacing(-.6).TextColor(p.InkStrong).TextAlign(ui.Center)
-					// body-compact, not body-default: the lede is secondary
-					// to the prompt and has to stay on one line in a narrow
-					// pane instead of leaving "project." alone.
-					ui.Text(c, "Ask a question, explore an idea, or make a change to your project.").FontSize(12).TextColor(p.InkMuted).TextAlign(ui.Center)
+					// The composer below is the affordance: a lede sentence
+					// explaining "ask a question" would only restate it.
 					if h.Project != "" {
 						ui.Row(c).AlignItems(ui.Center).Gap(6).Padding(2, 8).Radius(3).
 							Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
@@ -376,6 +376,23 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 									h.DraftEdited()
 								}
 							})
+						// What a message can carry is shown by the controls
+						// beside the field, not explained in a sentence
+						// underneath it. Both buttons are absent when fx
+						// cannot take that kind of content.
+						if h.CanMention {
+							ui.Button(c, "@").Label("Mention a file").Tooltip("Mention a file (@)").
+								Font(MonoFont).FontSize(13).Padding(4, 7).Shrink(0).Radius(controlRadius).
+								BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
+								OnClick(func() { startMention(state, h) })
+						}
+						if h.CanAttach && h.PickImage != nil {
+							ui.Button(c, "").Label("Attach image").Tooltip("Attach image…").
+								Padding(4, 7).Shrink(0).Radius(controlRadius).
+								BorderWidth(0).Background(p.Surface).
+								OnClick(h.PickImage).
+								Children(func() { ui.Icon(c, IconImage).FontSize(14).TextColor(p.InkMuted) })
+						}
 					})
 					// Taking a mention leaves the caret to be put back: the
 					// pass that builds the field is the only one that can move
@@ -435,7 +452,8 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 							Children(func() { ui.Icon(c, IconArrowUp).FontSize(16).TextColor(p.OnInk) })
 					})
 				})
-				ui.Text(c, composerHint(h, state)).FontSize(11).TextColor(p.InkMuted).TextAlign(ui.Center).FillWidth().Wrap()
+				// No caption under the composer: the field, its two
+				// affordances and the send arrow say what a message is.
 			})
 		})
 	})
@@ -558,25 +576,21 @@ func composerStatus(h ConversationHost, state *ConversationState) string {
 	return "Connecting to fx…"
 }
 
-// composerHint says what the composer can do right now, next to the affordance
-// that does it. A disabled arrow with no explanation reads as a broken app.
-func composerHint(h ConversationHost, state *ConversationState) string {
-	if h.CanAttach && len(state.Attachments) > 0 && h.Busy {
-		return "Images are attached with the next message · Enter still steers or queues text"
+// startMention writes the @ the picker follows. The picker is derived from
+// the text under the caret, so a button opens it by producing the same
+// character a user would type, rather than setting a second, competing flag.
+func startMention(state *ConversationState, h ConversationHost) {
+	state.MentionClosed = ""
+	if state.Draft != "" && !strings.HasSuffix(state.Draft, " ") {
+		state.Draft += " "
 	}
-	if h.CanAttach {
-		return "fx works in your project · " + mentionHint(h) + "drop or paste an image · Enter sends, Shift + Enter for a new line"
+	state.Draft += "@"
+	if h.DraftEdited != nil {
+		h.DraftEdited()
 	}
-	return "fx works in your project · " + mentionHint(h) + "Enter sends, Shift + Enter for a new line"
-}
-
-// mentionHint names the @ affordance only where fx takes a file, so the
-// composer never advertises what a message cannot carry.
-func mentionHint(h ConversationHost) string {
-	if !h.CanMention {
-		return ""
-	}
-	return "@ attaches a file, "
+	state.MentionCaretAt = len([]rune(state.Draft))
+	state.MentionCaretPending = true
+	state.Input.Focus()
 }
 
 // sendTooltip explains why the arrow may be disabled: a session mid-turn

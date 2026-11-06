@@ -1,6 +1,8 @@
 package chrome
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -214,5 +216,224 @@ func TestWorkspaceToolsRenderNativeMCPAndSessionViews(t *testing.T) {
 	}
 	if got != "session-inspect" {
 		t.Fatalf("inspect dispatch=%q", got)
+	}
+}
+
+// The tools sheet has more pages than fit on one row, and the pages have
+// very different heights. A single clipped row hides the last pages, and a
+// content-sized sheet is centered by DialogBase, so every page switch moves
+// the whole dialog up and down. Both are layout regressions: the tests
+// measure boxes, not prose.
+func TestWorkspaceToolsTabsVisibleAndSheetDoesNotJump(t *testing.T) {
+	const windowW, windowH = 720, 560
+	host, sh := testHost()
+	host.Actions.ManageWorkspace = noop
+	sh.Tools = ManagementState{Open: true, Page: "Account"}
+	ts := ui.NewTester(func(c *ui.Context) { Frame(c, host) }, windowW, windowH)
+	ts.Frame()
+
+	pages := []string{"Account", "MCP", "Folders", "Details", "Sessions", "Launch", "Models", "Rules", "Skills", "Slack", "GitHub"}
+	body, ok := ts.Find("Workspace tool page")
+	if !ok {
+		t.Fatal("tools page viewport is unnamed, so nothing can measure it")
+	}
+	first, ok := ts.Find("Tools: Account")
+	if !ok {
+		t.Fatal("first tab is missing from the frame")
+	}
+	rows := map[float32]bool{}
+	for _, page := range pages {
+		tab, ok := ts.Find("Tools: " + page)
+		if !ok {
+			t.Fatalf("tab %q is missing from the frame", page)
+		}
+		rows[tab.Y] = true
+		// A clipped tab still has a box, but only the visible sliver of
+		// it: the last tab was 28 DIPs wide instead of about 50.
+		if tab.W < 32 {
+			t.Fatalf("tab %q is clipped to %v DIPs wide: %+v", page, tab.W, tab)
+		}
+		if tab.X < body.X-1 || tab.X+tab.W > body.X+body.W+1 || tab.Y < first.Y-1 || tab.Y+tab.H > body.Y+1 {
+			t.Fatalf("tab %q is clipped: %+v outside the sheet body %+v", page, tab, body)
+		}
+	}
+	if len(rows) < 2 {
+		t.Fatalf("all %d tabs still share one row; the strip must wrap", len(pages))
+	}
+
+	for _, page := range pages {
+		if err := ts.Click("Tools: " + page); err != nil {
+			t.Fatalf("switch to %q: %v", page, err)
+		}
+		ts.Frame()
+		got, ok := ts.Find("Workspace tool page")
+		if !ok {
+			t.Fatalf("tools page viewport missing on %q", page)
+		}
+		tabs, ok := ts.Find("Tools: Account")
+		if !ok {
+			t.Fatalf("tab strip missing on %q", page)
+		}
+		if got.Y != body.Y || got.H != body.H || tabs.Y != first.Y {
+			t.Fatalf("sheet jumps on %q: body y/h=%v/%v, tabs y=%v; want %v/%v, %v",
+				page, got.Y, got.H, tabs.Y, body.Y, body.H, first.Y)
+		}
+	}
+
+	// A page switch also starts the new page at its top. Both Launch and
+	// MCP are taller than the viewport, so the container cannot clamp the
+	// old offset away and hide a missing reset.
+	if err := ts.Click("Tools: Launch"); err != nil {
+		t.Fatal(err)
+	}
+	ts.Frame()
+	ts.Wheel(120, body.Y+20, 0, 800)
+	ts.Advance(2 * time.Second)
+	ts.Frame()
+	if sh.Tools.BodyScroll.Y == 0 {
+		t.Fatal("expected the wheel to scroll the tools body")
+	}
+	if err := ts.Click("Tools: MCP"); err != nil {
+		t.Fatal(err)
+	}
+	ts.Frame()
+	if sh.Tools.BodyScroll.Y != 0 {
+		t.Fatalf("page switch kept scroll y=%v, want 0", sh.Tools.BodyScroll.Y)
+	}
+}
+
+// Each tab row used to split its own width with Grow(1): six pages above and
+// five below made the lower row's columns wider, so the tabs did not line up.
+// The strip is one column grid, and the shorter row leaves its last cell
+// empty rather than stretching five tabs across six columns.
+func TestWorkspaceToolsTabsShareColumnGrid(t *testing.T) {
+	// Below 608 the sheet itself narrows, so the grid must follow the
+	// panel width rather than assume the 560 DIP maximum.
+	for _, windowW := range []int{520, 640, 720, 1280} {
+		t.Run(fmt.Sprintf("window=%d", windowW), func(t *testing.T) {
+			host, sh := testHost()
+			host.Actions.ManageWorkspace = noop
+			sh.Tools = ManagementState{Open: true, Page: "Account"}
+			ts := ui.NewTester(func(c *ui.Context) { Frame(c, host) }, windowW, 560)
+			ts.Frame()
+			assertToolTabGrid(t, ts)
+		})
+	}
+}
+
+func assertToolTabGrid(t *testing.T, ts *ui.Tester) {
+	t.Helper()
+	top := []string{"Account", "MCP", "Folders", "Details", "Sessions", "Launch"}
+	bottom := []string{"Models", "Rules", "Skills", "Slack", "GitHub"}
+	find := func(page string) ui.Rect {
+		t.Helper()
+		box, ok := ts.Find("Tools: " + page)
+		if !ok {
+			t.Fatalf("tab %q is missing from the frame", page)
+		}
+		return box
+	}
+	same := func(a, b float32) bool { return math.Abs(float64(a-b)) <= 0.5 }
+
+	for i, page := range bottom {
+		upper, lower := find(top[i]), find(page)
+		if !same(upper.X, lower.X) || !same(upper.W, lower.W) {
+			t.Fatalf("column %d is misaligned: %q %+v vs %q %+v", i, top[i], upper, page, lower)
+		}
+	}
+	for _, row := range [][]string{top, bottom} {
+		base := find(row[0])
+		for _, page := range row[1:] {
+			box := find(page)
+			if box.Y != base.Y || box.H != base.H || !same(box.W, base.W) {
+				t.Fatalf("tab %q does not share its row's geometry: %+v vs %+v", page, box, base)
+			}
+		}
+	}
+	if last := find(bottom[len(bottom)-1]); last.X+last.W >= find(top[len(top)-1]).X+find(top[len(top)-1]).W-1 {
+		t.Fatalf("the shorter row stretches over the empty trailing column: %+v", last)
+	}
+}
+
+// The sheet's labels follow the design's structural caption (labelText: 10px
+// monospaced, weight 500): hand-rolled 9px labels next to 12px inputs and 11px
+// controls made every page read as five unrelated sizes. The tab label is the
+// reference 10px line already on screen; a caption that shares its size shares
+// its height.
+func TestWorkspaceToolsLabelsFollowTheTypeScale(t *testing.T) {
+	h, sh := testHost()
+	h.Appearance = "light"
+	h.Actions.ManageWorkspace = noop
+	sh.Tools = ManagementState{Open: true, Page: "Launch"}
+	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 800, 1100)
+	ts.SetDark(false)
+	ts.Frame()
+
+	tab, ok := ts.Find("Launch")
+	if !ok {
+		t.Fatal("the Launch tab is missing")
+	}
+	for _, label := range []string{
+		"OVERRIDES",         // section caption
+		"Provider override", // field caption
+		"Reasoning effort",  // inline group caption
+		"Fast mode",         // radio group caption
+	} {
+		got, ok := ts.Find(label)
+		if !ok {
+			t.Fatalf("caption %q is missing", label)
+		}
+		if diff := got.H - tab.H; diff > 0.5 || diff < -0.5 {
+			t.Fatalf("caption %q is %.2f high, want the 10px caption's %.2f", label, got.H, tab.H)
+		}
+	}
+	if _, ok := ts.Find("Applies to new sessions"); !ok {
+		t.Fatal("the deferred-setting badge is missing")
+	}
+	// Controls keep the 11px control size: button and radio share a height.
+	btn, ok := ts.Find("Start new conversation")
+	if !ok {
+		t.Fatal("the launch button is missing")
+	}
+	radio, ok := ts.Find("Default")
+	if !ok {
+		t.Fatal("the fast-mode radio is missing")
+	}
+	if diff := btn.H - radio.H; diff > 0.5 || diff < -0.5 {
+		t.Fatalf("button %.2f and radio %.2f disagree on the control size", btn.H, radio.H)
+	}
+}
+
+// Row buttons on the list pages are the same 11px control at compact padding,
+// not a third, smaller size.
+func TestWorkspaceToolsRowButtonsFollowTheTypeScale(t *testing.T) {
+	h, sh := testHost()
+	h.Appearance = "light"
+	h.Actions.ManageWorkspace = noop
+	sh.Tools = ManagementState{
+		Open:       true,
+		Page:       "MCP",
+		MCPServers: []MCPServerInfo{{Name: "demo", Transport: "stdio", Status: "ok"}},
+	}
+	ts := ui.NewTester(func(c *ui.Context) {
+		ui.Row(c).Children(func() {
+			Frame(c, h)
+			// The reference is the compact 11px row button the pages use.
+			ui.Button(c, "ref-row").FontSize(11).Padding(3, 6)
+		})
+	}, 800, 1100)
+	ts.SetDark(false)
+	ts.Frame()
+
+	ref, ok := ts.Find("ref-row")
+	if !ok {
+		t.Fatal("the reference button is missing")
+	}
+	got, ok := ts.Find("Check demo")
+	if !ok {
+		t.Fatal("the row button is missing")
+	}
+	if diff := got.H - ref.H; diff > 0.5 || diff < -0.5 {
+		t.Fatalf("row button is %.2f high, want the 11px row control's %.2f", got.H, ref.H)
 	}
 }

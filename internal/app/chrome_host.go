@@ -177,7 +177,7 @@ func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	// The CLI that signs in runs in the drawer too, so the sign-in the
 	// conversation offers is the one the console can carry.
 	a.SignIn = nativeAction(func() { c.signIn(s) })
-	a.ResumeSession = func(id string) { c.sessionManagement(s).Resume(id, s.project) }
+	a.ResumeSession = func(id, workspace string) { c.sessionManagement(s).Resume(id, workspace) }
 	a.Ask = func(prompt string) {
 		mygo.App.WhenReady(func() { c.consoleIn(s, "fx ask", "ask", prompt) })
 	}
@@ -504,11 +504,12 @@ func (c *Coordinator) sessionData(s *ProjectWindow) chrome.SidebarData {
 	s.mu.Lock()
 	for _, x := range s.saved {
 		d.Saved = append(d.Saved, chrome.SavedSession{
-			ID:     x.ID,
-			Title:  x.Title,
-			When:   relTime(x.UpdatedAtMS, now),
-			Turns:  x.HistoryLen,
-			Active: false,
+			ID:        x.ID,
+			Title:     x.Title,
+			When:      relTime(x.UpdatedAtMS, now),
+			Turns:     x.HistoryLen,
+			Active:    false,
+			Workspace: x.WorkspaceRoot,
 		})
 	}
 	s.mu.Unlock()

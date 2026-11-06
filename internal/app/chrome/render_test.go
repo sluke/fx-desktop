@@ -34,7 +34,7 @@ func testHost() (Host, *ShellState) {
 			NewSession:      noop,
 			Commit:          noop,
 			RunCommand:      func(string) {},
-			ResumeSession:   func(string) {},
+			ResumeSession:   func(string, string) {},
 			FocusSession:    func(string) {},
 			Ask:             func(string) {},
 			ChooseConfig:    func(string) {},
@@ -432,13 +432,37 @@ func TestClickingRailRowFocusesSession(t *testing.T) {
 func TestClickingSavedSessionResumes(t *testing.T) {
 	h, _ := testHost()
 	var resumed string
-	h.Actions.ResumeSession = func(id string) { resumed = id }
+	h.Actions.ResumeSession = func(id, workspace string) { resumed = id }
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
 	if err := ts.Click("Rename the panel"); err != nil {
 		t.Fatalf("click saved session: %v", err)
 	}
 	if resumed != "abc123" {
 		t.Fatalf("resumed = %q", resumed)
+	}
+}
+
+// A saved conversation belongs to the directory fx filed it under, not to
+// whichever window listed it: the rail used to resume with this window's
+// project, so a conversation saved in another workspace opened here and the
+// inspector and files kept showing the wrong directory.
+func TestClickingSavedSessionFromAnotherWorkspaceResumesThere(t *testing.T) {
+	h, _ := testHost()
+	h.Data.Saved = []SavedSession{{
+		ID:        "zzz999",
+		Title:     "Conversation from another project",
+		When:      "1h ago",
+		Turns:     2,
+		Workspace: "/elsewhere/project",
+	}}
+	var id, workspace string
+	h.Actions.ResumeSession = func(sid, ws string) { id, workspace = sid, ws }
+	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
+	if err := ts.Click("Conversation from another project"); err != nil {
+		t.Fatalf("click saved session: %v", err)
+	}
+	if id != "zzz999" || workspace != "/elsewhere/project" {
+		t.Fatalf("resume=(%q,%q), want the conversation's own workspace", id, workspace)
 	}
 }
 
@@ -638,10 +662,10 @@ func TestPaletteIsOnePanel(t *testing.T) {
 	if field.X != panel.X+border || field.W != panel.W-2*border {
 		t.Fatalf("field %+v does not fill panel %+v inside its border", field, panel)
 	}
-	// A row, and the key hints at the panel's foot: they end at the panel's
-	// edge, not at the window's.
+	// A row, and the footer: they end at the panel's edge, not at the
+	// window's.
 	inner := panel.X + panel.W - border
-	for _, label := range []string{"Open Folder…", "↑↓ move · enter run · esc dismiss"} {
+	for _, label := range []string{"Open Folder…", "Command palette footer"} {
 		r, ok := ts.Find(label)
 		if !ok {
 			t.Fatalf("nothing shows %q", label)
@@ -679,7 +703,7 @@ func TestPalettePanelFitsANarrowWindow(t *testing.T) {
 	if want := (float32(windowW) - panel.W) / 2; panel.X != want {
 		t.Fatalf("panel sits at x=%v, want %v (centered)", panel.X, want)
 	}
-	r, ok := ts.Find("↑↓ move · enter run · esc dismiss")
+	r, ok := ts.Find("Command palette footer")
 	if !ok {
 		t.Fatal("the palette foot is missing")
 	}
@@ -715,7 +739,7 @@ func TestPalettePanelFitsAnyWindow(t *testing.T) {
 		if want := panel.W - 2; field.W != want {
 			t.Fatalf("%dx%d: field is %v wide, want %v (the panel inside its border)", w, windowH, field.W, want)
 		}
-		foot, ok := ts.Find("↑↓ move · enter run · esc dismiss")
+		foot, ok := ts.Find("Command palette footer")
 		if !ok {
 			t.Fatalf("%dx%d: the key hints are not on screen", w, windowH)
 		}
@@ -770,7 +794,7 @@ func TestPaletteArrowsKeepTheHighlightedRowInView(t *testing.T) {
 	if row.W == 0 {
 		t.Fatalf("the highlighted row %q was not laid out: is the list scrolling it into view?", last.Label)
 	}
-	foot, ok := ts.Find("↑↓ move · enter run · esc dismiss")
+	foot, ok := ts.Find("Command palette footer")
 	if !ok {
 		t.Fatal("the palette foot is missing")
 	}

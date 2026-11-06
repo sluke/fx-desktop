@@ -143,25 +143,25 @@ func TestReviewDrawerSpeaksItsFourEmptyStates(t *testing.T) {
 	h.Review = ReviewData{Open: true, Workspace: WorkspaceRepo, Branch: "main"}
 	ts.Frame()
 	mustHave(t, ts, "Working tree clean", "Clean · main")
-	mustNotHave(t, ts, "Not a git repository", "Select a file to read its diff")
+	mustNotHave(t, ts, "Not a git repository", "No file selected")
 
 	h.Review = ReviewData{Open: true, Workspace: WorkspaceNotRepo}
 	ts.Frame()
 	mustHave(t, ts, "Not a git repository", "Not a git repository — nothing to review here")
 	mustNotHave(t, ts, "Could not read the workspace", "Working tree clean", "Nothing to commit",
-		"Select a file to read its diff")
+		"No file selected")
 
 	h.Review = ReviewData{Open: true, Workspace: WorkspaceFailed}
 	ts.Frame()
 	mustHave(t, ts, "Could not read the workspace")
 	mustNotHave(t, ts, "Working tree clean", "Not a git repository", "Nothing to commit",
-		"Select a file to read its diff")
+		"No file selected")
 }
 
-func TestReviewDrawerAsksForAFileBeforeShowingOne(t *testing.T) {
+func TestReviewDrawerMarksAnEmptyPaneWithoutInstructions(t *testing.T) {
 	h, sh := reviewTestHost(ReviewData{Open: true, Workspace: WorkspaceRepo, Changes: []Change{{Path: "a.go", Kind: "M"}}})
 	ts := reviewTester(&h, sh)
-	mustHave(t, ts, "Select a file to read its diff")
+	mustHave(t, ts, "No file selected")
 
 	// A read in flight and a file with nothing to colour both have their own
 	// words; neither may look like an empty pane.
@@ -429,5 +429,59 @@ func TestPaletteOffersReviewChanges(t *testing.T) {
 	runCommand(h, &sh, cmd)
 	if opened != 1 {
 		t.Fatalf("the palette row did not open the drawer: %d", opened)
+	}
+}
+
+// The commit row keeps the app's type scale. Left at the widget defaults its
+// input and buttons render several pixels taller than everything around them
+// and the footer reads as a different, louder panel (§4.9: the layout carries
+// the hierarchy, not one oversized control).
+func TestReviewCommitRowUsesTheAppTypeScale(t *testing.T) {
+	h, sh := reviewTestHost(ReviewData{
+		Open:      true,
+		Workspace: WorkspaceRepo,
+		Branch:    "main",
+		Changes:   []Change{{Path: "a.go", Kind: "M", Adds: 1}},
+		Selected:  "a.go",
+	})
+	ts := ui.NewTester(func(c *ui.Context) {
+		ApplyTheme(c, "light")
+		ui.Row(c).Children(func() {
+			reviewDrawer(c, h, sh, palette(c.Theme()), reviewWide)
+			// The reference controls are the app's working sizes: an
+			// 11px button (as every tools-page button) and a 12px
+			// input (as every form field).
+			ui.Column(c).Children(func() {
+				ui.Button(c, "ref-button").FontSize(11).Padding(6, 9)
+				ui.TextInput(c, new(string)).Label("ref-input").FontSize(12).FillWidth()
+			})
+		})
+	}, 700, 720)
+	ts.SetDark(false)
+	ts.Frame()
+
+	refBtn, ok := ts.Find("ref-button")
+	if !ok {
+		t.Fatal("the reference button is missing")
+	}
+	for _, label := range []string{"Commit", "Stage all"} {
+		got, ok := ts.Find(label)
+		if !ok {
+			t.Fatalf("%q is missing", label)
+		}
+		if diff := got.H - refBtn.H; diff > 0.5 || diff < -0.5 {
+			t.Fatalf("%q is %.2f high, want the app's %.2f button height", label, got.H, refBtn.H)
+		}
+	}
+	input, ok := ts.Find("Commit message")
+	if !ok {
+		t.Fatal("the commit message input is missing")
+	}
+	refIn, ok := ts.Find("ref-input")
+	if !ok {
+		t.Fatal("the reference input is missing")
+	}
+	if diff := input.H - refIn.H; diff > 0.5 || diff < -0.5 {
+		t.Fatalf("the commit input is %.2f high, want the app's %.2f field height", input.H, refIn.H)
 	}
 }

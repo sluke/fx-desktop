@@ -49,7 +49,7 @@ func iconRail(c *ui.Context, h Host, p Palette) {
 		}
 		if h.Actions.ManageWorkspace != nil {
 			active := h.Shell != nil && h.Shell.Tools.Open
-			railButton(c, p, IconTerminal, "Workspace tools", "Workspace tools", active, h.Actions.ManageWorkspace)
+			railButton(c, p, IconTools, "Workspace tools", "Workspace tools", active, h.Actions.ManageWorkspace)
 		}
 		if h.Actions.ToggleConsole != nil && len(h.Console.Runs) > 0 {
 			active := h.Shell != nil && h.Shell.ConsoleOpen
@@ -95,7 +95,8 @@ func railHeader(c *ui.Context, h Host, p Palette) {
 		switch {
 		case d.Welcome:
 			ui.Text(c, "Install fx").FontSize(13).FontWeight(600).TextColor(p.InkStrong)
-			ui.Text(c, "Sessions start once the CLI is installed.").FontSize(11).TextColor(p.InkMuted)
+			// "Download fx" is the one thing to do here; the button's
+			// label carries it, so no second line is needed.
 			if d.WelcomeBusy {
 				ui.Text(c, d.WelcomeText).FontSize(11).TextColor(p.InkMuted)
 			} else if d.OnInstall != nil {
@@ -300,7 +301,7 @@ func savedSection(c *ui.Context, h Host, p Palette) {
 			}
 			sidebarRow(c, p, IconClock, title, meta, sv.Active, func() {
 				if h.Actions.ResumeSession != nil {
-					h.Actions.ResumeSession(sv.ID)
+					h.Actions.ResumeSession(sv.ID, sv.Workspace)
 				}
 			})
 			if sv.When != "" {

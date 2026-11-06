@@ -32,6 +32,10 @@ type HistoryHost struct {
 	Delete   func(id, title string)
 	Clear    func(all bool)
 	ActiveID string
+	// Rel renders a row's UpdatedAtMS as the sidebar's relative time
+	// ("just now", "5m ago"). The app injects presenter.RelTime; the
+	// drawer only knows the contract. A nil Rel hides the line.
+	Rel func(ms int64) string
 	// Live names conversations open in any app window. Their rows still
 	// resume, but cannot be deleted until the window closes.
 	Live map[string]bool
@@ -166,16 +170,35 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 							}
 						})
 						button.Children(func() {
-							ui.Row(c).FillWidth().Gap(8).Children(func() {
+							// The row is the sidebar History section's row
+							// at drawer width: clock icon, 12px title, the
+							// 10px turn count at the right edge, and the
+							// 10px relative time under the title.
+							ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
+								ui.Icon(c, IconClock).FontSize(13).TextColor(p.InkMuted).Shrink(0)
 								ui.Text(c, title).FontSize(12).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
+								if e.Turns > 0 {
+									ui.Text(c, itoa(e.Turns)+" turns").FontSize(10).TextColor(p.InkMuted).SingleLine().Shrink(0)
+								}
 								if e.ID == h.ActiveID {
 									ui.Text(c, "Current").FontSize(10).TextColor(p.InkMuted).Shrink(0)
 								} else if live {
 									ui.Text(c, "Open").FontSize(10).TextColor(p.InkMuted).Shrink(0)
 								}
 							})
-							if state.All {
-								ui.Text(c, e.Workspace).FontSize(10).TextColor(p.InkMuted).FillWidth().SingleLine().Tooltip(e.Workspace)
+							when := ""
+							if h.Rel != nil {
+								when = h.Rel(e.UpdatedAtMS)
+							}
+							if when != "" || state.All {
+								ui.Row(c).FillWidth().Gap(6).Padding(0, 0, 0, 21).Children(func() {
+									if when != "" {
+										ui.Text(c, when).FontSize(10).TextColor(p.InkMuted).SingleLine().Shrink(0)
+									}
+									if state.All && e.Workspace != "" {
+										ui.Text(c, e.Workspace).FontSize(10).TextColor(p.InkMuted).MinWidth(0).SingleLine().Tooltip(e.Workspace)
+									}
+								})
 							}
 						})
 						if h.Delete != nil {
@@ -207,7 +230,7 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 				} else if state.Query != "" {
 					message = "No matching titles."
 					if state.HasMore() {
-						message = "No matches yet. Load more to continue searching."
+						message = "No matches yet."
 					}
 				}
 				ui.Text(c, message).FontSize(12).TextColor(p.InkMuted).Wrap().Padding(24, 14)

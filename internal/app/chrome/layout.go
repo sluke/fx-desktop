@@ -28,6 +28,10 @@ type SavedSession struct {
 	When   string
 	Turns  int
 	Active bool
+	// Workspace is the conversation's own directory from fx. The rail's
+	// resume routes through it, so a conversation saved in another project
+	// opens in that project's window instead of this one's.
+	Workspace string
 }
 
 // Agent is the live state of the embedded fx process. Everything shown here
@@ -242,8 +246,9 @@ type Actions struct {
 	NewSession   func()
 	Commit       func()
 	RunCommand   func(id string)
-	// ResumeSession opens a saved fx conversation by id.
-	ResumeSession func(id string)
+	// ResumeSession opens a saved fx conversation by id, in the workspace
+	// fx filed it under ("" means this window's project).
+	ResumeSession func(id, workspace string)
 	// FocusSession raises the window of an already-open session.
 	FocusSession func(id string)
 	// ChooseConfig opens an fx config picker; an empty id opens the full overview.
@@ -370,7 +375,7 @@ type Command struct {
 
 var Commands = []Command{
 	{ID: "open-folder", Label: "Open Folder…", Hint: "⌘O", Icon: IconExplorer},
-	{ID: "workspace-tools", Label: "Workspace tools…", Icon: IconSettings},
+	{ID: "workspace-tools", Label: "Workspace tools…", Icon: IconTools},
 	{ID: "new-session", Label: "New Session", Hint: "⌘T", Icon: IconPlus},
 	{ID: "continue-session", Label: "Continue last session", Hint: "-c", Icon: IconClock},
 	{ID: "ask", Label: "Quick ask…", Hint: "fx ask", Icon: IconTerminal},
@@ -976,12 +981,25 @@ func statusBar(c *ui.Context, h Host, p Palette) {
 // and leave the list to find its own. label names the dialog for assistive
 // technology.
 func sheet(c *ui.Context, open *bool, p Palette, label string, content func()) {
+	sheetWithHeight(c, open, p, label, 0, content)
+}
+
+// sheetWithHeight is sheet with an optional fixed panel height. DialogBase
+// centers the panel, so a sheet whose height follows its content jumps up
+// and down whenever that content changes size — exactly what a tabbed sheet
+// with eleven very different pages does. A fixed height plus a scroll
+// viewport that Grows inside it keeps the dialog still. panelHeight 0 keeps
+// the content-sized behavior for sheets with a single, stable page.
+func sheetWithHeight(c *ui.Context, open *bool, p Palette, label string, panelHeight float32, content func()) {
 	width, height := c.Size()
 	ui.DialogBase(c, open, func(backdrop, panel ui.Element) {
 		backdrop.Background(p.Scrim)
 		panel.Padding(0).Gap(0).Radius(sheetRadius).Background(p.Window).Label(label).
 			Width(min(float32(contentMaxWidth), width-48)).MaxHeight(height-48).
-			BorderWidth(1).BorderColor(p.Hairline).Clip().Shadow(0, 18, 48, 0, p.SheetShadow)
+			BorderWidth(sheetBorderWidth).BorderColor(p.Hairline).Clip().Shadow(0, 18, 48, 0, p.SheetShadow)
+		if panelHeight > 0 {
+			panel.Height(min(panelHeight, height-48))
+		}
 		content()
 	})
 }
@@ -1173,6 +1191,12 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 									if row.Hint != "" {
 										mono(ui.Text(c, row.Hint)).FontSize(9).TextColor(p.InkFaint)
 									}
+									if i == sh.PaletteHighlight {
+										// The mark is on the row Enter
+										// would run; a footer legend
+										// would only describe it.
+										ui.Icon(c, IconReturn).Label("Run selected command").FontSize(11).TextColor(p.Accent)
+									}
 								})
 							}
 						}
@@ -1180,13 +1204,13 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 					})
 				})
 			}
-			// The hints sit under the list on the panel's own surface: the
-			// list scrolls between them rather than over them.
-			ui.Row(c).FillWidth().Padding(8, panelPad).Gap(14).AlignItems(ui.Center).
+			// The footer reports how many commands matched. How to move
+			// between them is on the highlighted row itself.
+			ui.Row(c).FillWidth().Padding(8, panelPad).AlignItems(ui.Center).
+				Label("Command palette footer").
 				Background(p.Surface).
 				BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).
 				Children(func() {
-					mono(ui.Text(c, "↑↓ move · enter run · esc dismiss")).FontSize(9).TextColor(p.InkMuted)
 					ui.Box(c).Grow(1)
 					mono(ui.Text(c, itoa(availableCommands(h))+" commands")).FontSize(9).TextColor(p.InkFaint)
 				})
@@ -1262,12 +1286,12 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 		ui.Column(c).FillWidth().MaxWidth(contentMaxWidth).Background(p.Window).
 			Radius(sheetRadius).
 			Children(func() {
-				ui.Column(c).FillWidth().Padding(14, panelPad, 12, panelPad).Gap(4).
+				ui.Column(c).FillWidth().Padding(14, panelPad, 12, panelPad).
 					BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
 					Children(func() {
+						// The title, the fields and Run are the whole
+						// explanation; a lede would restate the form.
 						sheetTitle(c, "Quick ask", p.InkStrong)
-						ui.Text(c, "Runs fx ask with the options below and shows the answer here.").
-							FontSize(11).TextColor(p.InkMuted)
 					})
 				ui.Scroll(c).FillWidth().MaxHeight(min(float32(430), max(float32(120), height-230))).Children(func() {
 					ui.Column(c).FillWidth().Padding(12, panelPad, 8, panelPad).Gap(9).Children(func() {
@@ -1278,19 +1302,21 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 							})
 						}
 						field("Prompt", func() {
-							ui.TextArea(c, &sh.AskPrompt).Label("Prompt").Lines(2, 5).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskPrompt).Label("Prompt").FontSize(12).Lines(2, 5).FillWidth().Disabled(sh.AskBusy)
 						})
-						field("Model override (optional)", func() {
+						field("Model override", func() {
 							ui.TextInput(c, &sh.AskModel).Placeholder("provider/model").FillWidth().Disabled(sh.AskBusy)
 						})
-						field("Reasoning effort (optional)", func() {
+						field("Reasoning effort", func() {
 							ui.TextInput(c, &sh.AskEffort).Placeholder("auto, minimal, low, medium, high, xhigh").FillWidth().Disabled(sh.AskBusy)
 						})
-						field("Additional directories (one absolute path per line)", func() {
-							ui.TextArea(c, &sh.AskAddDirs).Label("Additional directories").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+						field("Additional directories", func() {
+							// The format rides in the empty control, where
+							// it belongs, instead of a paragraph beside it.
+							ui.TextArea(c, &sh.AskAddDirs).Label("Additional directories").FontSize(12).Placeholder("one absolute path per line").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
-						field("Context limit overrides (NAME=BYTES|off, one per line)", func() {
-							ui.TextArea(c, &sh.AskContextLimits).Label("Context limit overrides").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+						field("Context limit overrides", func() {
+							ui.TextArea(c, &sh.AskContextLimits).Label("Context limit overrides").FontSize(12).Placeholder("NAME=BYTES|off, one per line").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
 						ui.Column(c).FillWidth().Gap(2).Children(func() {
 							mono(ui.Text(c, "Access")).FontSize(9).TextColor(p.InkMuted)
@@ -1298,8 +1324,6 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 								ui.Radio(c, &sh.AskAccess, "auto", "Auto safety review").FontSize(11)
 								ui.Radio(c, &sh.AskAccess, "full-access", "Full access").FontSize(11)
 							})
-							ui.Text(c, "Interactive permission prompts need a TTY, so a one-shot native run uses fx's automatic review or full access.").
-								FontSize(10).TextColor(p.InkMuted).Wrap()
 						})
 						ui.Row(c).FillWidth().Gap(18).Children(func() {
 							ui.Column(c).Grow(1).Gap(2).Children(func() {
@@ -1331,10 +1355,10 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 							ui.TextInput(c, &sh.AskSession).Placeholder("last").FillWidth().Disabled(sh.AskBusy)
 						})
 						field("System prompt override (optional)", func() {
-							ui.TextArea(c, &sh.AskSystem).Label("System prompt").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskSystem).Label("System prompt").FontSize(12).Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
 						field("Image paths (one per line, optional)", func() {
-							ui.TextArea(c, &sh.AskImages).Label("Image paths").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskImages).Label("Image paths").FontSize(12).Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
 						if sh.AskBusy {
 							ui.Text(c, "Running fx ask…").FontSize(11).TextColor(p.InkMuted)
