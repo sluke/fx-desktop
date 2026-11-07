@@ -485,3 +485,32 @@ func TestReviewCommitRowUsesTheAppTypeScale(t *testing.T) {
 		t.Fatalf("the commit input is %.2f high, want the app's %.2f field height", input.H, refIn.H)
 	}
 }
+
+// A commit with an empty message must not dispatch. The button is disabled
+// at the source and OnClick re-checks the live message, so a stale frame
+// cannot submit either. The app layer's error dialog stays as a second
+// guard, but the UI no longer offers a write it cannot perform.
+func TestReviewCommitRequiresAMessage(t *testing.T) {
+	h, sh := reviewTestHost(ReviewData{Open: true, Workspace: WorkspaceRepo,
+		Changes: []Change{{Path: "a.go", Kind: "M"}}})
+	commits := 0
+	h.Actions.Commit = func() { commits++ }
+	ts := reviewTester(&h, sh)
+	ts.Frame()
+
+	// Click may report the disabled control or stay silent; either way the
+	// write must not have happened.
+	_ = ts.Click("Commit")
+	if commits != 0 {
+		t.Fatalf("empty commit message dispatched %d commit(s)", commits)
+	}
+
+	sh.CommitMsg = "tighten the design system"
+	ts.Frame()
+	if err := ts.Click("Commit"); err != nil {
+		t.Fatalf("click enabled Commit: %v", err)
+	}
+	if commits != 1 {
+		t.Fatalf("a message should dispatch exactly one commit, got %d", commits)
+	}
+}

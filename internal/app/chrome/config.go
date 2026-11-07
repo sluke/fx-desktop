@@ -142,9 +142,9 @@ func configStrip(c *ui.Context, state *ConversationState, h ConversationHost, p 
 	ui.Row(c).ClipX().AlignItems(ui.Center).Gap(configStripGap).Label("Composer options").Children(func() {
 		if h.SwitchWorkspace != nil {
 			ui.Button(c, "").Label("Switch workspace").Tooltip("Switch workspace (⌘O)").
-				Size(workspaceButtonWidth, workspaceButtonWidth).Padding(0).Shrink(0).Radius(controlRadius).
+				Size(workspaceButtonWidth, workspaceButtonWidth).Padding(Space0).Shrink(0).Radius(controlRadius).
 				BorderWidth(0).Background(p.Surface).OnClick(h.SwitchWorkspace).
-				Children(func() { ui.Icon(c, IconExplorer).FontSize(14).TextColor(p.InkMuted) })
+				Children(func() { ui.Icon(c, IconExplorer).FontSize(IconLarge).TextColor(p.InkMuted) })
 		}
 		for i, option := range selectableConfigs(h.Configs) {
 			if i >= shown {
@@ -154,7 +154,7 @@ func configStrip(c *ui.Context, state *ConversationState, h ConversationHost, p 
 			open := state.ConfigOpen == option.ID
 			value := choiceLabel(option, option.CurrentValue)
 			label := fmt.Sprintf("%s · %s", configLabel(option), shortChoice(value))
-			button := ui.Button(c, label).FontSize(configLabelSize).BorderWidth(0).Padding(4, configButtonPad).Radius(controlRadius).
+			button := ui.Button(c, label).FontSize(configLabelSize).BorderWidth(0).Padding(Space2, configButtonPad).Radius(controlRadius).
 				Tooltip(fmt.Sprintf("%s: %s", configLabel(option), value)).
 				Disabled(!h.Ready || h.ConfigChanging).
 				OnClick(func() { toggleConfig(state, option.ID) })
@@ -174,27 +174,27 @@ func configOverview(c *ui.Context, state *ConversationState, h ConversationHost,
 		closeConfig(state)
 		return
 	}
-	ui.Column(c).FillWidth().MaxHeight(260).Radius(6).Background(p.Surface).
+	ui.Column(c).FillWidth().MaxHeight(260).Radius(RadiusControl).Background(p.Surface).
 		BorderWidth(1).BorderColor(p.Hairline).Clip().Label("All session settings panel").Children(func() {
-		ui.Row(c).FillWidth().Padding(8, 10).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Padding(Space4, Space5).AlignItems(ui.Center).Children(func() {
 			strongText(c, "Session settings", p.InkStrong)
 			ui.Box(c).Grow(1)
-			ui.Button(c, "Close").FontSize(10).BorderWidth(0).Background(p.Surface).OnClick(func() { closeConfig(state) })
+			ui.Button(c, "Close").FontSize(TypeLabel).BorderWidth(0).Background(p.Surface).OnClick(func() { closeConfig(state) })
 		})
 		ui.Scroll(c).FillWidth().MaxHeight(210).Children(func() {
 			for _, option := range h.Configs {
 				option := option
 				c.Key(option.ID)
-				ui.ButtonBase(c).FillWidth().Padding(8, 10).Gap(8).AlignItems(ui.Center).
+				ui.ButtonBase(c).FillWidth().Padding(Space4, Space5).Gap(Space4).AlignItems(ui.Center).
 					Label("Configure " + configLabel(option)).Disabled(!h.Ready || h.ConfigChanging || len(option.Options) == 0).
 					OnClick(func() { toggleConfig(state, option.ID) }).Children(func() {
-					ui.Text(c, configLabel(option)).FontSize(12).TextColor(p.Ink).Shrink(0)
+					ui.Text(c, configLabel(option)).FontSize(TypeInput).TextColor(p.Ink).Shrink(0)
 					ui.Box(c).Grow(1)
-					ui.Text(c, shortChoice(choiceLabel(option, option.CurrentValue))).FontSize(11).TextColor(p.InkMuted).SingleLine().MinWidth(0)
-					ui.Icon(c, IconChevron).FontSize(12).TextColor(p.InkMuted)
+					ui.Text(c, shortChoice(choiceLabel(option, option.CurrentValue))).FontSize(TypeControl).TextColor(p.InkMuted).SingleLine().MinWidth(0)
+					ui.Icon(c, IconChevron).FontSize(IconSmall).TextColor(p.InkMuted)
 				})
 			}
-			ui.ButtonBase(c).FillWidth().Padding(8, 10).Gap(8).AlignItems(ui.Center).
+			ui.ButtonBase(c).FillWidth().Padding(Space4, Space5).Gap(Space4).AlignItems(ui.Center).
 				Label("Reasoning and speed").Disabled(!h.Ready || h.ConfigChanging || h.SetAdvanced == nil).
 				OnClick(func() {
 					state.ConfigListOpen = false
@@ -207,9 +207,9 @@ func configOverview(c *ui.Context, state *ConversationState, h ConversationHost,
 					}
 					state.AdvancedFast, state.AdvancedUltra = h.Fast, h.Ultra
 				}).Children(func() {
-				ui.Text(c, "Reasoning and speed").FontSize(12).TextColor(p.Ink).Shrink(0)
+				ui.Text(c, "Reasoning and speed").FontSize(TypeInput).TextColor(p.Ink).Shrink(0)
 				ui.Box(c).Grow(1)
-				ui.Icon(c, IconChevron).FontSize(12).TextColor(p.InkMuted)
+				ui.Icon(c, IconChevron).FontSize(IconSmall).TextColor(p.InkMuted)
 			})
 		})
 	})
@@ -220,36 +220,36 @@ func configOverview(c *ui.Context, state *ConversationState, h ConversationHost,
 // deliberately kept out of the ordinary option list: a model that rejects
 // one should show a setting error, not look like a broken conversation.
 func advancedSettings(c *ui.Context, state *ConversationState, h ConversationHost, p Palette) {
-	ui.Column(c).FillWidth().MaxHeight(340).Radius(6).Background(p.Surface).
+	ui.Column(c).FillWidth().MaxHeight(340).Radius(RadiusControl).Background(p.Surface).
 		BorderWidth(1).BorderColor(p.Hairline).Clip().Label("Reasoning and speed panel").Children(func() {
-		ui.Row(c).FillWidth().Padding(8, 10).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Padding(Space4, Space5).AlignItems(ui.Center).Children(func() {
 			strongText(c, "Reasoning and speed", p.InkStrong)
 			ui.Box(c).Grow(1)
-			ui.Button(c, "Close").FontSize(10).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
+			ui.Button(c, "Close").FontSize(TypeLabel).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
 				OnClick(func() { state.AdvancedOpen = false; state.Input.Focus(c) })
 		})
 		ui.Scroll(c).FillWidth().MaxHeight(245).Children(func() {
-			ui.Column(c).FillWidth().Padding(2, 10, 10, 10).Gap(8).Children(func() {
+			ui.Column(c).FillWidth().Padding(Space1, Space5, Space5, Space5).Gap(Space4).Children(func() {
 				// A model that rejects one of these reports its own error
 				// below; the panel does not need to predict it in prose.
-				mono(ui.Text(c, "Reasoning effort")).FontSize(9).TextColor(p.InkMuted)
+				mono(ui.Text(c, "Reasoning effort")).FontSize(TypeBadge).TextColor(p.InkMuted)
 				ui.RadioGroup(c, func() {
 					for _, level := range []string{"auto", "minimal", "low", "medium", "high", "xhigh"} {
-						ui.Radio(c, &state.AdvancedEffort, level, level).FontSize(11)
+						ui.Radio(c, &state.AdvancedEffort, level, level).FontSize(TypeControl)
 					}
 				})
-				ui.Column(c).FillWidth().Gap(2).Children(func() {
-					ui.Checkbox(c, &state.AdvancedFast, "Fast mode").FontSize(11)
-					ui.Checkbox(c, &state.AdvancedUltra, "Ultra mode").FontSize(11)
+				ui.Column(c).FillWidth().Gap(Space1).Children(func() {
+					ui.Checkbox(c, &state.AdvancedFast, "Fast mode").FontSize(TypeControl)
+					ui.Checkbox(c, &state.AdvancedUltra, "Ultra mode").FontSize(TypeControl)
 				})
 				if h.AdvancedProblem != "" {
-					ui.Text(c, h.AdvancedProblem).FontSize(10).TextColor(p.Danger).Wrap().Selectable()
+					ui.Text(c, h.AdvancedProblem).FontSize(TypeLabel).TextColor(p.Danger).Wrap().Selectable()
 				}
 			})
 		})
-		ui.Row(c).FillWidth().Padding(8, 10, 10, 10).Gap(8).Justify(ui.End).
+		ui.Row(c).FillWidth().Padding(Space4, Space5, Space5, Space5).Gap(Space4).Justify(ui.End).
 			BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).Children(func() {
-			ui.Button(c, "Apply").FontSize(11).Padding(6, 9).Disabled(!h.Ready || h.ConfigChanging || h.SetAdvanced == nil).
+			ui.Button(c, "Apply").FontSize(TypeControl).Padding(ButtonPadY, ButtonPadX).Disabled(!h.Ready || h.ConfigChanging || h.SetAdvanced == nil).
 				OnClick(func() {
 					if h.SetAdvanced == nil {
 						return
@@ -271,20 +271,20 @@ func configDropdown(c *ui.Context, state *ConversationState, h ConversationHost,
 		closeConfig(state)
 		return
 	}
-	ui.Column(c).FillWidth().MaxHeight(260).Radius(6).Background(p.Surface).
+	ui.Column(c).FillWidth().MaxHeight(260).Radius(RadiusControl).Background(p.Surface).
 		BorderWidth(1).BorderColor(p.Hairline).Clip().
 		Children(func() {
-			ui.Row(c).FillWidth().Padding(8, 10).AlignItems(ui.Center).Gap(8).Children(func() {
-				mono(ui.Text(c, configLabel(option))).FontSize(10).FontWeight(500).TextColor(p.InkStrong).SingleLine()
+			ui.Row(c).FillWidth().Padding(Space4, Space5).AlignItems(ui.Center).Gap(Space4).Children(func() {
+				mono(ui.Text(c, configLabel(option))).FontSize(TypeLabel).FontWeight(500).TextColor(p.InkStrong).SingleLine()
 				ui.Box(c).Grow(1)
-				ui.Button(c, "Close").FontSize(10).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
+				ui.Button(c, "Close").FontSize(TypeLabel).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
 					OnClick(func() { closeConfig(state) })
 			})
 			// A filter only earns its space when the list is long enough to
 			// need one; three permission modes do not.
 			if len(option.Options) > 8 {
-				ui.Row(c).FillWidth().Padding(0, 10, 6, 10).Children(func() {
-					ui.TextInput(c, &state.ConfigQuery).Placeholder("Filter…").FontSize(12).BorderWidth(0).Background(p.Surface).FillWidth()
+				ui.Row(c).FillWidth().Padding(Space0, Space5, Space3, Space5).Children(func() {
+					ui.TextInput(c, &state.ConfigQuery).Placeholder("Filter…").FontSize(TypeInput).BorderWidth(0).Background(p.Surface).FillWidth()
 				})
 			}
 			ui.Scroll(c).FillWidth().MaxHeight(200).Children(func() {
@@ -298,7 +298,8 @@ func configDropdown(c *ui.Context, state *ConversationState, h ConversationHost,
 					}
 					shown++
 					active := choice.Value == option.CurrentValue
-					ui.ButtonBase(c).FillWidth().Padding(6, 10).AlignItems(ui.Center).Gap(8).
+					ui.ButtonBase(c).Label(fmt.Sprintf("Select %s: %s", configLabel(option), text)).
+						FillWidth().Padding(Space3, Space5).AlignItems(ui.Center).Gap(Space4).
 						Disabled(!h.Ready || h.ConfigChanging || h.SetConfig == nil).
 						OnClick(func() {
 							closeConfig(state)
@@ -307,18 +308,18 @@ func configDropdown(c *ui.Context, state *ConversationState, h ConversationHost,
 							}
 						}).
 						Children(func() {
-							ui.Text(c, text).FontSize(12).TextColor(p.Ink).SingleLine()
+							ui.Text(c, text).FontSize(TypeInput).TextColor(p.Ink).SingleLine()
 							if choice.Name != choice.Value && choice.Name != "" {
-								ui.Text(c, choice.Value).FontSize(10).TextColor(p.InkMuted).SingleLine()
+								ui.Text(c, choice.Value).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
 							}
 							ui.Box(c).Grow(1)
 							if active {
-								mono(ui.Text(c, "current")).FontSize(9).TextColor(p.Accent)
+								mono(ui.Text(c, "current")).FontSize(TypeBadge).TextColor(p.Accent)
 							}
 						})
 				}
 				if shown == 0 {
-					ui.Text(c, "No matching value").FontSize(12).TextColor(p.InkMuted).Padding(12, 10)
+					ui.Text(c, "No matching value").FontSize(TypeInput).TextColor(p.InkMuted).Padding(Space6, Space5)
 				}
 			})
 		})

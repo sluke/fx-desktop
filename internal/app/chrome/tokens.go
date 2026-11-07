@@ -19,11 +19,11 @@ const (
 	statusBarHeight  = 24
 	agentBarHeight   = 32
 	terminalInset    = 12
-	sheetRadius      = 10
+	sheetRadius      = RadiusSheet
 	sheetBorderWidth = 1
 	contentMaxWidth  = 560
-	controlRadius    = 5
-	panelPad         = 14
+	controlRadius    = RadiusControl
+	panelPad         = Space7
 
 	// iconRailWide is the vertical navigation rail inside the sidebar. It
 	// is part of the sidebar, so the splitter seam stays exactly at
@@ -167,7 +167,7 @@ func mono(e ui.Element) ui.Element {
 // spaced the way the design's uppercase labels are, without uppercasing the
 // string itself (the words are part of the app's accessible text).
 func labelText(c *ui.Context, text string, col ui.Color) ui.Element {
-	return ui.Text(c, text).Font(MonoFont).FontSize(10).FontWeight(500).
+	return ui.Text(c, text).Font(MonoFont).FontSize(TypeLabel).FontWeight(500).
 		LetterSpacing(0.6).TextColor(col).SingleLine()
 }
 
@@ -175,19 +175,19 @@ func labelText(c *ui.Context, text string, col ui.Color) ui.Element {
 // panel or a message. It stays on the workhorse face so a heading never
 // changes family in the middle of a panel.
 func strongText(c *ui.Context, text string, col ui.Color) ui.Element {
-	return ui.Text(c, text).Font(MonoFont).FontSize(12).FontWeight(600).TextColor(col)
+	return ui.Text(c, text).Font(MonoFont).FontSize(TypeInput).FontWeight(600).TextColor(col)
 }
 
 // sheetTitle is a sheet's title. A title in a different face from the body
 // it heads reads as a second, unrelated panel, so it keeps the body face.
 func sheetTitle(c *ui.Context, text string, col ui.Color) ui.Element {
-	return ui.Text(c, text).Font(MonoFont).FontSize(13).FontWeight(600).TextColor(col)
+	return ui.Text(c, text).Font(MonoFont).FontSize(TypeTitle).FontWeight(600).TextColor(col)
 }
 
 // windowTitle is the title in the app's toolbar. The toolbar is part of the
 // workbench, not a display headline, so it keeps the workbench face.
 func windowTitle(c *ui.Context, text string, col ui.Color) ui.Element {
-	return ui.Text(c, text).Font(MonoFont).FontSize(13).FontWeight(600).
+	return ui.Text(c, text).Font(MonoFont).FontSize(TypeTitle).FontWeight(600).
 		LetterSpacing(-.1).TextColor(col).SingleLine()
 }
 
@@ -216,9 +216,9 @@ func signalDot(c *ui.Context, col ui.Color, size float32) {
 // badge is a compact telemetry chip: a hairline box carrying a monospaced
 // word in a signal tone.
 func badge(c *ui.Context, p Palette, text string, col ui.Color) ui.Element {
-	return ui.Row(c).Shrink(0).AlignItems(ui.Center).Padding(2, 6).Radius(3).
+	return ui.Row(c).Shrink(0).AlignItems(ui.Center).Padding(Space1, Space3).Radius(RadiusChip).
 		BorderWidth(1).BorderColor(p.Hairline).Background(p.Surface).Children(func() {
-		mono(ui.Text(c, text)).FontSize(9).FontWeight(600).LetterSpacing(0.5).TextColor(col).SingleLine()
+		mono(ui.Text(c, text)).FontSize(TypeBadge).FontWeight(600).LetterSpacing(0.5).TextColor(col).SingleLine()
 	})
 }
 
@@ -257,10 +257,10 @@ func segmentedMeter(c *ui.Context, p Palette, used, total int, cells int) {
 // arithmetic it lays out with (statWidth, fitAgent): a label at statLabelSize,
 // a value at statValueSize, one gutter between them and statPad on each side.
 const (
-	statLabelSize = 10
-	statValueSize = 11
+	statLabelSize = TypeLabel
+	statValueSize = TypeControl
 	statGap       = 5
-	statPad       = 8
+	statPad       = Space4
 )
 
 // statWidth is the room a stat block asks for, by the same arithmetic.
@@ -322,7 +322,7 @@ func ApplyTheme(c *ui.Context, appearance string) {
 	t.Accent, t.AccentHover, t.AccentPressed, t.AccentText = p.Ink, p.AccentHover, p.AccentHover, p.OnInk
 	t.Selection, t.Focus = p.SurfaceHi, p.Edge
 	t.Inverse, t.InverseText, t.Success, t.Danger = p.Ink, p.OnInk, p.OK, p.Danger
-	t.Radius, t.FontSize = controlRadius, 13
+	t.Radius, t.FontSize = RadiusControl, TypeTitle
 	// Body, controls, sidebar navigation and prose share the design's
 	// workhorse face; top-level headings and modal titles opt into Geist.
 	t.Font = MonoFont

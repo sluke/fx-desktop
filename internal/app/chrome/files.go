@@ -66,7 +66,7 @@ func fileBrowserPanel(c *ui.Context, h Host, sh *ShellState, p Palette) {
 				}
 				return d.Rows[i].Abs
 			}).
-			Grow(1).MinHeight(0).FillWidth().Padding(2, 4, 10, 4).
+			Grow(1).MinHeight(0).FillWidth().Padding(Space1, Space2, Space5, Space2).
 			Label("Workspace files").
 			Rows(func(row ui.ListRow) {
 				fileBrowserRow(row.Context, h, p, d.Rows[row.Index])
@@ -77,19 +77,19 @@ func fileBrowserPanel(c *ui.Context, h Host, sh *ShellState, p Palette) {
 // fileBrowserHead names the root and offers a fresh read. The footer already
 // shows the absolute path and the way to Finder, so the head stays short.
 func fileBrowserHead(c *ui.Context, h Host, p Palette) {
-	ui.Row(c).Shrink(0).FillWidth().Padding(10, panelPad, 5, panelPad).
-		AlignItems(ui.Center).Gap(8).Children(func() {
+	ui.Row(c).Shrink(0).FillWidth().Padding(Space5, panelPad, Space2, panelPad).
+		AlignItems(ui.Center).Gap(Space4).Children(func() {
 		name := filepath.Base(h.Files.Root)
 		if name == "" || name == "." || name == string(filepath.Separator) {
 			name = "Workspace"
 		}
-		mono(ui.Text(c, name)).FontSize(10).FontWeight(600).TextColor(p.InkStrong).
+		mono(ui.Text(c, name)).FontSize(TypeLabel).FontWeight(600).TextColor(p.InkStrong).
 			SingleLine().MinWidth(0)
 		ui.Box(c).Grow(1)
 		if h.Actions.RefreshFiles != nil {
 			ui.Button(c, "Refresh").Label("Refresh files").Tooltip("Re-read the workspace").
-				FontSize(9).BorderWidth(1).BorderColor(p.Hairline).Background(p.Surface).
-				TextColor(p.InkMuted).Padding(2, 7).Radius(3).
+				FontSize(TypeBadge).BorderWidth(1).BorderColor(p.Hairline).Background(p.Surface).
+				TextColor(p.InkMuted).Padding(Space1, Space3).Radius(RadiusChip).
 				OnClick(h.Actions.RefreshFiles)
 		}
 	})
@@ -98,8 +98,8 @@ func fileBrowserHead(c *ui.Context, h Host, p Palette) {
 // fileBrowserMessage is the panel's one-line answer for empty, loading and
 // failed folders. It sits where the first row would, in the same indent.
 func fileBrowserMessage(c *ui.Context, p Palette, text string) {
-	ui.Row(c).FillWidth().Padding(6, 10).Children(func() {
-		mono(ui.Text(c, text)).FontSize(10).TextColor(p.InkMuted).SingleLine().MinWidth(0)
+	ui.Row(c).FillWidth().Padding(Space3, Space5).Children(func() {
+		mono(ui.Text(c, text)).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine().MinWidth(0)
 	})
 }
 
@@ -109,8 +109,8 @@ func fileBrowserMessage(c *ui.Context, p Palette, text string) {
 // expanded first.
 func fileBrowserRow(c *ui.Context, h Host, p Palette, row FileRow) {
 	if row.More {
-		ui.Row(c).FillWidth().Padding(3, 6+float32(row.Depth)*12, 3, 6).Children(func() {
-			mono(ui.Text(c, row.Name)).FontSize(9).TextColor(p.InkFaint).SingleLine()
+		ui.Row(c).FillWidth().Padding(Space1, 6+float32(row.Depth)*12, Space1, Space3).Children(func() {
+			mono(ui.Text(c, row.Name)).FontSize(TypeBadge).TextColor(p.InkFaint).SingleLine()
 		})
 		return
 	}
@@ -118,7 +118,7 @@ func fileBrowserRow(c *ui.Context, h Host, p Palette, row FileRow) {
 	bg := p.Surface
 	ui.Column(c).FillWidth().Children(func() {
 		btn := ui.ButtonBase(c).Label(row.Abs).Tooltip(row.Abs).
-			FillWidth().Height(24).Padding(2, 3).Radius(controlRadius).
+			FillWidth().Height(24).Padding(Space1, Space1).Radius(controlRadius).
 			Background(bg).AlignItems(ui.Center)
 		if btn.Hovered() {
 			bg = p.SurfaceHi
@@ -148,7 +148,7 @@ func fileBrowserRow(c *ui.Context, h Host, p Palette, row FileRow) {
 			})
 		}
 		btn.Children(func() {
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(5).Padding(0, 0, 0, indent).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(Space2).Padding(Space0, Space0, Space0, indent).Children(func() {
 				// The chevron slot is always present, so files line up with
 				// the folders they sit beside.
 				if row.Dir {
@@ -156,7 +156,7 @@ func fileBrowserRow(c *ui.Context, h Host, p Palette, row FileRow) {
 					if row.Expanded {
 						deg = 90
 					}
-					ui.Icon(c, IconChevron).FontSize(11).TextColor(p.InkMuted).Shrink(0).Rotate(deg)
+					ui.Icon(c, IconChevron).FontSize(IconCompact).TextColor(p.InkMuted).Shrink(0).Rotate(deg)
 				} else {
 					ui.Box(c).Width(11).Shrink(0)
 				}
@@ -164,22 +164,22 @@ func fileBrowserRow(c *ui.Context, h Host, p Palette, row FileRow) {
 				if row.Dir {
 					icon = IconExplorer
 				}
-				ui.Icon(c, icon).FontSize(13).TextColor(p.InkMuted).Shrink(0)
-				mono(ui.Text(c, row.Name)).FontSize(11).TextColor(p.Ink).SingleLine().MinWidth(0)
+				ui.Icon(c, icon).FontSize(IconMedium).TextColor(p.InkMuted).Shrink(0)
+				mono(ui.Text(c, row.Name)).FontSize(TypeControl).TextColor(p.Ink).SingleLine().MinWidth(0)
 				ui.Box(c).Grow(1)
 				if h.Actions.OpenFile != nil {
 					ui.Button(c, "").Label("Open " + row.Name + " with the default application").
 						Tooltip("Open with default application").
-						Width(18).Height(18).Padding(0).BorderWidth(0).Background(bg).
+						Width(18).Height(18).Padding(Space0).BorderWidth(0).Background(bg).
 						OnClick(func() { h.Actions.OpenFile(row.Path) }).Children(func() {
-						ui.Icon(c, IconExternal).FontSize(10).TextColor(p.InkFaint)
+						ui.Icon(c, IconExternal).FontSize(IconTiny).TextColor(p.InkFaint)
 					})
 				}
 			})
 		})
 		if row.Note != "" {
-			ui.Row(c).FillWidth().Padding(0, 8+indent+16, 3, 6).Children(func() {
-				mono(ui.Text(c, row.Note)).FontSize(9).TextColor(p.InkMuted).SingleLine().MinWidth(0)
+			ui.Row(c).FillWidth().Padding(Space0, 8+indent+16, Space1, Space3).Children(func() {
+				mono(ui.Text(c, row.Note)).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine().MinWidth(0)
 			})
 		}
 	})

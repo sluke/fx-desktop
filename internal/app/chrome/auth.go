@@ -54,18 +54,18 @@ func AuthNoticeCard(c *ui.Context, n AuthNotice, onSignIn func()) {
 		return
 	}
 	p := palette(c.Theme())
-	ui.Row(c).FillWidth().MaxWidth(authCardWidth).AlignItems(ui.Start).Gap(10).Padding(14, 16).
-		Background(p.Surface).Radius(6).
+	ui.Row(c).FillWidth().MaxWidth(authCardWidth).AlignItems(ui.Start).Gap(Space5).Padding(Space7, Space8).
+		Background(p.Surface).Radius(RadiusControl).
 		BorderWidth(1).BorderColor(p.Warn).
 		Children(func() {
-			ui.Box(c).Width(8).Height(8).Radius(4).Background(p.Warn).Shrink(0).Margin(4, 0, 0, 0)
-			ui.Column(c).Grow(1).MinWidth(0).Gap(8).Children(func() {
+			ui.Box(c).Width(8).Height(8).Radius(RadiusChip).Background(p.Warn).Shrink(0).Margin(4, 0, 0, 0)
+			ui.Column(c).Grow(1).MinWidth(0).Gap(Space4).Children(func() {
 				strongText(c, "Sign in to fx", p.InkStrong)
 				// fx's sentence, exactly as fx wrote it: no GUI paraphrase
 				// can know which of the ways in the user still has.
-				ui.Text(c, strings.TrimSpace(n.Help)).FontSize(12).TextColor(p.InkMuted).
+				ui.Text(c, strings.TrimSpace(n.Help)).FontSize(TypeInput).TextColor(p.InkMuted).
 					LineHeight(1.5).Wrap()
-				ui.Row(c).AlignItems(ui.Center).Gap(10).Children(func() {
+				ui.Row(c).AlignItems(ui.Center).Gap(Space5).Children(func() {
 					// The button's "fx" and the CLI's own help above it
 					// say where sign-in goes; a caption under the button
 					// would explain the button instead.

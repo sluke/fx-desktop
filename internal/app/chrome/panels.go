@@ -14,7 +14,7 @@ func sidebarPanel(c *ui.Context, h Host, p Palette) {
 		iconRail(c, h, p)
 		ui.Column(c).Grow(1).MinWidth(0).Fill().Background(p.Surface).Children(func() {
 			railHeader(c, h, p)
-			ui.Scroll(c).Grow(1).FillWidth().Padding(0, 8).Children(func() {
+			ui.Scroll(c).Grow(1).MinHeight(0).FillWidth().Padding(Space0, Space4).Children(func() {
 				railList(c, h, p)
 				if h.Data.ProjectPath != "" {
 					changesEntry(c, h, p)
@@ -35,7 +35,7 @@ func iconRail(c *ui.Context, h Host, p Palette) {
 	// and flex shrink then collapses the first and last buttons.
 	ui.Column(c).Width(iconRailWide).FillHeight().Shrink(0).
 		Background(p.Window).BorderWidth(0, 1, 0, 0).BorderColor(p.Hairline).
-		Padding(8, 0).Gap(4).Children(func() {
+		Padding(Space4, Space0).Gap(Space2).Children(func() {
 		if h.Actions.NewSession != nil {
 			railButton(c, p, IconPlus, "New Session", "New Session (⌘T)", false, h.Actions.NewSession)
 		}
@@ -71,18 +71,18 @@ func railButton(c *ui.Context, p Palette, icon *ui.SVG, label, tip string, activ
 	// into the sidebar beside it — the selected item has to stay inside the
 	// rail, with the hairline still visible next to it.
 	btn := ui.Button(c, "").Label(label).Tooltip(tip).Width(iconRailWide-4).Height(34).
-		Padding(0, 0, 0, 2).Radius(0).BorderWidth(0).Background(p.Window).OnClick(action)
+		Padding(Space0, Space0, Space0, Space1).Radius(RadiusNone).BorderWidth(0).Background(p.Window).OnClick(action)
 	col := p.InkMuted
 	if active {
 		// The mock marks the active destination with a left edge; the top
 		// edge read as a stray rule between rail buttons. The edge sits on
 		// the window's own border, so the signal stays flush with the rail.
-		btn.Background(p.SurfaceHi).BorderWidth(0, 0, 0, 2).BorderColor(p.Accent).Padding(0)
+		btn.Background(p.SurfaceHi).BorderWidth(0, 0, 0, 2).BorderColor(p.Accent).Padding(Space0)
 		col = p.Accent
 	}
 	btn.Children(func() {
 		ui.Row(c).FillWidth().Height(32).Center().Children(func() {
-			ui.Icon(c, icon).FontSize(16).TextColor(col)
+			ui.Icon(c, icon).FontSize(IconXL).TextColor(col)
 		})
 	})
 }
@@ -91,14 +91,14 @@ func railButton(c *ui.Context, p Palette, icon *ui.SVG, label, tip string, activ
 // that has no fx yet (the welcome window makes the same offer).
 func railHeader(c *ui.Context, h Host, p Palette) {
 	d := h.Data
-	ui.Column(c).FillWidth().Padding(10, 10, 8, 10).Gap(8).Children(func() {
+	ui.Column(c).FillWidth().Padding(Space5, Space5, Space4, Space5).Gap(Space4).Children(func() {
 		switch {
 		case d.Welcome:
-			ui.Text(c, "Install fx").FontSize(13).FontWeight(600).TextColor(p.InkStrong)
+			ui.Text(c, "Install fx").FontSize(TypeTitle).FontWeight(600).TextColor(p.InkStrong)
 			// "Download fx" is the one thing to do here; the button's
 			// label carries it, so no second line is needed.
 			if d.WelcomeBusy {
-				ui.Text(c, d.WelcomeText).FontSize(11).TextColor(p.InkMuted)
+				ui.Text(c, d.WelcomeText).FontSize(TypeControl).TextColor(p.InkMuted)
 			} else if d.OnInstall != nil {
 				ui.PrimaryButton(c, "Download fx").Background(p.Ink).TextColor(p.OnInk).FillWidth().OnClick(d.OnInstall)
 			}
@@ -128,26 +128,24 @@ func railList(c *ui.Context, h Host, p Palette) {
 
 // railRow is one session: attention dot, title, context, right-hand meta.
 func railRow(c *ui.Context, p Palette, sum SessionSummary, active bool, onClick func()) {
-	row := ui.Row(c).FillWidth().Padding(7, panelPad).Radius(controlRadius).AlignItems(ui.Center).Gap(8)
+	row := ui.Row(c).FillWidth().Padding(Space3, panelPad).Radius(controlRadius).AlignItems(ui.Center).Gap(Space4)
 	if onClick != nil {
 		row.OnClick(onClick)
 	}
-	if active || row.Hovered() {
-		row.Background(p.SurfaceHi)
-	}
+	stateSurface(row, p, active, row.Hovered())
 	row.Children(func() {
-		ui.Box(c).Width(7).Height(7).Radius(4).Background(attentionColor(p, sum.Status)).Shrink(0)
-		ui.Column(c).Grow(1).MinWidth(0).Gap(2).Children(func() {
-			ui.Text(c, sum.Title).FontSize(12).TextColor(p.Ink).SingleLine()
+		ui.Box(c).Width(7).Height(7).Radius(RadiusChip).Background(attentionColor(p, sum.Status)).Shrink(0)
+		ui.Column(c).Grow(1).MinWidth(0).Gap(Space1).Children(func() {
+			ui.Text(c, sum.Title).FontSize(TypeInput).TextColor(p.Ink).SingleLine()
 			if sub := railSubtitle(sum); sub != "" {
-				ui.Text(c, sub).FontSize(10).TextColor(p.InkMuted).SingleLine()
+				ui.Text(c, sub).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
 			}
 		})
 		if meta := railMeta(sum); meta != "" {
-			ui.Text(c, meta).FontSize(10).TextColor(p.InkMuted).SingleLine().Shrink(0)
+			ui.Text(c, meta).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine().Shrink(0)
 		}
 		if sum.Unread {
-			ui.Box(c).Width(6).Height(6).Radius(3).Background(p.Accent).Shrink(0)
+			ui.Box(c).Width(6).Height(6).Radius(RadiusChip).Background(p.Accent).Shrink(0)
 		}
 	})
 }
@@ -235,7 +233,7 @@ func changesEntry(c *ui.Context, h Host, p Palette) {
 	hairlineH(c, p)
 	sectionLabel(c, p, "Changes", "")
 	row := ui.ButtonBase(c).Label("Review "+changesDetail(h)).FillWidth().
-		Padding(7, panelPad).Radius(controlRadius).AlignItems(ui.Center).Gap(8)
+		Padding(Space3, panelPad).Radius(controlRadius).AlignItems(ui.Center).Gap(Space4)
 	if h.Actions.ToggleReview != nil {
 		row.OnClick(h.Actions.ToggleReview)
 	}
@@ -243,10 +241,10 @@ func changesEntry(c *ui.Context, h Host, p Palette) {
 		row.Background(p.SurfaceHi)
 	}
 	row.Children(func() {
-		ui.Icon(c, IconChanges).FontSize(13).TextColor(p.InkMuted)
-		ui.Text(c, changesDetail(h)).FontSize(12).TextColor(p.Ink).SingleLine().MinWidth(0)
+		ui.Icon(c, IconChanges).FontSize(IconMedium).TextColor(p.InkMuted)
+		ui.Text(c, changesDetail(h)).FontSize(TypeInput).TextColor(p.Ink).SingleLine().MinWidth(0)
 		ui.Box(c).Grow(1)
-		ui.Text(c, "⌘R").FontSize(10).TextColor(p.InkMuted).Shrink(0)
+		ui.Text(c, "⌘R").FontSize(TypeLabel).TextColor(p.InkMuted).Shrink(0)
 	})
 }
 
@@ -275,7 +273,7 @@ func savedSection(c *ui.Context, h Host, p Palette) {
 	}
 	hairlineH(c, p)
 	collapsed := h.Shell != nil && h.Shell.HistoryCollapsed
-	ui.ButtonBase(c).Label("Toggle history").FillWidth().Padding(12, panelPad, 7, panelPad).Gap(6).AlignItems(ui.Center).OnClick(func() {
+	ui.ButtonBase(c).Label("Toggle history").FillWidth().Padding(Space6, panelPad, Space3, panelPad).Gap(Space3).AlignItems(ui.Center).OnClick(func() {
 		if h.Shell != nil {
 			h.Shell.HistoryCollapsed = !h.Shell.HistoryCollapsed
 		}
@@ -284,9 +282,9 @@ func savedSection(c *ui.Context, h Host, p Palette) {
 		if collapsed {
 			mark = "▸"
 		}
-		ui.Text(c, mark).FontSize(10).TextColor(p.InkMuted)
-		ui.Text(c, "History").FontSize(11).FontWeight(500).TextColor(p.InkMuted)
-		ui.Text(c, itoa(min(5, len(h.Data.Saved)))+" recent").FontSize(10).TextColor(p.InkMuted)
+		ui.Text(c, mark).FontSize(TypeLabel).TextColor(p.InkMuted)
+		ui.Text(c, "History").FontSize(TypeControl).FontWeight(500).TextColor(p.InkMuted)
+		ui.Text(c, itoa(min(5, len(h.Data.Saved)))+" recent").FontSize(TypeLabel).TextColor(p.InkMuted)
 	})
 	if !collapsed {
 		for _, sv := range h.Data.Saved[:min(5, len(h.Data.Saved))] {
@@ -305,12 +303,12 @@ func savedSection(c *ui.Context, h Host, p Palette) {
 				}
 			})
 			if sv.When != "" {
-				ui.Text(c, sv.When).FontSize(10).TextColor(p.InkMuted).SingleLine().Padding(0, 0, 4, panelPad+21)
+				ui.Text(c, sv.When).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine().Padding(Space0, Space0, Space2, panelPad+21)
 			}
 		}
 	}
 	if h.Actions.OpenHistory != nil {
-		ui.Button(c, "View all…").Label("View all session history").FontSize(11).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).Padding(6, panelPad).OnClick(h.Actions.OpenHistory)
+		ui.Button(c, "View all…").Label("View all session history").FontSize(TypeControl).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).Padding(Space3, panelPad).OnClick(h.Actions.OpenHistory)
 	}
 }
 
@@ -335,25 +333,23 @@ func itoa(n int) string {
 // sidebarRow is one clickable line of a secondary list: icon, label, meta.
 func sidebarRow(c *ui.Context, p Palette, icon *ui.SVG, label, meta string, active bool, onClick func()) {
 	fg := p.Ink
-	row := ui.Row(c).FillWidth().Padding(8, panelPad).Radius(controlRadius).AlignItems(ui.Center).Gap(8)
+	row := ui.Row(c).FillWidth().Padding(Space4, panelPad).Radius(controlRadius).AlignItems(ui.Center).Gap(Space4)
 	if onClick != nil {
 		row.OnClick(onClick)
 	}
-	if active || row.Hovered() {
-		row.Background(p.SurfaceHi)
-	}
+	stateSurface(row, p, active, row.Hovered())
 
 	row.Children(func() {
 		if icon != nil {
-			ui.Icon(c, icon).FontSize(13).TextColor(p.InkMuted)
+			ui.Icon(c, icon).FontSize(IconMedium).TextColor(p.InkMuted)
 		}
-		ui.Text(c, label).FontSize(12).TextColor(fg).SingleLine().MinWidth(0)
+		ui.Text(c, label).FontSize(TypeInput).TextColor(fg).SingleLine().MinWidth(0)
 		ui.Box(c).Grow(1)
 		if meta != "" {
 			// Keep the right-hand value on one line: when a long title
 			// squeezed it, "12 turns" wrapped into two rows and made the
 			// list rhythm uneven.
-			ui.Text(c, meta).FontSize(10).TextColor(p.InkMuted).SingleLine().Shrink(0)
+			ui.Text(c, meta).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine().Shrink(0)
 		}
 	})
 }
@@ -371,23 +367,23 @@ func markText(c *ui.Context, p Palette, mark string) {
 	case "D":
 		col = p.Danger
 	}
-	ui.Text(c, mark).FontSize(10).FontWeight(600).TextColor(col)
+	ui.Text(c, mark).FontSize(TypeLabel).FontWeight(600).TextColor(col)
 }
 
 // sidebarEmptyState is the rail's compact version: the icon and the note
 // have to share a narrow column, so the gutter is tighter and the icon can
 // never push a short phrase such as "Not a git repository" onto two lines.
 func sidebarEmptyState(c *ui.Context, p Palette, icon *ui.SVG, text string) {
-	ui.Row(c).FillWidth().Padding(13, 12).AlignItems(ui.Center).Gap(6).Children(func() {
-		ui.Icon(c, icon).FontSize(13).TextColor(p.InkMuted).Shrink(0)
-		ui.Text(c, text).FontSize(12).TextColor(p.InkMuted).Grow(1).MinWidth(0)
+	ui.Row(c).FillWidth().Padding(Space6, Space6).AlignItems(ui.Center).Gap(Space3).Children(func() {
+		ui.Icon(c, icon).FontSize(IconMedium).TextColor(p.InkMuted).Shrink(0)
+		ui.Text(c, text).FontSize(TypeInput).TextColor(p.InkMuted).Grow(1).MinWidth(0)
 	})
 }
 
 // emptyState answers every wide list that has nothing to show.
 func emptyState(c *ui.Context, p Palette, icon *ui.SVG, text string) {
-	ui.Row(c).FillWidth().Padding(16, panelPad).AlignItems(ui.Center).Gap(8).Children(func() {
-		ui.Icon(c, icon).FontSize(14).TextColor(p.InkMuted)
-		ui.Text(c, text).FontSize(12).TextColor(p.InkMuted)
+	ui.Row(c).FillWidth().Padding(Space8, panelPad).AlignItems(ui.Center).Gap(Space4).Children(func() {
+		ui.Icon(c, icon).FontSize(IconLarge).TextColor(p.InkMuted)
+		ui.Text(c, text).FontSize(TypeInput).TextColor(p.InkMuted)
 	})
 }

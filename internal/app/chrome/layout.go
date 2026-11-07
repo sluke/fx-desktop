@@ -419,12 +419,12 @@ func Frame(c *ui.Context, h Host) {
 	ui.Column(c).Fill().Background(p.Window).Children(func() {
 		titleBar(c, h, p, sh)
 		if h.CenterOnly {
-			ui.Column(c).Grow(1).Fill().Children(func() {
+			ui.Column(c).Grow(1).MinHeight(0).Fill().Children(func() {
 				// A start screen is exactly where a signed-out user lands,
 				// so fx's own sign-in guidance belongs at the top of it —
 				// above the page, not buried in a menu.
 				if h.Auth.NeedsSignIn() {
-					ui.Row(c).FillWidth().Shrink(0).Padding(18, 24, 0, 24).Justify(ui.Center).
+					ui.Row(c).FillWidth().Shrink(0).Padding(Space9, Space12, Space0, Space12).Justify(ui.Center).
 						Children(func() { AuthNoticeCard(c, h.Auth, h.Actions.SignIn) })
 				}
 				mainPanel(c, h, p)
@@ -445,7 +445,7 @@ func Frame(c *ui.Context, h Host) {
 				inspector := inspectorWidth(window, h, sh)
 				if sh.SidebarOpen {
 					sh.SidebarWidth = clampSidebarWidth(sh.SidebarWidth, window-drawer-inspector)
-					sidebarSplit(c, h, p, sh).Grow(1).Fill()
+					sidebarSplit(c, h, p, sh).Grow(1).MinWidth(0).Fill()
 				} else {
 					ui.Box(c).Grow(1).Fill().Children(func() { mainPanel(c, h, p) })
 				}
@@ -513,10 +513,10 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 	left := bar.Left + 14
 	width, _ := c.Size()
 	showChips := h.Conversation && !h.CenterOnly && width >= 980
-	ui.Row(c).Shrink(0).Height(titleBarHeight).AlignItems(ui.Center).Gap(9).
+	ui.Row(c).Shrink(0).Height(titleBarHeight).AlignItems(ui.Center).Gap(Space4).
 		Background(p.Window).
 		BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
-		Padding(0, bar.Right+12, 0, left).
+		Padding(Space0, bar.Right+12, Space0, left).
 		DragWindow().
 		Children(func() {
 			title := h.Title
@@ -525,24 +525,24 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 			}
 			if !h.CenterOnly {
 				ui.Button(c, "").Label("Toggle Sidebar").Tooltip("Toggle Sidebar (⌘B)").
-					Padding(7).Radius(controlRadius).BorderWidth(0).Background(p.Window).
+					Padding(Space3).Radius(controlRadius).BorderWidth(0).Background(p.Window).
 					OnClick(func() { sh.SidebarOpen = !sh.SidebarOpen }).
-					Children(func() { ui.Icon(c, IconPanel).FontSize(15).TextColor(p.InkMuted) })
+					Children(func() { ui.Icon(c, IconPanel).FontSize(IconLarge).TextColor(p.InkMuted) })
 				brandMark(c, p)
 			}
-			ui.Column(c).MinWidth(0).Gap(1).Children(func() {
+			ui.Column(c).MinWidth(0).Gap(Space0).Children(func() {
 				windowTitle(c, title, p.InkStrong)
 				if h.Subtitle != "" && !h.CenterOnly && width >= 900 {
-					mono(ui.Text(c, h.Subtitle)).FontSize(9).TextColor(p.InkMuted).SingleLine()
+					mono(ui.Text(c, h.Subtitle)).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine()
 				}
 			})
 			ui.Box(c).Grow(1)
 			if showChips {
 				if h.Agent.Model != "" {
-					ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(6).Padding(3, 8).Radius(4).
+					ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(Space3).Padding(Space1, Space4).Radius(RadiusChip).
 						Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
 						signalDot(c, p.Purple, 5)
-						mono(ui.Text(c, shortChoice(h.Agent.Model))).FontSize(10).TextColor(p.InkMuted).SingleLine()
+						mono(ui.Text(c, shortChoice(h.Agent.Model))).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
 					})
 				}
 				if h.Agent.Status != "" {
@@ -552,17 +552,17 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 					} else if strings.EqualFold(h.Agent.Status, "exited") {
 						col = p.InkMuted
 					}
-					ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(6).Padding(3, 8).Radius(4).
+					ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(Space3).Padding(Space1, Space4).Radius(RadiusChip).
 						Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
 						signalDot(c, col, 5)
-						mono(ui.Text(c, h.Agent.Status)).FontSize(10).TextColor(p.InkMuted).SingleLine()
+						mono(ui.Text(c, h.Agent.Status)).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
 					})
 				}
 			}
 			if !h.CenterOnly {
-				ui.Button(c, "").Label("Commands").Tooltip("Commands (⌘K)").Padding(7).BorderWidth(0).Background(p.Window).
+				ui.Button(c, "").Label("Commands").Tooltip("Commands (⌘K)").Padding(Space3).BorderWidth(0).Background(p.Window).
 					OnClick(func() { OpenPalette(sh) }).
-					Children(func() { ui.Icon(c, IconSearch).FontSize(15).TextColor(p.InkMuted) })
+					Children(func() { ui.Icon(c, IconSearch).FontSize(IconLarge).TextColor(p.InkMuted) })
 			}
 			if !h.CenterOnly && !sh.ReviewOpen {
 				// A narrow probe, not a copy of the shell: the panel state
@@ -572,7 +572,7 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 				if inspectorWidth(width, h, &probe) > 0 {
 					active := sh.InspectorOpen
 					btn := ui.Button(c, "").Label("Toggle Inspector").Tooltip("Toggle Inspector").
-						Padding(7).Radius(controlRadius).BorderWidth(0).Background(p.Window).
+						Padding(Space3).Radius(controlRadius).BorderWidth(0).Background(p.Window).
 						OnClick(func() { sh.InspectorOpen = !sh.InspectorOpen })
 					if active {
 						btn.Background(p.Surface)
@@ -582,7 +582,7 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 						if active {
 							col = p.Accent
 						}
-						ui.Icon(c, IconGauge).FontSize(15).TextColor(col)
+						ui.Icon(c, IconGauge).FontSize(IconLarge).TextColor(col)
 					})
 				}
 			}
@@ -592,9 +592,9 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 // brandMark is the small bordered fx tile at the head of the toolbar: the
 // product's signature, not another menu.
 func brandMark(c *ui.Context, p Palette) {
-	ui.Row(c).Width(24).Height(24).Center().Radius(5).Shrink(0).
+	ui.Row(c).Width(24).Height(24).Center().Radius(RadiusControl).Shrink(0).
 		Background(p.Surface).BorderWidth(1).BorderColor(p.Edge).Children(func() {
-		ui.Text(c, "fx").Font(MonoFont).FontSize(11).FontWeight(600).TextColor(p.InkStrong)
+		ui.Text(c, "fx").Font(MonoFont).FontSize(TypeControl).FontWeight(600).TextColor(p.InkStrong)
 	})
 }
 
@@ -612,7 +612,7 @@ func inspectorWidth(window float32, h Host, sh *ShellState) float32 {
 }
 
 func navigationButton(c *ui.Context, p Palette, icon *ui.SVG, label, hint string, active bool, action func()) {
-	btn := ui.Button(c, "").Label(label).Tooltip(label).FillWidth().Height(32).Padding(0, 10).Radius(controlRadius).BorderWidth(0).OnClick(action)
+	btn := ui.Button(c, "").Label(label).Tooltip(label).FillWidth().Height(32).Padding(Space0, Space5).Radius(controlRadius).BorderWidth(0).OnClick(action)
 	col := p.InkMuted
 	if active {
 		btn.Background(p.SurfaceHi).BorderWidth(0, 0, 0, 2).BorderColor(p.Accent)
@@ -621,15 +621,15 @@ func navigationButton(c *ui.Context, p Palette, icon *ui.SVG, label, hint string
 		btn.Background(p.Surface)
 	}
 	btn.Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(9).Children(func() {
-			ui.Icon(c, icon).FontSize(15).TextColor(col)
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(Space4).Children(func() {
+			ui.Icon(c, icon).FontSize(IconLarge).TextColor(col)
 			// Sidebar actions belong to the workbench body, not the
 			// top-level chrome: keep them on the same mono face as the
 			// section labels and rows around them.
-			ui.Text(c, label).Font(MonoFont).FontSize(12).FontWeight(500).TextColor(p.Ink)
+			ui.Text(c, label).Font(MonoFont).FontSize(TypeInput).FontWeight(500).TextColor(p.Ink)
 			ui.Box(c).Grow(1)
 			if hint != "" {
-				mono(ui.Text(c, hint)).FontSize(9).TextColor(p.InkMuted)
+				mono(ui.Text(c, hint)).FontSize(TypeBadge).TextColor(p.InkMuted)
 			}
 		})
 	})
@@ -647,7 +647,7 @@ func mainPanel(c *ui.Context, h Host, p Palette) {
 			return
 		}
 		sessionBar(c, h, p)
-		ui.Box(c).Grow(1).FillWidth().MinHeight(0).Padding(terminalInset, 20).Background(p.TermBG).Children(func() {
+		ui.Box(c).Grow(1).FillWidth().MinHeight(0).Padding(terminalInset, Space10).Background(p.TermBG).Children(func() {
 			if h.Main != nil {
 				h.Main(c)
 			} else {
@@ -673,26 +673,26 @@ func sessionBar(c *ui.Context, h Host, p Palette) {
 	ui.Row(c).Shrink(0).Height(sessionBarHeight).AlignItems(ui.Center).
 		Background(p.Window).
 		BorderWidth(0, 0, 0, 0).BorderColor(p.Hairline).
-		Padding(0, 14).Gap(8).
+		Padding(Space0, Space7).Gap(Space4).
 		Children(func() {
 			dot := p.InkFaint
 			if sb.Running {
 				dot = p.OK
 			}
 			signalDot(c, dot, 6)
-			mono(ui.Text(c, liveLabel(sb))).FontSize(10).TextColor(p.InkMuted)
+			mono(ui.Text(c, liveLabel(sb))).FontSize(TypeLabel).TextColor(p.InkMuted)
 			if sb.Branch != "" {
-				ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(5).Padding(1, 6).Radius(3).
+				ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(Space2).Padding(Space0, Space3).Radius(RadiusChip).
 					Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
-					mono(ui.Text(c, sb.Branch)).FontSize(9).TextColor(p.InkMuted).SingleLine()
+					mono(ui.Text(c, sb.Branch)).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine()
 				})
 			}
 			if sb.Name != "" {
-				mono(ui.Text(c, sb.Name)).FontSize(10).TextColor(p.InkFaint).SingleLine()
+				mono(ui.Text(c, sb.Name)).FontSize(TypeLabel).TextColor(p.InkFaint).SingleLine()
 			}
 			ui.Box(c).Grow(1)
 			if sb.Count > 0 {
-				mono(ui.Text(c, itoa(sb.Count)+" open")).FontSize(9).TextColor(p.InkMuted).SingleLine()
+				mono(ui.Text(c, itoa(sb.Count)+" open")).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine()
 			}
 		})
 }
@@ -741,7 +741,7 @@ func agentBar(c *ui.Context, a Agent, p Palette) {
 			statBlock(c, p, "Spend", a.Spend, false)
 		}
 		if fit.Context {
-			ui.Column(c).Grow(1).Justify(ui.Center).Padding(0, statPad).Gap(2).Children(func() {
+			ui.Column(c).Grow(1).MinWidth(0).Justify(ui.Center).Padding(Space0, statPad).Gap(Space1).Children(func() {
 				mono(ui.Text(c, contextText(a))).
 					FontSize(statLabelSize).FontWeight(400).TextColor(p.InkMuted)
 				segmentedMeter(c, p, a.ContextUsed, a.ContextTotal, 24)
@@ -904,8 +904,8 @@ func isDefaultPermission(mode string) bool {
 func statusBar(c *ui.Context, h Host, p Palette) {
 	ui.Row(c).Shrink(0).Height(statusBarHeight).AlignItems(ui.Center).
 		Background(p.Window).BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).
-		Padding(0, 12).
-		Gap(8).
+		Padding(Space0, Space6).
+		Gap(Space4).
 		Children(func() {
 			signalDot(c, p.OK, 5)
 			sep := false
@@ -914,14 +914,14 @@ func statusBar(c *ui.Context, h Host, p Palette) {
 					return
 				}
 				if sep {
-					mono(ui.Text(c, "·")).FontSize(9).TextColor(p.InkFaint)
+					mono(ui.Text(c, "·")).FontSize(TypeBadge).TextColor(p.InkFaint)
 				}
 				sep = true
 				col := p.InkMuted
 				if hi {
 					col = p.Accent
 				}
-				text := mono(ui.Text(c, s)).FontSize(9).TextColor(col).SingleLine()
+				text := mono(ui.Text(c, s)).FontSize(TypeBadge).TextColor(col).SingleLine()
 				if hi {
 					text.FontWeight(500)
 				}
@@ -938,22 +938,22 @@ func statusBar(c *ui.Context, h Host, p Palette) {
 			for _, s := range h.StatusRight {
 				if s != "" && h.Data.ProjectPath != "" && s == ProjectSubtitle(h.Data.ProjectPath) && h.Actions.OpenFolder != nil {
 					if sep {
-						mono(ui.Text(c, "·")).FontSize(9).TextColor(p.InkFaint)
+						mono(ui.Text(c, "·")).FontSize(TypeBadge).TextColor(p.InkFaint)
 					}
 					sep = true
 					width, _ := c.Size()
 					ui.Button(c, "").Label("Switch workspace (status bar)").Tooltip(h.Data.ProjectPath+"\nSwitch workspace (⌘O)").
-						Height(statusBarHeight-2).MaxWidth(width/3).MinWidth(0).ClipX().Padding(0, 4).
-						BorderWidth(0).Background(p.Window).Radius(4).OnClick(h.Actions.OpenFolder).
-						Children(func() { mono(ui.Text(c, s)).FontSize(9).TextColor(p.InkMuted).SingleLine().MinWidth(0) })
+						Height(statusBarHeight-2).MaxWidth(width/3).MinWidth(0).ClipX().Padding(Space0, Space2).
+						BorderWidth(0).Background(p.Window).Radius(RadiusChip).OnClick(h.Actions.OpenFolder).
+						Children(func() { mono(ui.Text(c, s)).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine().MinWidth(0) })
 				} else {
 					emit(s, false)
 				}
 			}
 			if h.Actions.ToggleReview != nil {
 				ui.Button(c, "Review").Label("Review changes ⌘R").Tooltip("Review changes (⌘R)").
-					Font(MonoFont).FontSize(9).BorderWidth(0).Background(p.Window).TextColor(p.Ink).
-					Padding(0, 6).OnClick(h.Actions.ToggleReview)
+					Font(MonoFont).FontSize(TypeBadge).BorderWidth(0).Background(p.Window).TextColor(p.Ink).
+					Padding(Space0, Space3).OnClick(h.Actions.ToggleReview)
 			}
 			if len(h.Console.Runs) > 0 && h.Actions.ToggleConsole != nil {
 				// The console is the only place a window's runs are listed,
@@ -965,11 +965,11 @@ func statusBar(c *ui.Context, h Host, p Palette) {
 					col = p.Accent
 				}
 				ui.Button(c, "Console").Label("Console ⌘J").Tooltip("Show or hide the console (⌘J)").
-					Font(MonoFont).FontSize(9).BorderWidth(0).Background(p.Window).TextColor(col).
-					Padding(0, 6).OnClick(h.Actions.ToggleConsole)
+					Font(MonoFont).FontSize(TypeBadge).BorderWidth(0).Background(p.Window).TextColor(col).
+					Padding(Space0, Space3).OnClick(h.Actions.ToggleConsole)
 			}
 			if !sep {
-				mono(ui.Text(c, "Ready")).FontSize(9).TextColor(p.InkMuted)
+				mono(ui.Text(c, "Ready")).FontSize(TypeBadge).TextColor(p.InkMuted)
 			}
 		})
 }
@@ -994,7 +994,7 @@ func sheetWithHeight(c *ui.Context, open *bool, p Palette, label string, panelHe
 	width, height := c.Size()
 	ui.DialogBase(c, open, func(backdrop, panel ui.Element) {
 		backdrop.Background(p.Scrim)
-		panel.Padding(0).Gap(0).Radius(sheetRadius).Background(p.Window).Label(label).
+		panel.Padding(Space0).Gap(Space0).Radius(sheetRadius).Background(p.Window).Label(label).
 			Width(min(float32(contentMaxWidth), width-48)).MaxHeight(height-48).
 			BorderWidth(sheetBorderWidth).BorderColor(p.Hairline).Clip().Shadow(0, 18, 48, 0, p.SheetShadow)
 		if panelHeight > 0 {
@@ -1105,8 +1105,8 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 			// and rounds the bottom corners. This field is the sheet's
 			// header: keep native editing with a flat structural hairline.
 			field := ui.TextInputBase(c, &sh.PaletteQuery).Placeholder("Search commands…").
-				Label("Search commands").FontSize(13).Padding(12, panelPad).
-				Radius(0).BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
+				Label("Search commands").FontSize(TypeTitle).Padding(Space6, panelPad).
+				Radius(RadiusNone).BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
 				Background(p.Window).FillWidth().AutoFocus()
 			groups := paletteGroupRows(h, sh.PaletteQuery)
 			rows := paletteCount(groups)
@@ -1138,29 +1138,29 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 				}
 			}
 			if rows == 0 {
-				ui.Row(c).FillWidth().Justify(ui.Center).Padding(22, panelPad).Children(func() {
-					ui.Text(c, "No matching command").FontSize(12).TextColor(p.InkMuted)
+				ui.Row(c).FillWidth().Justify(ui.Center).Padding(Space10, panelPad).Children(func() {
+					ui.Text(c, "No matching command").FontSize(TypeInput).TextColor(p.InkMuted)
 				})
 			} else {
 				ui.Scroll(c).FillWidth().MaxHeight(paletteListMax(height)).Children(func() {
-					ui.Column(c).FillWidth().Padding(6).Gap(2).Children(func() {
+					ui.Column(c).FillWidth().Padding(Space3).Gap(Space1).Children(func() {
 						index, hovered := 0, ""
 						for _, group := range groups {
 							group := group
-							ui.Row(c).FillWidth().Padding(8, panelPad, 4, panelPad).AlignItems(ui.Center).Children(func() {
+							ui.Row(c).FillWidth().Padding(Space4, panelPad, Space2, panelPad).AlignItems(ui.Center).Children(func() {
 								labelText(c, group.Title, p.InkMuted)
 								ui.Box(c).Grow(1)
-								mono(ui.Text(c, itoa(len(group.Rows)))).FontSize(9).TextColor(p.Accent)
+								mono(ui.Text(c, itoa(len(group.Rows)))).FontSize(TypeBadge).TextColor(p.Accent)
 							})
 							for _, row := range group.Rows {
 								row, i := row, index
 								index++
-								item := ui.Row(c).FillWidth().Padding(8, panelPad).Radius(4).
-									AlignItems(ui.Center).Gap(10).
+								item := ui.Row(c).FillWidth().Padding(Space4, panelPad).Radius(RadiusChip).
+									AlignItems(ui.Center).Gap(Space5).
 									OnClick(func() { runCommand(h, sh, row.Command) })
 								switch {
 								case i == sh.PaletteHighlight:
-									item.Background(p.Sunken)
+									stateSurface(item, p, true, false)
 								case item.Hovered():
 									// Entering a row moves the highlight into it,
 									// once: resting on it must not undo what the
@@ -1168,7 +1168,7 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 									if sh.PaletteHover != row.Key {
 										sh.PaletteHighlight, sh.PaletteHover = i, row.Key
 									}
-									item.Background(p.Sunken)
+									stateSurface(item, p, false, true)
 								}
 								if item.Hovered() {
 									hovered = row.Key
@@ -1185,17 +1185,17 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 									if i == sh.PaletteHighlight {
 										iconCol = p.Accent
 									}
-									ui.Icon(c, row.Icon).FontSize(14).TextColor(iconCol)
-									ui.Text(c, row.Label).FontSize(12).TextColor(p.Ink).SingleLine()
+									ui.Icon(c, row.Icon).FontSize(IconLarge).TextColor(iconCol)
+									ui.Text(c, row.Label).FontSize(TypeInput).TextColor(p.Ink).SingleLine()
 									ui.Box(c).Grow(1)
 									if row.Hint != "" {
-										mono(ui.Text(c, row.Hint)).FontSize(9).TextColor(p.InkFaint)
+										mono(ui.Text(c, row.Hint)).FontSize(TypeBadge).TextColor(p.InkFaint)
 									}
 									if i == sh.PaletteHighlight {
 										// The mark is on the row Enter
 										// would run; a footer legend
 										// would only describe it.
-										ui.Icon(c, IconReturn).Label("Run selected command").FontSize(11).TextColor(p.Accent)
+										ui.Icon(c, IconReturn).Label("Run selected command").FontSize(IconCompact).TextColor(p.Accent)
 									}
 								})
 							}
@@ -1206,13 +1206,13 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 			}
 			// The footer reports how many commands matched. How to move
 			// between them is on the highlighted row itself.
-			ui.Row(c).FillWidth().Padding(8, panelPad).AlignItems(ui.Center).
+			ui.Row(c).FillWidth().Padding(Space4, panelPad).AlignItems(ui.Center).
 				Label("Command palette footer").
 				Background(p.Surface).
 				BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).
 				Children(func() {
 					ui.Box(c).Grow(1)
-					mono(ui.Text(c, itoa(availableCommands(h))+" commands")).FontSize(9).TextColor(p.InkFaint)
+					mono(ui.Text(c, itoa(availableCommands(h))+" commands")).FontSize(TypeBadge).TextColor(p.InkFaint)
 				})
 		})
 	})
@@ -1286,7 +1286,7 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 		ui.Column(c).FillWidth().MaxWidth(contentMaxWidth).Background(p.Window).
 			Radius(sheetRadius).
 			Children(func() {
-				ui.Column(c).FillWidth().Padding(14, panelPad, 12, panelPad).
+				ui.Column(c).FillWidth().Padding(Space7, panelPad, Space6, panelPad).
 					BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
 					Children(func() {
 						// The title, the fields and Run are the whole
@@ -1294,15 +1294,15 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 						sheetTitle(c, "Quick ask", p.InkStrong)
 					})
 				ui.Scroll(c).FillWidth().MaxHeight(min(float32(430), max(float32(120), height-230))).Children(func() {
-					ui.Column(c).FillWidth().Padding(12, panelPad, 8, panelPad).Gap(9).Children(func() {
+					ui.Column(c).FillWidth().Padding(Space6, panelPad, Space4, panelPad).Gap(Space4).Children(func() {
 						field := func(label string, build func()) {
-							ui.Column(c).FillWidth().Gap(3).Children(func() {
-								mono(ui.Text(c, label)).FontSize(9).TextColor(p.InkMuted)
+							ui.Column(c).FillWidth().Gap(Space1).Children(func() {
+								mono(ui.Text(c, label)).FontSize(TypeBadge).TextColor(p.InkMuted)
 								build()
 							})
 						}
 						field("Prompt", func() {
-							ui.TextArea(c, &sh.AskPrompt).Label("Prompt").FontSize(12).Lines(2, 5).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskPrompt).Label("Prompt").FontSize(TypeInput).Lines(2, 5).FillWidth().Disabled(sh.AskBusy)
 						})
 						field("Model override", func() {
 							ui.TextInput(c, &sh.AskModel).Placeholder("provider/model").FillWidth().Disabled(sh.AskBusy)
@@ -1313,40 +1313,40 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 						field("Additional directories", func() {
 							// The format rides in the empty control, where
 							// it belongs, instead of a paragraph beside it.
-							ui.TextArea(c, &sh.AskAddDirs).Label("Additional directories").FontSize(12).Placeholder("one absolute path per line").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskAddDirs).Label("Additional directories").FontSize(TypeInput).Placeholder("one absolute path per line").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
 						field("Context limit overrides", func() {
-							ui.TextArea(c, &sh.AskContextLimits).Label("Context limit overrides").FontSize(12).Placeholder("NAME=BYTES|off, one per line").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskContextLimits).Label("Context limit overrides").FontSize(TypeInput).Placeholder("NAME=BYTES|off, one per line").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
-						ui.Column(c).FillWidth().Gap(2).Children(func() {
-							mono(ui.Text(c, "Access")).FontSize(9).TextColor(p.InkMuted)
+						ui.Column(c).FillWidth().Gap(Space1).Children(func() {
+							mono(ui.Text(c, "Access")).FontSize(TypeBadge).TextColor(p.InkMuted)
 							ui.RadioGroup(c, func() {
-								ui.Radio(c, &sh.AskAccess, "auto", "Auto safety review").FontSize(11)
-								ui.Radio(c, &sh.AskAccess, "full-access", "Full access").FontSize(11)
+								ui.Radio(c, &sh.AskAccess, "auto", "Auto safety review").FontSize(TypeControl)
+								ui.Radio(c, &sh.AskAccess, "full-access", "Full access").FontSize(TypeControl)
 							})
 						})
-						ui.Row(c).FillWidth().Gap(18).Children(func() {
-							ui.Column(c).Grow(1).Gap(2).Children(func() {
-								mono(ui.Text(c, "Fast mode")).FontSize(9).TextColor(p.InkMuted)
+						ui.Row(c).FillWidth().Gap(Space9).Children(func() {
+							ui.Column(c).Grow(1).MinWidth(0).Gap(Space1).Children(func() {
+								mono(ui.Text(c, "Fast mode")).FontSize(TypeBadge).TextColor(p.InkMuted)
 								ui.RadioGroup(c, func() {
-									ui.Radio(c, &sh.AskFast, "default", "Default").FontSize(11)
-									ui.Radio(c, &sh.AskFast, "on", "On").FontSize(11)
-									ui.Radio(c, &sh.AskFast, "off", "Off").FontSize(11)
+									ui.Radio(c, &sh.AskFast, "default", "Default").FontSize(TypeControl)
+									ui.Radio(c, &sh.AskFast, "on", "On").FontSize(TypeControl)
+									ui.Radio(c, &sh.AskFast, "off", "Off").FontSize(TypeControl)
 								})
 							})
-							ui.Column(c).Grow(1).Gap(2).Children(func() {
-								mono(ui.Text(c, "Ultra mode")).FontSize(9).TextColor(p.InkMuted)
+							ui.Column(c).Grow(1).MinWidth(0).Gap(Space1).Children(func() {
+								mono(ui.Text(c, "Ultra mode")).FontSize(TypeBadge).TextColor(p.InkMuted)
 								ui.RadioGroup(c, func() {
-									ui.Radio(c, &sh.AskUltra, "default", "Default").FontSize(11)
-									ui.Radio(c, &sh.AskUltra, "on", "On").FontSize(11)
-									ui.Radio(c, &sh.AskUltra, "off", "Off").FontSize(11)
+									ui.Radio(c, &sh.AskUltra, "default", "Default").FontSize(TypeControl)
+									ui.Radio(c, &sh.AskUltra, "on", "On").FontSize(TypeControl)
+									ui.Radio(c, &sh.AskUltra, "off", "Off").FontSize(TypeControl)
 								})
 							})
 						})
-						ui.Column(c).FillWidth().Gap(2).Children(func() {
-							ui.Checkbox(c, &sh.AskNoSave, "Do not save this request as a session").FontSize(11).Disabled(sh.AskBusy)
-							ui.Checkbox(c, &sh.AskStrict, "Restrict gateway providers to the order below").FontSize(11).Disabled(sh.AskBusy)
-							ui.Checkbox(c, &sh.AskNoAdditionalDirs, "Ignore saved additional directories").FontSize(11).Disabled(sh.AskBusy)
+						ui.Column(c).FillWidth().Gap(Space1).Children(func() {
+							ui.Checkbox(c, &sh.AskNoSave, "Do not save this request as a session").FontSize(TypeControl).Disabled(sh.AskBusy)
+							ui.Checkbox(c, &sh.AskStrict, "Restrict gateway providers to the order below").FontSize(TypeControl).Disabled(sh.AskBusy)
+							ui.Checkbox(c, &sh.AskNoAdditionalDirs, "Ignore saved additional directories").FontSize(TypeControl).Disabled(sh.AskBusy)
 						})
 						field("Provider order (optional, comma-separated)", func() {
 							ui.TextInput(c, &sh.AskProviderOrder).Placeholder("gateway-a,gateway-b").FillWidth().Disabled(sh.AskBusy)
@@ -1355,35 +1355,35 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 							ui.TextInput(c, &sh.AskSession).Placeholder("last").FillWidth().Disabled(sh.AskBusy)
 						})
 						field("System prompt override (optional)", func() {
-							ui.TextArea(c, &sh.AskSystem).Label("System prompt").FontSize(12).Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskSystem).Label("System prompt").FontSize(TypeInput).Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
 						field("Image paths (one per line, optional)", func() {
-							ui.TextArea(c, &sh.AskImages).Label("Image paths").FontSize(12).Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+							ui.TextArea(c, &sh.AskImages).Label("Image paths").FontSize(TypeInput).Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
 						})
 						if sh.AskBusy {
-							ui.Text(c, "Running fx ask…").FontSize(11).TextColor(p.InkMuted)
+							ui.Text(c, "Running fx ask…").FontSize(TypeControl).TextColor(p.InkMuted)
 						}
 						if sh.AskProblem != "" {
-							ui.Text(c, sh.AskProblem).FontSize(11).TextColor(p.Danger).Wrap().Selectable()
+							ui.Text(c, sh.AskProblem).FontSize(TypeControl).TextColor(p.Danger).Wrap().Selectable()
 						}
 						if sh.AskOutput != "" {
-							ui.Column(c).FillWidth().Gap(4).Children(func() {
-								mono(ui.Text(c, "Result")).FontSize(9).TextColor(p.InkMuted)
+							ui.Column(c).FillWidth().Gap(Space2).Children(func() {
+								mono(ui.Text(c, "Result")).FontSize(TypeBadge).TextColor(p.InkMuted)
 								if sh.AskMeta != "" {
-									ui.Text(c, sh.AskMeta).Font(MonoFont).FontSize(9).TextColor(p.InkMuted).Wrap()
+									ui.Text(c, sh.AskMeta).Font(MonoFont).FontSize(TypeBadge).TextColor(p.InkMuted).Wrap()
 								}
 								ui.Scroll(c).FillWidth().MaxHeight(180).Children(func() {
-									ui.Text(c, sh.AskOutput).FontSize(12).TextColor(p.Ink).Wrap().Selectable().Padding(8, 10).Background(p.Sunken)
+									ui.Text(c, sh.AskOutput).FontSize(TypeInput).TextColor(p.Ink).Wrap().Selectable().Padding(Space4, Space5).Background(p.Sunken)
 								})
 							})
 						}
 					})
 				})
-				ui.Row(c).FillWidth().Padding(10, panelPad, 12, panelPad).Gap(8).Justify(ui.End).
+				ui.Row(c).FillWidth().Padding(Space5, panelPad, Space6, panelPad).Gap(Space4).Justify(ui.End).
 					BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).Children(func() {
-					ui.Button(c, "Cancel").Padding(7, 14).Radius(controlRadius).TextColor(p.Ink).Disabled(sh.AskBusy).
+					ui.Button(c, "Cancel").Padding(Space3, Space7).Radius(controlRadius).TextColor(p.Ink).Disabled(sh.AskBusy).
 						OnClick(func() { sh.AskOpen = false })
-					ui.PrimaryButton(c, "Run").Background(p.Ink).Padding(7, 14).Disabled(sh.AskBusy).
+					ui.PrimaryButton(c, "Run").Background(p.Ink).Padding(Space3, Space7).Disabled(sh.AskBusy).
 						OnClick(func() {
 							prompt := strings.TrimSpace(sh.AskPrompt)
 							if prompt == "" {
@@ -1463,25 +1463,25 @@ func CenterSteps(c *ui.Context, index, title, subtitle string, steps []Step, pri
 	p := palette(c.Theme())
 	// FillWidth capped at contentMaxWidth: a fixed 560 column overflows
 	// its parent in a narrow window, as the first real run showed.
-	ui.Column(c).Fill().Center().Padding(40, 24).Children(func() {
-		ui.Column(c).FillWidth().MaxWidth(contentMaxWidth).Gap(13).AlignItems(ui.Start).Children(func() {
-			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(9).Children(func() {
-				ui.Row(c).Width(30).Height(30).Center().Radius(5).Background(p.Surface).
+	ui.Column(c).Fill().Center().Padding(Space16, Space12).Children(func() {
+		ui.Column(c).FillWidth().MaxWidth(contentMaxWidth).Gap(Space6).AlignItems(ui.Start).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(Space4).Children(func() {
+				ui.Row(c).Width(30).Height(30).Center().Radius(RadiusControl).Background(p.Surface).
 					BorderWidth(1).BorderColor(p.Edge).Children(func() {
-					ui.Text(c, "fx").Font(MonoFont).FontSize(12).FontWeight(600).TextColor(p.InkStrong)
+					ui.Text(c, "fx").Font(MonoFont).FontSize(TypeInput).FontWeight(600).TextColor(p.InkStrong)
 				})
-				ui.Text(c, "fx").Font(MonoFont).FontSize(26).FontWeight(600).LetterSpacing(-0.6).TextColor(p.InkStrong)
+				ui.Text(c, "fx").Font(MonoFont).FontSize(DisplayTitle).FontWeight(600).LetterSpacing(-0.6).TextColor(p.InkStrong)
 				ui.Box(c).Grow(1)
 				if index != "" {
 					badge(c, p, index, p.Accent)
 				}
 			})
-			ui.Text(c, title).Font(SansFont).FontSize(26).FontWeight(500).LetterSpacing(-0.6).TextColor(p.InkStrong)
+			ui.Text(c, title).Font(SansFont).FontSize(DisplayTitle).FontWeight(500).LetterSpacing(-0.6).TextColor(p.InkStrong)
 			if subtitle != "" {
-				ui.Text(c, subtitle).FontSize(13).TextColor(p.InkMuted)
+				ui.Text(c, subtitle).FontSize(TypeTitle).TextColor(p.InkMuted)
 			}
 			if len(steps) > 0 {
-				ui.Column(c).FillWidth().Padding(16, 0, 0, 0).Children(func() {
+				ui.Column(c).FillWidth().Padding(Space8, Space0, Space0, Space0).Children(func() {
 					hairlineH(c, p)
 					for i, st := range steps {
 						st := st
@@ -1494,14 +1494,14 @@ func CenterSteps(c *ui.Context, index, title, subtitle string, steps []Step, pri
 						case "failed":
 							numCol = p.Danger
 						}
-						ui.Row(c).FillWidth().Padding(11, 0).AlignItems(ui.Center).Gap(14).
+						ui.Row(c).FillWidth().Padding(Space5, Space0).AlignItems(ui.Center).Gap(Space7).
 							BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
 							Children(func() {
-								mono(ui.Text(c, fmt.Sprintf("%02d", i+1))).FontSize(10).TextColor(numCol)
-								ui.Text(c, st.Title).FontSize(12).FontWeight(500).TextColor(p.InkStrong)
+								mono(ui.Text(c, fmt.Sprintf("%02d", i+1))).FontSize(TypeLabel).TextColor(numCol)
+								ui.Text(c, st.Title).FontSize(TypeInput).FontWeight(500).TextColor(p.InkStrong)
 								ui.Box(c).Grow(1)
 								if st.Note != "" {
-									ui.Text(c, st.Note).FontSize(11).TextColor(p.InkMuted).SingleLine()
+									ui.Text(c, st.Note).FontSize(TypeControl).TextColor(p.InkMuted).SingleLine()
 								}
 							})
 					}
@@ -1515,7 +1515,7 @@ func CenterSteps(c *ui.Context, index, title, subtitle string, steps []Step, pri
 				if s.OnClick == nil {
 					continue
 				}
-				ui.Button(c, s.Label).Padding(7, 14).Radius(controlRadius).TextColor(p.Ink).OnClick(s.OnClick)
+				ui.Button(c, s.Label).Padding(Space3, Space7).Radius(controlRadius).TextColor(p.Ink).OnClick(s.OnClick)
 			}
 		})
 	})
@@ -1524,14 +1524,14 @@ func CenterSteps(c *ui.Context, index, title, subtitle string, steps []Step, pri
 // RecentGrid is the picker's list of recent project folders.
 func RecentGrid(c *ui.Context, recents []string, onOpen func(path string)) {
 	p := palette(c.Theme())
-	ui.Column(c).FillWidth().MaxWidth(contentMaxWidth).Gap(4).Children(func() {
+	ui.Column(c).FillWidth().MaxWidth(contentMaxWidth).Gap(Space2).Children(func() {
 		for i, path := range recents {
 			if i >= 6 {
 				break
 			}
 			path := path
 			c.Key(path)
-			row := ui.ButtonBase(c).FillWidth().Padding(10, 12).Gap(11).Radius(4).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Tooltip(ProjectSubtitle(path)).OnClick(func() {
+			row := ui.ButtonBase(c).Label("Open recent "+path).FillWidth().Padding(Space5, Space6).Gap(Space5).Radius(RadiusChip).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Tooltip(ProjectSubtitle(path)).OnClick(func() {
 				if onOpen != nil {
 					onOpen(path)
 				}
@@ -1540,12 +1540,12 @@ func RecentGrid(c *ui.Context, recents []string, onOpen func(path string)) {
 				row.Background(p.SurfaceHi)
 			}
 			row.Children(func() {
-				ui.Icon(c, IconExplorer).FontSize(17).TextColor(p.InkMuted)
-				ui.Column(c).Grow(1).MinWidth(0).Gap(3).Children(func() {
-					ui.Text(c, filepath.Base(path)).FontSize(12).FontWeight(500).TextColor(p.InkStrong).SingleLine()
-					mono(ui.Text(c, ProjectSubtitle(path))).FontSize(9).TextColor(p.InkMuted).SingleLine()
+				ui.Icon(c, IconExplorer).FontSize(IconXL).TextColor(p.InkMuted)
+				ui.Column(c).Grow(1).MinWidth(0).Gap(Space1).Children(func() {
+					ui.Text(c, filepath.Base(path)).FontSize(TypeInput).FontWeight(500).TextColor(p.InkStrong).SingleLine()
+					mono(ui.Text(c, ProjectSubtitle(path))).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine()
 				})
-				ui.Icon(c, IconChevron).FontSize(12).TextColor(p.InkMuted)
+				ui.Icon(c, IconChevron).FontSize(IconSmall).TextColor(p.InkMuted)
 			})
 		}
 	})

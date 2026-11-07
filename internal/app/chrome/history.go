@@ -100,23 +100,23 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 	rows := historyRows(state.Entries, now)
 	sheet(c, &state.Open, p, "Session history", func() {
 		ui.Column(c).FillWidth().Children(func() {
-			ui.Row(c).FillWidth().Padding(10, 14).AlignItems(ui.Center).Children(func() {
+			ui.Row(c).FillWidth().Padding(Space5, Space7).AlignItems(ui.Center).Children(func() {
 				sheetTitle(c, "Session history", p.InkStrong)
 				ui.Box(c).Grow(1)
-				ui.Button(c, "Close").FontSize(11).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).OnClick(func() { state.Open = false })
+				ui.Button(c, "Close").FontSize(TypeControl).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).OnClick(func() { state.Open = false })
 			})
-			ui.Column(c).FillWidth().Padding(0, 14, 10, 14).Gap(8).Children(func() {
-				ui.Row(c).FillWidth().Gap(6).Children(func() {
-					ui.TextInput(c, &state.DraftQuery).Label("Search history titles").Placeholder("Search titles…").FontSize(12).Grow(1).MinWidth(0).OnSubmit(func() { run("search") })
-					ui.Button(c, "Search").FontSize(11).Disabled(h.Run == nil).OnClick(func() { run("search") })
+			ui.Column(c).FillWidth().Padding(Space0, Space7, Space5, Space7).Gap(Space4).Children(func() {
+				ui.Row(c).FillWidth().Gap(Space3).Children(func() {
+					ui.TextInput(c, &state.DraftQuery).Label("Search history titles").Placeholder("Search titles…").FontSize(TypeInput).Grow(1).MinWidth(0).OnSubmit(func() { run("search") })
+					ui.Button(c, "Search").FontSize(TypeControl).Disabled(h.Run == nil).OnClick(func() { run("search") })
 					if strings.TrimSpace(state.DraftQuery) != "" || state.Query != "" {
-						ui.Button(c, "Clear").Label("Clear history search").FontSize(11).OnClick(func() { state.DraftQuery = ""; run("search") })
+						ui.Button(c, "Clear").Label("Clear history search").FontSize(TypeControl).OnClick(func() { state.DraftQuery = ""; run("search") })
 					}
 				})
 				ui.RadioGroup(c, func() {
-					ui.Radio(c, &state.All, false, "This workspace").FontSize(11).OnChange(func() { run("search") })
-					ui.Radio(c, &state.All, true, "All workspaces").FontSize(11).OnChange(func() { run("search") })
-				}).Row().Gap(18).Label("History scope")
+					ui.Radio(c, &state.All, false, "This workspace").FontSize(TypeControl).OnChange(func() { run("search") })
+					ui.Radio(c, &state.All, true, "All workspaces").FontSize(TypeControl).OnChange(func() { run("search") })
+				}).Row().Gap(Space9).Label("History scope")
 				text := fmt.Sprintf("%d sessions loaded", len(state.Entries))
 				if len(state.Entries) == 1 {
 					text = "1 session loaded"
@@ -133,12 +133,12 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 				if state.Deleting {
 					text += " · Deleting…"
 				}
-				mono(ui.Text(c, text)).FontSize(9).TextColor(p.InkMuted)
+				mono(ui.Text(c, text)).FontSize(TypeBadge).TextColor(p.InkMuted)
 				if state.Problem != "" {
-					ui.Text(c, state.Problem).FontSize(11).TextColor(p.Danger).Wrap()
+					ui.Text(c, state.Problem).FontSize(TypeControl).TextColor(p.Danger).Wrap()
 				}
 				if state.ResumeProblem != "" {
-					ui.Text(c, state.ResumeProblem).FontSize(11).TextColor(p.Danger).Wrap()
+					ui.Text(c, state.ResumeProblem).FontSize(TypeControl).TextColor(p.Danger).Wrap()
 				}
 			})
 			ui.Box(c).Height(1).FillWidth().Background(p.Hairline)
@@ -148,7 +148,7 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 					c := row.Context
 					r := rows[row.Index]
 					if r.group != "" {
-						ui.Text(c, r.group).FontSize(11).FontWeight(500).TextColor(p.InkMuted).Padding(12, 14, 6, 14)
+						ui.Text(c, r.group).FontSize(TypeControl).FontWeight(500).TextColor(p.InkMuted).Padding(Space6, Space7, Space3, Space7)
 						return
 					}
 					e := state.Entries[r.index]
@@ -157,68 +157,72 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 						title = e.ID
 					}
 					live := h.Live[e.ID]
-					line := ui.Row(c).FillWidth().Padding(0, 14, 0, 6).Gap(2).AlignItems(ui.Center)
-					if e.ID == h.ActiveID {
-						line.Background(p.Sunken)
-					} else if line.Hovered() {
-						line.Background(p.SurfaceHi)
-					}
-					line.Children(func() {
-						button := ui.ButtonBase(c).Label("Resume history "+e.ID).Grow(1).MinWidth(0).Padding(9, 0).Gap(3).Column().AlignItems(ui.Stretch).Disabled(h.Resume == nil || state.Deleting).OnClick(func() {
-							if h.Resume != nil && !state.Deleting {
-								h.Resume(e.ID, e.Workspace)
-							}
-						})
-						button.Children(func() {
-							// The row is the sidebar History section's row
-							// at drawer width: clock icon, 12px title, the
-							// 10px turn count at the right edge, and the
-							// 10px relative time under the title.
-							ui.Row(c).FillWidth().Gap(8).AlignItems(ui.Center).Children(func() {
-								ui.Icon(c, IconClock).FontSize(13).TextColor(p.InkMuted).Shrink(0)
-								ui.Text(c, title).FontSize(12).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
-								if e.Turns > 0 {
-									ui.Text(c, itoa(e.Turns)+" turns").FontSize(10).TextColor(p.InkMuted).SingleLine().Shrink(0)
-								}
-								if e.ID == h.ActiveID {
-									ui.Text(c, "Current").FontSize(10).TextColor(p.InkMuted).Shrink(0)
-								} else if live {
-									ui.Text(c, "Open").FontSize(10).TextColor(p.InkMuted).Shrink(0)
+					// The sidebar marks its selected history row with a
+					// rounded SurfaceHi chip inset 8px from both list edges.
+					// The drawer once painted a flat, full-bleed Sunken band
+					// instead, so the same list read as two different
+					// controls. The outer row supplies the inset; the inner
+					// one is the surface that lights up.
+					ui.Row(c).FillWidth().Padding(Space0, Space4).Children(func() {
+						line := ui.Row(c).FillWidth().Padding(Space0, Space3, Space0, Space3).Gap(Space1).AlignItems(ui.Center).Radius(controlRadius).Label("History row " + e.ID)
+						stateSurface(line, p, e.ID == h.ActiveID, line.Hovered())
+						line.Children(func() {
+							button := ui.ButtonBase(c).Label("Resume history "+e.ID).Grow(1).MinWidth(0).Padding(Space4, Space0).Gap(Space1).Column().AlignItems(ui.Stretch).Disabled(h.Resume == nil || state.Deleting).OnClick(func() {
+								if h.Resume != nil && !state.Deleting {
+									h.Resume(e.ID, e.Workspace)
 								}
 							})
-							when := ""
-							if h.Rel != nil {
-								when = h.Rel(e.UpdatedAtMS)
-							}
-							if when != "" || state.All {
-								ui.Row(c).FillWidth().Gap(6).Padding(0, 0, 0, 21).Children(func() {
-									if when != "" {
-										ui.Text(c, when).FontSize(10).TextColor(p.InkMuted).SingleLine().Shrink(0)
+							button.Children(func() {
+								// The row is the sidebar History section's row
+								// at drawer width: clock icon, 12px title, the
+								// 10px turn count at the right edge, and the
+								// 10px relative time under the title.
+								ui.Row(c).FillWidth().Gap(Space4).AlignItems(ui.Center).Children(func() {
+									ui.Icon(c, IconClock).FontSize(IconMedium).TextColor(p.InkMuted).Shrink(0)
+									ui.Text(c, title).FontSize(TypeInput).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
+									if e.Turns > 0 {
+										ui.Text(c, itoa(e.Turns)+" turns").FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine().Shrink(0)
 									}
-									if state.All && e.Workspace != "" {
-										ui.Text(c, e.Workspace).FontSize(10).TextColor(p.InkMuted).MinWidth(0).SingleLine().Tooltip(e.Workspace)
+									if e.ID == h.ActiveID {
+										ui.Text(c, "Current").FontSize(TypeLabel).TextColor(p.InkMuted).Shrink(0)
+									} else if live {
+										ui.Text(c, "Open").FontSize(TypeLabel).TextColor(p.InkMuted).Shrink(0)
 									}
+								})
+								when := ""
+								if h.Rel != nil {
+									when = h.Rel(e.UpdatedAtMS)
+								}
+								if when != "" || state.All {
+									ui.Row(c).FillWidth().Gap(Space3).Padding(Space0, Space0, Space0, Space10).Children(func() {
+										if when != "" {
+											ui.Text(c, when).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine().Shrink(0)
+										}
+										if state.All && e.Workspace != "" {
+											ui.Text(c, e.Workspace).FontSize(TypeLabel).TextColor(p.InkMuted).MinWidth(0).SingleLine().Tooltip(e.Workspace)
+										}
+									})
+								}
+							})
+							if h.Delete != nil {
+								del := ui.Button(c, "").Label("Delete saved session " + e.ID).
+									Tooltip(historyDeleteTip(live)).Width(28).Height(28).Padding(Space0).Radius(RadiusChip).
+									BorderWidth(0).Background(ui.Color{}).Disabled(live || state.Deleting).
+									OnClick(func() {
+										if h.Delete != nil && !live && !state.Deleting {
+											h.Delete(e.ID, title)
+										}
+									})
+								col := p.InkMuted
+								if del.Hovered() && !live && !state.Deleting {
+									col = p.Danger
+									del.Background(p.Danger.Alpha(0.10))
+								}
+								del.Children(func() {
+									ui.Icon(c, IconTrash).FontSize(IconLarge).TextColor(col)
 								})
 							}
 						})
-						if h.Delete != nil {
-							del := ui.Button(c, "").Label("Delete saved session " + e.ID).
-								Tooltip(historyDeleteTip(live)).Width(28).Height(28).Padding(0).Radius(4).
-								BorderWidth(0).Background(ui.Color{}).Disabled(live || state.Deleting).
-								OnClick(func() {
-									if h.Delete != nil && !live && !state.Deleting {
-										h.Delete(e.ID, title)
-									}
-								})
-							col := p.InkMuted
-							if del.Hovered() && !live && !state.Deleting {
-								col = p.Danger
-								del.Background(ui.RGBA(p.Danger.R, p.Danger.G, p.Danger.B, 0.10))
-							}
-							del.Children(func() {
-								ui.Icon(c, IconTrash).FontSize(14).TextColor(col)
-							})
-						}
 					})
 				})
 			} else {
@@ -233,13 +237,13 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 						message = "No matches yet."
 					}
 				}
-				ui.Text(c, message).FontSize(12).TextColor(p.InkMuted).Wrap().Padding(24, 14)
+				ui.Text(c, message).FontSize(TypeInput).TextColor(p.InkMuted).Wrap().Padding(Space12, Space7)
 			}
-			ui.Row(c).FillWidth().Padding(10, 14).Gap(8).AlignItems(ui.Center).BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).Children(func() {
-				ui.Button(c, "Refresh").FontSize(11).OnClick(func() { run("search") }).Disabled(h.Run == nil || state.Deleting)
+			ui.Row(c).FillWidth().Padding(Space5, Space7).Gap(Space4).AlignItems(ui.Center).BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).Children(func() {
+				ui.Button(c, "Refresh").FontSize(TypeControl).OnClick(func() { run("search") }).Disabled(h.Run == nil || state.Deleting)
 				if h.Clear != nil && state.Query == "" && len(state.Entries) > 0 {
 					clear := ui.Button(c, "Clear all").Label("Clear all session history").
-						Tooltip("Delete saved sessions in this scope").FontSize(11).
+						Tooltip("Delete saved sessions in this scope").FontSize(TypeControl).
 						BorderWidth(0).Background(p.Surface).TextColor(p.Danger).
 						Disabled(state.Deleting).OnClick(func() {
 						if h.Clear != nil && !state.Deleting {
@@ -247,7 +251,7 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 						}
 					})
 					if clear.Hovered() && !state.Deleting {
-						clear.Background(ui.RGBA(p.Danger.R, p.Danger.G, p.Danger.B, 0.10))
+						clear.Background(p.Danger.Alpha(0.10))
 					}
 				}
 				ui.Box(c).Grow(1)
@@ -256,9 +260,9 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 					if state.Problem != "" {
 						label = "Retry"
 					}
-					ui.Button(c, label).Label("Load more history").FontSize(11).Disabled(state.Busy || state.Deleting || h.Run == nil).OnClick(func() { run("more") })
+					ui.Button(c, label).Label("Load more history").FontSize(TypeControl).Disabled(state.Busy || state.Deleting || h.Run == nil).OnClick(func() { run("more") })
 				} else if state.Loaded && !state.Busy && !state.Deleting {
-					ui.Text(c, "End of history").FontSize(11).TextColor(p.InkMuted)
+					ui.Text(c, "End of history").FontSize(TypeControl).TextColor(p.InkMuted)
 				}
 			})
 		})

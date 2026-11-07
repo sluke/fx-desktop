@@ -68,13 +68,13 @@ func consoleDrawer(c *ui.Context, h Host, sh *ShellState, p Palette) {
 
 func consoleTabs(c *ui.Context, h Host, sh *ShellState, p Palette) {
 	d := h.Console
-	ui.Row(c).Shrink(0).FillWidth().Height(consoleTabHeight).AlignItems(ui.Center).Gap(8).
-		Padding(0, 8).Background(p.Surface).
+	ui.Row(c).Shrink(0).FillWidth().Height(consoleTabHeight).AlignItems(ui.Center).Gap(Space4).
+		Padding(Space0, Space4).Background(p.Surface).
 		BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
 		Children(func() {
 			// Runs scroll rather than shrink: a tab showing three letters of
 			// a command name names nothing.
-			ui.ScrollHorizontal(c).Grow(1).MinWidth(0).Gap(4).Children(func() {
+			ui.ScrollHorizontal(c).Grow(1).MinWidth(0).Gap(Space2).Children(func() {
 				for _, run := range d.Runs {
 					consoleTab(c, h, p, run, run.ID == sh.ConsoleRun)
 				}
@@ -83,8 +83,8 @@ func consoleTabs(c *ui.Context, h Host, sh *ShellState, p Palette) {
 			// tab strip needs no sentence about what a click would do.
 			if h.Actions.ToggleConsole != nil {
 				ui.Button(c, "✕").Label("Hide console").Tooltip("Hide console (⌘J)").
-					FontSize(11).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
-					Padding(2, 6).OnClick(h.Actions.ToggleConsole)
+					FontSize(TypeControl).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
+					Padding(Space1, Space3).OnClick(h.Actions.ToggleConsole)
 			}
 		})
 }
@@ -96,16 +96,16 @@ func consoleTab(c *ui.Context, h Host, p Palette, run ConsoleRun, active bool) {
 	}
 	c.Key(run.ID)
 	tab := ui.ButtonBase(c).Label(run.Title).Tooltip(consoleRunTooltip(run)).
-		Padding(4, 8).Radius(controlRadius).AlignItems(ui.Center).Gap(6).Shrink(0).Background(bg)
+		Padding(Space2, Space4).Radius(controlRadius).AlignItems(ui.Center).Gap(Space3).Shrink(0).Background(bg)
 	if h.Actions.SelectConsole != nil {
 		tab.OnClick(func() { h.Actions.SelectConsole(run.ID) })
 	}
 	tab.Children(func() {
-		mono(ui.Text(c, run.Title)).FontSize(10).TextColor(p.InkStrong).SingleLine()
-		mono(ui.Text(c, consoleRunState(run))).FontSize(9).TextColor(consoleRunColor(run, p)).Shrink(0)
+		mono(ui.Text(c, run.Title)).FontSize(TypeLabel).TextColor(p.InkStrong).SingleLine()
+		mono(ui.Text(c, consoleRunState(run))).FontSize(TypeBadge).TextColor(consoleRunColor(run, p)).Shrink(0)
 		if h.Actions.CloseConsoleRun != nil {
 			ui.Button(c, "✕").Label("Close "+run.Title).Tooltip("Close this run").
-				FontSize(10).Padding(2, 4).BorderWidth(0).Background(bg).TextColor(p.InkMuted).
+				FontSize(TypeLabel).Padding(Space1, Space2).BorderWidth(0).Background(bg).TextColor(p.InkMuted).
 				OnClick(func() { h.Actions.CloseConsoleRun(run.ID) })
 		}
 	})

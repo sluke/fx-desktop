@@ -2,6 +2,7 @@ package chrome
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
 	"time"
@@ -317,4 +318,76 @@ func TestHistoryRowsMatchTheSidebarRowStyle(t *testing.T) {
 	if title.X-refTitle.X < rowPad {
 		t.Fatalf("row title starts at x=%.1f, left of an icon gutter", title.X)
 	}
+}
+
+// The sidebar marks its selected history row with a rounded SurfaceHi chip
+// inset from the list edges. The drawer used to paint a flat, full-bleed
+// Sunken band across the whole row instead, so the two lists read as
+// different controls even though they show the same sessions.
+func TestHistorySelectedRowMatchesTheSidebarSelection(t *testing.T) {
+	now := time.Now()
+	h, sh := testHost()
+	h.Appearance = "light"
+	h.Actions.OpenHistory = noop
+	sh.History = HistoryState{Open: true, Loaded: true, Exhausted: true, Entries: []HistorySession{
+		{ID: "a", Title: "First conversation", UpdatedAtMS: now.Add(-2 * time.Minute).UnixMilli(), Turns: 3},
+		{ID: "b", Title: "Second conversation", UpdatedAtMS: now.Add(-5 * time.Minute).UnixMilli(), Turns: 6},
+	}}
+	h.History = HistoryHost{
+		Run:      func(string) {},
+		ActiveID: "b",
+		Now:      now,
+		Rel:      func(int64) string { return "5m ago" },
+	}
+	var p Palette
+	ts := ui.NewTester(func(c *ui.Context) {
+		Frame(c, h)
+		p = palette(c.Theme())
+	}, 720, 560)
+	ts.SetDark(false)
+	ts.Frame()
+
+	list, ok := ts.Find("History results")
+	if !ok {
+		t.Fatal("the history list is missing")
+	}
+	active, ok := ts.Find("History row b")
+	if !ok {
+		t.Fatal("the selected row's surface is missing")
+	}
+	if gutter := active.X - list.X; gutter < 8 {
+		t.Errorf("selection starts %.1fpx from the list edge, want the sidebar's 8px inset", gutter)
+	}
+	if gutter := list.X + list.W - (active.X + active.W); gutter < 8 {
+		t.Errorf("selection ends %.1fpx from the list edge, want the sidebar's 8px inset", gutter)
+	}
+	if active.Y < 0 || active.Y+active.H > 560 {
+		t.Fatalf("selection rect is off-frame: %+v", active)
+	}
+
+	img := ts.Image()
+	// Two points inside the selection: the top edge clear of the row's text,
+	// and the top-left corner. A square band fills both; the sidebar's
+	// rounded chip leaves the corner showing the panel behind it.
+	interior := img.RGBAAt(int(active.X)+12, int(active.Y)+2)
+	corner := img.RGBAAt(int(active.X)+1, int(active.Y)+1)
+	want := p.SurfaceHi
+	if interior.R != want.R || interior.G != want.G || interior.B != want.B {
+		t.Errorf("selection is rgb(%d,%d,%d), want the sidebar SurfaceHi rgb(%d,%d,%d)",
+			interior.R, interior.G, interior.B, want.R, want.G, want.B)
+	}
+	if near(corner, interior, 2) {
+		t.Error("selection has square corners; want the sidebar's rounded chip")
+	}
+}
+
+func near(a, b color.RGBA, tol int) bool {
+	return absInt(int(a.R)-int(b.R)) <= tol && absInt(int(a.G)-int(b.G)) <= tol && absInt(int(a.B)-int(b.B)) <= tol
+}
+
+func absInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }

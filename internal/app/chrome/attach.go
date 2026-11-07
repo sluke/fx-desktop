@@ -438,7 +438,7 @@ func attachmentsRow(c *ui.Context, state *ConversationState, h ConversationHost,
 	if len(state.Attachments) == 0 {
 		return
 	}
-	ui.ScrollHorizontal(c).FillWidth().Shrink(0).Gap(6).Children(func() {
+	ui.ScrollHorizontal(c).FillWidth().Shrink(0).Gap(Space3).Children(func() {
 		for _, a := range state.Attachments {
 			attachmentChip(c, a, h.RemoveAttachment, p)
 		}
@@ -448,24 +448,24 @@ func attachmentsRow(c *ui.Context, state *ConversationState, h ConversationHost,
 // attachmentChip is one image: its picture, what it is, and a way to take it
 // back before it is sent.
 func attachmentChip(c *ui.Context, a Attachment, onRemove func(id uint64), p Palette) {
-	ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(7).Padding(4, 6).Radius(4).
+	ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(Space3).Padding(Space2, Space3).Radius(RadiusChip).
 		Background(p.SurfaceHi).BorderWidth(1).BorderColor(p.Hairline).
 		Tooltip(a.Name + " · " + a.MimeType).
 		Children(func() {
-			thumb := ui.Box(c).Width(26).Height(26).Radius(5).Background(p.Window).Clip()
+			thumb := ui.Box(c).Width(26).Height(26).Radius(RadiusControl).Background(p.Window).Clip()
 			if a.Preview != nil {
 				thumb.Children(func() { ui.Image(c, a.Preview).Fit(ui.Cover).Fill() })
 			}
-			ui.Column(c).Gap(1).Children(func() {
-				mono(ui.Text(c, shortName(a.Name))).FontSize(10).TextColor(p.InkStrong).SingleLine()
+			ui.Column(c).Gap(Space0).Children(func() {
+				mono(ui.Text(c, shortName(a.Name))).FontSize(TypeLabel).TextColor(p.InkStrong).SingleLine()
 				detail := a.SizeLabel()
 				if dims := a.Dimensions(); dims != "" {
 					detail = dims + " · " + detail
 				}
-				mono(ui.Text(c, detail)).FontSize(9).TextColor(p.InkMuted).SingleLine()
+				mono(ui.Text(c, detail)).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine()
 			})
 			if onRemove != nil {
-				ui.Button(c, "✕").Label("Remove image "+a.Name).FontSize(10).Padding(4, 6).BorderWidth(0).
+				ui.Button(c, "✕").Label("Remove image "+a.Name).FontSize(TypeLabel).Padding(Space2, Space3).BorderWidth(0).
 					Background(p.SurfaceHi).TextColor(p.InkMuted).
 					OnClick(func() { onRemove(a.ID) })
 			}

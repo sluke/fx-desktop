@@ -241,30 +241,30 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 		// that must never scroll out of view, and the transcript below it
 		// keeps its own scroll position while the user decides (§4.2).
 		if permission := h.Permission; permission != nil {
-			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(16, 24, 0, 24).Shrink(0).Children(func() {
+			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(Space8, Space12, Space0, Space12).Shrink(0).Children(func() {
 				ui.Column(c).FillWidth().MaxWidth(contentWidth).Children(func() {
 					permissionCard(c, h, p, permission)
 				})
 			})
 		}
 		if len(h.Messages) == 0 {
-			ui.Column(c).Grow(1).FillWidth().MinHeight(0).Center().Padding(24).Children(func() {
-				ui.Column(c).FillWidth().MaxWidth(contentWidth).AlignItems(ui.Center).Gap(11).Children(func() {
-					ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Column(c).Grow(1).FillWidth().MinHeight(0).Center().Padding(Space12).Children(func() {
+				ui.Column(c).FillWidth().MaxWidth(contentWidth).AlignItems(ui.Center).Gap(Space5).Children(func() {
+					ui.Row(c).AlignItems(ui.Center).Gap(Space4).Children(func() {
 						signalDot(c, p.Accent, 6)
-						mono(ui.Text(c, "AGENT WORKSPACE")).FontSize(9).FontWeight(600).LetterSpacing(1.2).TextColor(p.InkMuted)
+						mono(ui.Text(c, "AGENT WORKSPACE")).FontSize(TypeBadge).FontWeight(600).LetterSpacing(1.2).TextColor(p.InkMuted)
 					})
 					// The empty state is conversation content, not window
 					// chrome: it stays on the workhorse face so this prompt
 					// and the first message read in one voice. Geist is for
 					// top-level headers, modal titles and navigation.
-					ui.Text(c, "What are we working on?").Font(MonoFont).FontSize(27).FontWeight(500).LetterSpacing(-.6).TextColor(p.InkStrong).TextAlign(ui.Center)
+					ui.Text(c, "What are we working on?").Font(MonoFont).FontSize(DisplayLead).FontWeight(500).LetterSpacing(-.6).TextColor(p.InkStrong).TextAlign(ui.Center)
 					// The composer below is the affordance: a lede sentence
 					// explaining "ask a question" would only restate it.
 					if h.Project != "" {
-						ui.Row(c).AlignItems(ui.Center).Gap(6).Padding(2, 8).Radius(3).
+						ui.Row(c).AlignItems(ui.Center).Gap(Space3).Padding(Space1, Space4).Radius(RadiusChip).
 							Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
-							mono(ui.Text(c, h.Project)).FontSize(10).TextColor(p.InkMuted).SingleLine()
+							mono(ui.Text(c, h.Project)).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
 						})
 					}
 				})
@@ -273,9 +273,9 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 			ui.List(c, &state.List, len(h.Messages), func(i int) {
 				m := h.Messages[i]
 				ui.Column(c).FillWidth().AlignItems(ui.Center).Children(func() {
-					ui.Column(c).FillWidth().MaxWidth(contentWidth).Gap(10).Children(func() { conversationMessage(c, state, m, p, h.Changed) })
+					ui.Column(c).FillWidth().MaxWidth(contentWidth).Gap(Space5).Children(func() { conversationMessage(c, state, m, p, h.Changed) })
 				})
-			}).Grow(1).MinHeight(0).FillWidth().Padding(30, 24, 20, 24).Gap(28)
+			}).Grow(1).MinHeight(0).FillWidth().Padding(Space16, Space12, Space10, Space12).Gap(Space12)
 		}
 		// Between submit and the first streamed token there is nothing in
 		// the transcript to show for the turn. Say so where the reply will
@@ -286,26 +286,26 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 			// sits in the reading column, on the same left edge as every
 			// other line of the transcript, and carries the same author
 			// mark the message it precedes will carry.
-			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(6, 24, 6, 24).Shrink(0).Children(func() {
+			ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(Space3, Space12, Space3, Space12).Shrink(0).Children(func() {
 				ui.Column(c).FillWidth().MaxWidth(contentWidth).Children(func() {
-					ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+					ui.Row(c).AlignItems(ui.Center).Gap(Space3).Children(func() {
 						signalDot(c, p.Accent, 6)
 						strongText(c, "fx", p.InkStrong)
 						ui.Box(c).Width(3).Shrink(0)
-						ui.Text(c, "Thinking…").FontSize(12).TextColor(p.InkMuted)
+						ui.Text(c, "Thinking…").FontSize(TypeInput).TextColor(p.InkMuted)
 					})
 				})
 			})
 		}
-		ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(8, 24, 8, 24).Gap(8).Shrink(0).Children(func() {
-			ui.Column(c).FillWidth().MaxWidth(contentWidth).Gap(8).Children(func() {
+		ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(Space4, Space12, Space4, Space12).Gap(Space4).Shrink(0).Children(func() {
+			ui.Column(c).FillWidth().MaxWidth(contentWidth).Gap(Space4).Children(func() {
 				if len(h.Notices) > 0 {
-					ui.Button(c, fmt.Sprintf("Session notices (%d)", len(h.Notices))).FontSize(11).TextColor(p.InkMuted).BorderWidth(0).Background(p.Window).Padding(4, 0).OnClick(func() { state.NoticesOpen = !state.NoticesOpen })
+					ui.Button(c, fmt.Sprintf("Session notices (%d)", len(h.Notices))).FontSize(TypeControl).TextColor(p.InkMuted).BorderWidth(0).Background(p.Window).Padding(Space2, Space0).OnClick(func() { state.NoticesOpen = !state.NoticesOpen })
 					if state.NoticesOpen {
 						ui.Scroll(c).FillWidth().MaxHeight(100).Children(func() {
-							ui.Column(c).FillWidth().Gap(8).Padding(10, 12).Background(p.Surface).Children(func() {
+							ui.Column(c).FillWidth().Gap(Space4).Padding(Space5, Space6).Background(p.Surface).Children(func() {
 								for _, notice := range h.Notices {
-									ui.Text(c, notice).FontSize(11).TextColor(p.InkMuted).Selectable()
+									ui.Text(c, notice).FontSize(TypeControl).TextColor(p.InkMuted).Selectable()
 								}
 							})
 						})
@@ -317,9 +317,9 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 					})
 				}
 				if h.Problem != "" {
-					ui.Column(c).FillWidth().Padding(10, 14).Gap(4).Radius(10).Background(p.Surface).Children(func() {
-						ui.Text(c, "fx needs attention").FontSize(12).FontWeight(500).TextColor(p.Danger)
-						ui.Text(c, h.Problem).FontSize(12).TextColor(p.InkMuted).Selectable()
+					ui.Column(c).FillWidth().Padding(Space5, Space7).Gap(Space2).Radius(RadiusSheet).Background(p.Surface).Children(func() {
+						ui.Text(c, "fx needs attention").FontSize(TypeInput).FontWeight(500).TextColor(p.Danger)
+						ui.Text(c, h.Problem).FontSize(TypeInput).TextColor(p.InkMuted).Selectable()
 					})
 				}
 				if state.AdvancedOpen {
@@ -333,7 +333,7 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 				// message being written belongs to that message. It only
 				// takes files when fx can take images — a drop that can
 				// never be sent must not look like it landed.
-				composer := ui.Column(c).FillWidth().Padding(10, 12, 8, 12).Gap(6).Radius(8).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline)
+				composer := ui.Column(c).FillWidth().Padding(Space5, Space6, Space4, Space6).Gap(Space3).Radius(RadiusBubble).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline)
 				if h.CanAttach {
 					if paths := composer.DroppedFiles(); len(paths) > 0 && h.AttachFiles != nil {
 						h.AttachFiles(paths)
@@ -347,13 +347,13 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 						attachmentsRow(c, state, h, p)
 					}
 					var field ui.Element
-					ui.Row(c).FillWidth().AlignItems(ui.Start).Gap(8).Children(func() {
-						mono(ui.Text(c, "❯")).FontSize(13).TextColor(p.Accent).Padding(4, 0, 0, 2).Shrink(0)
+					ui.Row(c).FillWidth().AlignItems(ui.Start).Gap(Space4).Children(func() {
+						mono(ui.Text(c, "❯")).FontSize(TypeTitle).TextColor(p.Accent).Padding(Space2, Space0, Space0, Space1).Shrink(0)
 						// The prompt and the options under it are one strip:
 						// they share a size so the composer reads as one
 						// block instead of a headline over a caption.
 						field = ui.TextAreaBase(c, &state.Draft).Label("Message fx").Placeholder("Ask fx anything about this project…").Lines(1, 5).MinHeight(32).Grow(1).MinWidth(0).
-							Bind(&state.Input).AutoFocus().Background(p.Surface).BorderWidth(0).FontSize(configLabelSize).Padding(4, 2).
+							Bind(&state.Input).AutoFocus().Background(p.Surface).BorderWidth(0).FontSize(configLabelSize).Padding(Space2, Space1).
 							OnTextKey(func(k ui.TextKey) bool {
 								if mentionKey(state, h, k) {
 									return true
@@ -382,16 +382,16 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 						// cannot take that kind of content.
 						if h.CanMention {
 							ui.Button(c, "@").Label("Mention a file").Tooltip("Mention a file (@)").
-								Font(MonoFont).FontSize(13).Padding(4, 7).Shrink(0).Radius(controlRadius).
+								Font(MonoFont).FontSize(TypeTitle).Padding(Space2, Space3).Shrink(0).Radius(controlRadius).
 								BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
 								OnClick(func() { startMention(state, h) })
 						}
 						if h.CanAttach && h.PickImage != nil {
 							ui.Button(c, "").Label("Attach image").Tooltip("Attach image…").
-								Padding(4, 7).Shrink(0).Radius(controlRadius).
+								Padding(Space2, Space3).Shrink(0).Radius(controlRadius).
 								BorderWidth(0).Background(p.Surface).
 								OnClick(h.PickImage).
-								Children(func() { ui.Icon(c, IconImage).FontSize(14).TextColor(p.InkMuted) })
+								Children(func() { ui.Icon(c, IconImage).FontSize(IconLarge).TextColor(p.InkMuted) })
 						}
 					})
 					// Taking a mention leaves the caret to be put back: the
@@ -406,7 +406,7 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 					followMention(state, h, field)
 					mentionPicker(c, state, h, p)
 					if state.AttachError != "" {
-						ui.Text(c, state.AttachError).FontSize(11).TextColor(p.Warn).Wrap()
+						ui.Text(c, state.AttachError).FontSize(TypeControl).TextColor(p.Warn).Wrap()
 					}
 					// What fits on the row is measured from the widths of the
 					// things that go on it — the workspace switch, each of fx's
@@ -436,8 +436,8 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 							// with the arrow beside it. Same 16pt icon in a
 							// 16pt-padded circle, so the two buttons are
 							// the same size and centre the same way.
-							ui.Button(c, "").Label("Stop response").Tooltip("Stop response (⌘.)").Padding(8).Radius(16).BorderWidth(0).Background(p.Ink).TextColor(p.OnInk).Disabled(h.Stopping).OnClick(h.Stop).
-								Children(func() { ui.Icon(c, IconStop).FontSize(16).TextColor(p.OnInk) })
+							ui.Button(c, "").Label("Stop response").Tooltip("Stop response (⌘.)").Padding(Space4).Radius(RadiusPill).BorderWidth(0).Background(p.Ink).TextColor(p.OnInk).Disabled(h.Stopping).OnClick(h.Stop).
+								Children(func() { ui.Icon(c, IconStop).FontSize(IconXL).TextColor(p.OnInk) })
 						}
 						// The arrow is drawn, not typed: a text glyph
 						// shifts baseline across platforms. The button
@@ -446,10 +446,10 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 						// glyph is centered by construction. Icons do
 						// not stretch or center reliably inside a
 						// fixed-size button: they follow text metrics.
-						ui.Button(c, "").Label("Send message").Tooltip(sendTooltip(h, state)).Padding(8).Radius(16).BorderWidth(0).Background(p.Ink).TextColor(p.OnInk).
+						ui.Button(c, "").Label("Send message").Tooltip(sendTooltip(h, state)).Padding(Space4).Radius(RadiusPill).BorderWidth(0).Background(p.Ink).TextColor(p.OnInk).
 							Disabled(!h.Ready || h.ConfigChanging || h.Preparing || h.Busy && len(state.Attachments) > 0 ||
 								strings.TrimSpace(state.Draft) == "" && len(state.Attachments) == 0).OnClick(func() { dismissMention(state); send(state.Draft) }).
-							Children(func() { ui.Icon(c, IconArrowUp).FontSize(16).TextColor(p.OnInk) })
+							Children(func() { ui.Icon(c, IconArrowUp).FontSize(IconXL).TextColor(p.OnInk) })
 					})
 				})
 				// No caption under the composer: the field, its two
@@ -671,11 +671,11 @@ func toolOutput(c *ui.Context, state *ConversationState, m ChatMessage, p Palett
 	if text == "" {
 		text = "No additional output."
 	}
-	ui.Column(c).FillWidth().Radius(4).Background(p.Sunken).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
+	ui.Column(c).FillWidth().Radius(RadiusChip).Background(p.Sunken).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
 		if lines, ok := payloadLines(state, m); ok {
 			lines, omitted := capJSONLines(lines, maxToolOutputLines)
 			ui.Scroll(c).FillWidth().MaxHeight(260).Children(func() {
-				jsonText(c, lines, p).FillWidth().Padding(10, 10)
+				jsonText(c, lines, p).FillWidth().Padding(Space5, Space5)
 			})
 			if omitted > 0 {
 				payloadFooter(c, omitted, p)
@@ -691,7 +691,7 @@ func toolOutput(c *ui.Context, state *ConversationState, m ChatMessage, p Palett
 func textPayload(c *ui.Context, text string, p Palette) {
 	payload, omitted := toolPayload(text, maxToolOutputLines)
 	ui.Scroll(c).FillWidth().MaxHeight(260).Children(func() {
-		ui.Text(c, payload).Font(MonoFont).FontSize(jsonSize).TextColor(p.InkMuted).Selectable().FillWidth().Padding(10, 10)
+		ui.Text(c, payload).Font(MonoFont).FontSize(jsonSize).TextColor(p.InkMuted).Selectable().FillWidth().Padding(Space5, Space5)
 	})
 	if omitted > 0 {
 		payloadFooter(c, omitted, p)
@@ -702,7 +702,7 @@ func textPayload(c *ui.Context, text string, p Palette) {
 // run into the last line it kept.
 func payloadFooter(c *ui.Context, omitted int, p Palette) {
 	hairlineH(c, p)
-	mono(ui.Text(c, "… "+itoa(omitted)+" more lines")).FontSize(10).TextColor(p.InkFaint).Padding(6, 10, 8, 10)
+	mono(ui.Text(c, "… "+itoa(omitted)+" more lines")).FontSize(TypeLabel).TextColor(p.InkFaint).Padding(Space3, Space5, Space4, Space5)
 }
 
 // shellOutput is the expanded payload of a shell call. fx's ACP result is a
@@ -712,13 +712,13 @@ func payloadFooter(c *ui.Context, omitted int, p Palette) {
 // the envelope was complete enough to carry one. Only a result that lost
 // something gets a note, under a hairline, so a routine call stays quiet.
 func shellOutput(c *ui.Context, m ChatMessage, p Palette) {
-	ui.Column(c).FillWidth().Radius(4).Background(p.Sunken).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
+	ui.Column(c).FillWidth().Radius(RadiusChip).Background(p.Sunken).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
 		if m.Command != "" {
 			ui.Scroll(c).FillWidth().MaxHeight(200).Children(func() {
 				ui.RichText(c,
 					ui.Span{Text: "$ ", Color: p.InkMuted},
 					ui.Span{Text: m.Command, Color: p.Ink},
-				).Font(MonoFont).FontSize(jsonSize).Selectable().FillWidth().Padding(10, 10)
+				).Font(MonoFont).FontSize(jsonSize).Selectable().FillWidth().Padding(Space5, Space5)
 			})
 		}
 		if m.Text != "" {
@@ -729,16 +729,16 @@ func shellOutput(c *ui.Context, m ChatMessage, p Palette) {
 		}
 		if m.Command == "" && m.Text == "" {
 			ui.Text(c, "No additional output.").Font(MonoFont).FontSize(jsonSize).TextColor(p.InkMuted).
-				FillWidth().Padding(10, 10)
+				FillWidth().Padding(Space5, Space5)
 		}
 		if notes := shellNotes(m.Shell, p); len(notes) > 0 {
 			hairlineH(c, p)
-			ui.Row(c).AlignItems(ui.Center).Gap(6).Padding(6, 10, 8, 10).Children(func() {
+			ui.Row(c).AlignItems(ui.Center).Gap(Space3).Padding(Space3, Space5, Space4, Space5).Children(func() {
 				for i, note := range notes {
 					if i > 0 {
-						mono(ui.Text(c, "·")).FontSize(10).TextColor(p.InkMuted)
+						mono(ui.Text(c, "·")).FontSize(TypeLabel).TextColor(p.InkMuted)
 					}
-					mono(ui.Text(c, note.text)).FontSize(10).TextColor(note.col)
+					mono(ui.Text(c, note.text)).FontSize(TypeLabel).TextColor(note.col)
 				}
 			})
 		}
@@ -788,32 +788,32 @@ func diffBlock(c *ui.Context, state *ConversationState, m ChatMessage, p Palette
 		}
 	}
 	folded := state.DiffFolded[m.ID]
-	ui.Column(c).FillWidth().Radius(6).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
-		ui.ButtonBase(c).Label(fmt.Sprintf("%s +%d −%d", d.Path, added, removed)).FillWidth().Padding(6, panelPad).
+	ui.Column(c).FillWidth().Radius(RadiusControl).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
+		ui.ButtonBase(c).Label(fmt.Sprintf("%s +%d −%d", d.Path, added, removed)).FillWidth().Padding(Space3, panelPad).
 			OnClick(func() {
 				if state.DiffFolded == nil {
 					state.DiffFolded = map[uint64]bool{}
 				}
 				state.DiffFolded[m.ID] = !folded
 			}).Children(func() {
-			ui.Icon(c, IconChevron).FontSize(11).TextColor(p.InkMuted)
-			ui.Text(c, d.Path).Font(MonoFont).FontSize(11).TextColor(p.InkStrong).SingleLine()
+			ui.Icon(c, IconChevron).FontSize(IconCompact).TextColor(p.InkMuted)
+			ui.Text(c, d.Path).Font(MonoFont).FontSize(TypeControl).TextColor(p.InkStrong).SingleLine()
 			ui.Box(c).Grow(1)
 			// The counts are readouts and the hint is an action: squashed
 			// together they read as one token ("+1-1Hide"), so they keep the
 			// row's own gutter between them. The minus is the app's own
 			// (U+2212, as the rail and the review drawer draw it).
-			ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "+"+itoa(added)).FontSize(10).TextColor(p.OK).Shrink(0)
-				ui.Text(c, "−"+itoa(removed)).FontSize(10).TextColor(p.Danger).Shrink(0)
-				ui.Text(c, diffFoldHint(folded)).FontSize(10).TextColor(p.InkMuted).Shrink(0)
+			ui.Row(c).Gap(Space3).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, "+"+itoa(added)).FontSize(TypeLabel).TextColor(p.OK).Shrink(0)
+				ui.Text(c, "−"+itoa(removed)).FontSize(TypeLabel).TextColor(p.Danger).Shrink(0)
+				ui.Text(c, diffFoldHint(folded)).FontSize(TypeLabel).TextColor(p.InkMuted).Shrink(0)
 			})
 		})
 		if folded {
 			return
 		}
 		ui.Scroll(c).FillWidth().MaxHeight(320).Children(func() {
-			ui.Column(c).FillWidth().Padding(0, 0, 6, 0).Children(func() {
+			ui.Column(c).FillWidth().Padding(Space0, Space0, Space3, Space0).Children(func() {
 				diffLines(c, d.Lines, p, maxDiffRenderLines)
 			})
 		})
@@ -839,24 +839,24 @@ func diffLines(c *ui.Context, lines []DiffLine, p Palette, max int) {
 		case DiffDel:
 			mark, col = "-", p.Danger
 		}
-		row := ui.Row(c).FillWidth().AlignItems(ui.Start).Gap(6).Padding(1, panelPad)
+		row := ui.Row(c).FillWidth().AlignItems(ui.Start).Gap(Space3).Padding(Space0, panelPad)
 		switch line.Kind {
 		case DiffAdd:
-			row.Background(ui.RGBA(p.OK.R, p.OK.G, p.OK.B, 0.09))
+			row.Background(p.OK.Alpha(0.09))
 		case DiffDel:
-			row.Background(ui.RGBA(p.Danger.R, p.Danger.G, p.Danger.B, 0.10))
+			row.Background(p.Danger.Alpha(0.10))
 		}
 		row.Children(func() {
-			ui.Text(c, mark).Font(MonoFont).FontSize(11).TextColor(col).Shrink(0)
+			ui.Text(c, mark).Font(MonoFont).FontSize(TypeControl).TextColor(col).Shrink(0)
 			if line.Text == "" {
-				ui.Text(c, " ").Font(MonoFont).FontSize(11).TextColor(col).FillWidth()
+				ui.Text(c, " ").Font(MonoFont).FontSize(TypeControl).TextColor(col).FillWidth()
 				return
 			}
-			ui.Text(c, line.Text).Font(MonoFont).FontSize(11).TextColor(col).FillWidth()
+			ui.Text(c, line.Text).Font(MonoFont).FontSize(TypeControl).TextColor(col).FillWidth()
 		})
 	}
 	if omitted := len(lines) - shown; omitted > 0 {
-		ui.Text(c, fmt.Sprintf("… %d more lines", omitted)).FontSize(10).TextColor(p.InkMuted).Padding(4, panelPad)
+		ui.Text(c, fmt.Sprintf("… %d more lines", omitted)).FontSize(TypeLabel).TextColor(p.InkMuted).Padding(Space2, panelPad)
 	}
 }
 
@@ -870,12 +870,12 @@ func diffFoldHint(folded bool) string {
 // permissionCard is the sticky approval block: what fx wants to do, the
 // affected surface, and the scope buttons (once / session / deny).
 func permissionCard(c *ui.Context, h ConversationHost, p Palette, permission *ChatPermission) {
-	ui.Column(c).FillWidth().Padding(12, 14).Gap(9).Radius(6).Background(p.Surface).BorderWidth(1).BorderColor(p.Warn).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(7).Children(func() {
+	ui.Column(c).FillWidth().Padding(Space6, Space7).Gap(Space4).Radius(RadiusControl).Background(p.Surface).BorderWidth(1).BorderColor(p.Warn).Children(func() {
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(Space3).Children(func() {
 			signalDot(c, p.Warn, 6)
-			mono(ui.Text(c, "Approval required")).FontSize(10).FontWeight(600).LetterSpacing(0.4).TextColor(p.Warn)
+			mono(ui.Text(c, "Approval required")).FontSize(TypeLabel).FontWeight(600).LetterSpacing(0.4).TextColor(p.Warn)
 		})
-		ui.Text(c, permission.Title).FontSize(13).TextColor(p.Ink)
+		ui.Text(c, permission.Title).FontSize(TypeTitle).TextColor(p.Ink)
 		if permission.Detail != "" {
 			ui.Scroll(c).FillWidth().MaxHeight(100).Children(func() {
 				// The detail is fx's raw input for the call: usually JSON.
@@ -886,13 +886,13 @@ func permissionCard(c *ui.Context, h ConversationHost, p Palette, permission *Ch
 					jsonText(c, lines, p).FillWidth()
 					return
 				}
-				ui.Text(c, permission.Detail).FontSize(11).TextColor(p.InkMuted).Selectable()
+				ui.Text(c, permission.Detail).FontSize(TypeControl).TextColor(p.InkMuted).Selectable()
 			})
 		}
-		ui.Row(c).FillWidth().Gap(8).Children(func() {
+		ui.Row(c).FillWidth().Gap(Space4).Children(func() {
 			for _, option := range permission.Options {
 				option := option
-				ui.Button(c, option.Name).FontSize(11).Padding(7, 10).Disabled(h.Stopping).OnClick(func() {
+				ui.Button(c, option.Name).FontSize(TypeControl).Padding(Space3, Space5).Disabled(h.Stopping).OnClick(func() {
 					if h.ChoosePermission != nil {
 						h.ChoosePermission(permission.ID, option.ID)
 					}
@@ -921,17 +921,17 @@ func thinkingPending(h ConversationHost) bool {
 func conversationMessage(c *ui.Context, state *ConversationState, m ChatMessage, p Palette, changed func()) {
 	switch m.Role {
 	case "user":
-		ui.Column(c).FillWidth().AlignItems(ui.End).Gap(6).Children(func() {
+		ui.Column(c).FillWidth().AlignItems(ui.End).Gap(Space3).Children(func() {
 			// What was sent with the words, so a message written to go with a
 			// screenshot still reads as that message weeks later.
 			for _, name := range m.Images {
-				ui.Row(c).MaxWidth(600).Padding(7, 12).Radius(14).Background(p.SurfaceHi).
-					AlignItems(ui.Center).Gap(6).Children(func() {
-					ui.Icon(c, IconImage).FontSize(12).TextColor(p.InkMuted)
-					ui.Text(c, name).FontSize(12).TextColor(p.InkMuted).SingleLine()
+				ui.Row(c).MaxWidth(600).Padding(Space3, Space6).Radius(RadiusPill).Background(p.SurfaceHi).
+					AlignItems(ui.Center).Gap(Space3).Children(func() {
+					ui.Icon(c, IconImage).FontSize(IconSmall).TextColor(p.InkMuted)
+					ui.Text(c, name).FontSize(TypeInput).TextColor(p.InkMuted).SingleLine()
 				})
 			}
-			ui.Text(c, m.Text).Selectable().FontSize(14).TextColor(p.Ink).MaxWidth(600).Padding(10, 14).Radius(8).Background(p.SurfaceHi)
+			ui.Text(c, m.Text).Selectable().FontSize(ContentBody).TextColor(p.Ink).MaxWidth(600).Padding(Space5, Space7).Radius(RadiusBubble).Background(p.SurfaceHi)
 		})
 	case "tool":
 		expanded := state.Expanded[m.ID]
@@ -970,21 +970,21 @@ func conversationMessage(c *ui.Context, state *ConversationState, m ChatMessage,
 				}
 			}
 		}
-		ui.Column(c).FillWidth().Gap(6).Children(func() {
-			ui.ButtonBase(c).Label(fmt.Sprintf("%s — %s", label, toolStateLabel(m.Status))).FillWidth().Padding(7, 10).Gap(8).Radius(4).
+		ui.Column(c).FillWidth().Gap(Space3).Children(func() {
+			ui.ButtonBase(c).Label(fmt.Sprintf("%s — %s", label, toolStateLabel(m.Status))).FillWidth().Padding(Space3, Space5).Gap(Space4).Radius(RadiusChip).
 				Background(p.Sunken).BorderWidth(1).BorderColor(p.Hairline).OnClick(func() { state.Expanded[m.ID] = !expanded }).Children(func() {
 				// The chevron is the disclosure: it has to say which way the
 				// payload is folded.
-				chevron := ui.Icon(c, IconChevron).FontSize(11).TextColor(p.InkFaint)
+				chevron := ui.Icon(c, IconChevron).FontSize(IconCompact).TextColor(p.InkFaint)
 				if expanded {
 					chevron.Rotate(90)
 				}
-				mono(ui.Text(c, "❯")).FontSize(10).TextColor(p.Accent)
-				ui.Text(c, label).FontSize(12).TextColor(p.Ink).SingleLine()
+				mono(ui.Text(c, "❯")).FontSize(TypeLabel).TextColor(p.Accent)
+				ui.Text(c, label).FontSize(TypeInput).TextColor(p.Ink).SingleLine()
 				ui.Box(c).Grow(1)
 				signalDot(c, stateCol, 5)
 				if stateText != "" {
-					mono(ui.Text(c, stateText)).FontSize(9).TextColor(stateCol)
+					mono(ui.Text(c, stateText)).FontSize(TypeBadge).TextColor(stateCol)
 				}
 				if m.Diff != nil {
 					add, del := 0, 0
@@ -996,7 +996,7 @@ func conversationMessage(c *ui.Context, state *ConversationState, m ChatMessage,
 							del++
 						}
 					}
-					mono(ui.Text(c, "+"+itoa(add)+" −"+itoa(del))).FontSize(9).TextColor(p.InkFaint)
+					mono(ui.Text(c, "+"+itoa(add)+" −"+itoa(del))).FontSize(TypeBadge).TextColor(p.InkFaint)
 				}
 			})
 			// The diff is the exception to "tool output starts collapsed":
@@ -1010,9 +1010,9 @@ func conversationMessage(c *ui.Context, state *ConversationState, m ChatMessage,
 			}
 		})
 	case "notice":
-		ui.Text(c, m.Text).FontSize(12).TextColor(p.InkMuted).Selectable()
+		ui.Text(c, m.Text).FontSize(TypeInput).TextColor(p.InkMuted).Selectable()
 	default:
-		ui.Row(c).AlignItems(ui.Center).Gap(7).Children(func() {
+		ui.Row(c).AlignItems(ui.Center).Gap(Space3).Children(func() {
 			signalDot(c, p.Accent, 6)
 			strongText(c, "fx", p.InkStrong)
 		})
@@ -1029,7 +1029,7 @@ func conversationMessage(c *ui.Context, state *ConversationState, m ChatMessage,
 				label = "Copied"
 			}
 			ui.Row(c).FillWidth().Children(func() {
-				ui.Button(c, label).Label(label).FontSize(10).BorderWidth(0).Background(p.Window).TextColor(p.InkMuted).Padding(4, 0).OnClick(func() {
+				ui.Button(c, label).Label(label).FontSize(TypeLabel).BorderWidth(0).Background(p.Window).TextColor(p.InkMuted).Padding(Space2, Space0).OnClick(func() {
 					services.WriteClipboard(m.Text)
 					state.setCopied(m.ID, true, changed)
 					time.AfterFunc(copyFeedbackDuration, func() { state.setCopied(m.ID, false, changed) })

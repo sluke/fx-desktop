@@ -1,6 +1,8 @@
 package chrome
 
 import (
+	"strings"
+
 	"github.com/egoist/mygo/ui"
 )
 
@@ -57,21 +59,21 @@ func reviewDrawer(c *ui.Context, h Host, sh *ShellState, p Palette, width float3
 // branch, and the two ways out (a fresh read, or closing the panel).
 func reviewHeader(c *ui.Context, h Host, p Palette) {
 	d := h.Review
-	ui.Column(c).FillWidth().Shrink(0).Padding(10, panelPad, 8, panelPad).Gap(3).Children(func() {
-		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Children(func() {
-			ui.Icon(c, IconChanges).FontSize(13).TextColor(p.InkMuted)
+	ui.Column(c).FillWidth().Shrink(0).Padding(Space5, panelPad, Space4, panelPad).Gap(Space1).Children(func() {
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(Space4).Children(func() {
+			ui.Icon(c, IconChanges).FontSize(IconMedium).TextColor(p.InkMuted)
 			labelText(c, "Review", p.InkStrong).FontWeight(600)
 			ui.Box(c).Grow(1)
 			if h.Actions.RefreshChanges != nil {
-				ui.Button(c, "Refresh").FontSize(10).BorderWidth(0).Background(p.Surface).
-					TextColor(p.InkMuted).Padding(2, 6).OnClick(h.Actions.RefreshChanges)
+				ui.Button(c, "Refresh").FontSize(TypeLabel).BorderWidth(0).Background(p.Surface).
+					TextColor(p.InkMuted).Padding(Space1, Space3).OnClick(h.Actions.RefreshChanges)
 			}
 			if h.Actions.CloseReview != nil {
-				ui.Button(c, "✕").FontSize(11).BorderWidth(0).Background(p.Surface).
-					TextColor(p.InkMuted).Padding(2, 6).OnClick(h.Actions.CloseReview)
+				ui.Button(c, "✕").FontSize(TypeControl).BorderWidth(0).Background(p.Surface).
+					TextColor(p.InkMuted).Padding(Space1, Space3).OnClick(h.Actions.CloseReview)
 			}
 		})
-		mono(ui.Text(c, reviewSummary(d))).FontSize(9).TextColor(p.InkMuted).SingleLine()
+		mono(ui.Text(c, reviewSummary(d))).FontSize(TypeBadge).TextColor(p.InkMuted).SingleLine()
 	})
 }
 
@@ -141,24 +143,24 @@ func reviewFiles(c *ui.Context, h Host, sh *ShellState, p Palette) {
 // reviewFileRow is one path in the index.
 func reviewFileRow(c *ui.Context, h Host, p Palette, ch Change) {
 	selected := ch.Path == h.Review.Selected
-	row := ui.Row(c).FillWidth().Padding(5, panelPad).Radius(controlRadius).
-		AlignItems(ui.Center).Gap(8)
+	row := ui.Row(c).FillWidth().Padding(Space2, panelPad).Radius(controlRadius).
+		AlignItems(ui.Center).Gap(Space4)
 	if h.Actions.SelectChange != nil {
 		row.OnClick(func() { h.Actions.SelectChange(ch.Path) })
 	}
-	if selected || row.Hovered() {
-		row.Background(p.Sunken)
-	}
+	// Selected and hovered rows share the sidebar's lifted surface (T50),
+	// not a sunken well.
+	stateSurface(row, p, selected, row.Hovered())
 	meta := ch.Kind
 	if ch.Adds > 0 || ch.Dels > 0 {
 		meta = "+" + itoa(ch.Adds) + " −" + itoa(ch.Dels)
 	}
 	row.Children(func() {
 		markText(c, p, ch.Kind)
-		ui.Text(c, ch.Path).Font(MonoFont).FontSize(11).
+		ui.Text(c, ch.Path).Font(MonoFont).FontSize(TypeControl).
 			TextColor(inkFor(p, selected)).SingleLine().MinWidth(0)
 		ui.Box(c).Grow(1)
-		ui.Text(c, meta).FontSize(10).TextColor(p.InkMuted).Shrink(0)
+		ui.Text(c, meta).FontSize(TypeLabel).TextColor(p.InkMuted).Shrink(0)
 	})
 }
 
@@ -180,28 +182,28 @@ func reviewDiff(c *ui.Context, h Host, p Palette) {
 		if len(d.Changes) == 0 {
 			return
 		}
-		ui.Row(c).FillWidth().Grow(1).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
+		ui.Row(c).FillWidth().Grow(1).MinHeight(0).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
 			// The file list on the left is the affordance. A quiet glyph
 			// marks the empty pane without instructing the reader.
-			ui.Icon(c, IconChanges).Label("No file selected").FontSize(22).TextColor(p.InkFaint)
+			ui.Icon(c, IconChanges).Label("No file selected").FontSize(IconDisplay).TextColor(p.InkFaint)
 		})
 		return
 	}
-	ui.Column(c).FillWidth().Shrink(0).Padding(8, panelPad, 4, panelPad).Children(func() {
-		ui.Text(c, d.Selected).Font(MonoFont).FontSize(10).TextColor(p.Accent).SingleLine()
+	ui.Column(c).FillWidth().Shrink(0).Padding(Space4, panelPad, Space2, panelPad).Children(func() {
+		ui.Text(c, d.Selected).Font(MonoFont).FontSize(TypeLabel).TextColor(p.Accent).SingleLine()
 	})
 	ui.Scroll(c).Grow(1).MinHeight(0).FillWidth().Children(func() {
-		ui.Column(c).FillWidth().Padding(0, 0, 6, 0).Children(func() {
+		ui.Column(c).FillWidth().Padding(Space0, Space0, Space3, Space0).Children(func() {
 			switch {
 			case d.Busy:
-				ui.Text(c, "Reading diff…").FontSize(11).TextColor(p.InkMuted).Padding(4, panelPad)
+				ui.Text(c, "Reading diff…").FontSize(TypeControl).TextColor(p.InkMuted).Padding(Space2, panelPad)
 			case d.Note != "":
-				ui.Text(c, d.Note).FontSize(11).TextColor(p.InkMuted).Padding(4, panelPad)
+				ui.Text(c, d.Note).FontSize(TypeControl).TextColor(p.InkMuted).Padding(Space2, panelPad)
 			default:
 				diffLines(c, d.Diff, p, maxDiffRenderLines)
 				if d.Omitted > 0 {
-					ui.Text(c, "… "+itoa(d.Omitted)+" more lines not read").FontSize(10).
-						TextColor(p.InkMuted).Padding(4, panelPad)
+					ui.Text(c, "… "+itoa(d.Omitted)+" more lines not read").FontSize(TypeLabel).
+						TextColor(p.InkMuted).Padding(Space2, panelPad)
 				}
 			}
 		})
@@ -220,27 +222,39 @@ func reviewActions(c *ui.Context, h Host, sh *ShellState, p Palette) {
 	if d.Workspace != WorkspaceRepo {
 		return
 	}
-	ui.Column(c).FillWidth().Shrink(0).Padding(10, panelPad).Gap(8).Children(func() {
+	ui.Column(c).FillWidth().Shrink(0).Padding(Space5, panelPad).Gap(Space4).Children(func() {
 		if len(d.Changes) == 0 || h.Actions.Commit == nil || sh == nil {
-			ui.Text(c, "Nothing to commit").FontSize(10).TextColor(p.InkMuted)
+			ui.Text(c, "Nothing to commit").FontSize(TypeLabel).TextColor(p.InkMuted)
 			return
 		}
 		// The app's form sizes: a 12px input and 11px buttons, as the
 		// tools pages. At the widget defaults this row rendered several
 		// pixels taller than everything around it and read as a louder,
 		// separate panel.
-		ui.TextInput(c, &sh.CommitMsg).Label("Commit message").Placeholder("Commit message…").FontSize(12).FillWidth()
-		ui.Row(c).FillWidth().Gap(8).Children(func() {
+		ui.TextInput(c, &sh.CommitMsg).Label("Commit message").Placeholder("Commit message…").FontSize(TypeInput).FillWidth()
+		ui.Row(c).FillWidth().Gap(Space4).Children(func() {
 			// Grow, not FillWidth: FillWidth is width:100% — an absolute
 			// claim on the row — so the button beside it was pushed out of
 			// the window (rect W=0 at x=1286 in a 1280-wide window). Grow(1)
 			// takes the room the sibling leaves. Both keep their text whole
 			// (§4.8.4 W1): Shrink(0) is the same rule as the status word's.
+			// A commit with no message cannot be submitted. Disable the write
+			// at the source, and re-check inside OnClick so a disabled-looking
+			// button can never dispatch on a stale frame (design system §5).
+			// The app layer keeps its own confirmation/error guard as a
+			// second line of defence.
+			commitReady := strings.TrimSpace(sh.CommitMsg) != "" && h.Actions.Commit != nil
 			ui.PrimaryButton(c, "Commit").Background(p.Accent).TextColor(p.OnInk).
-				FontSize(11).Padding(6, 9).
-				Grow(1).Shrink(0).OnClick(h.Actions.Commit)
+				FontSize(TypeControl).Padding(ButtonPadY, ButtonPadX).
+				Grow(1).MinWidth(0).Shrink(0).Disabled(!commitReady).
+				OnClick(func() {
+					if strings.TrimSpace(sh.CommitMsg) == "" || h.Actions.Commit == nil {
+						return
+					}
+					h.Actions.Commit()
+				})
 			if h.Actions.StageAll != nil {
-				ui.Button(c, "Stage all").FontSize(11).Padding(6, 9).Radius(controlRadius).TextColor(p.Ink).
+				ui.Button(c, "Stage all").FontSize(TypeControl).Padding(ButtonPadY, ButtonPadX).Radius(controlRadius).TextColor(p.Ink).
 					Shrink(0).OnClick(h.Actions.StageAll)
 			}
 		})

@@ -263,20 +263,20 @@ func mentionPicker(c *ui.Context, state *ConversationState, h ConversationHost, 
 		active = min(max(state.MentionActive, 0), len(rows)-1)
 	}
 	state.MentionActive = active
-	ui.Column(c).FillWidth().Radius(6).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Clip().
+	ui.Column(c).FillWidth().Radius(RadiusControl).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Clip().
 		Children(func() {
-			ui.Row(c).FillWidth().Padding(8, 10).AlignItems(ui.Center).Gap(8).Children(func() {
-				mono(ui.Text(c, "Files")).FontSize(10).FontWeight(500).TextColor(p.InkStrong).SingleLine()
+			ui.Row(c).FillWidth().Padding(Space4, Space5).AlignItems(ui.Center).Gap(Space4).Children(func() {
+				mono(ui.Text(c, "Files")).FontSize(TypeLabel).FontWeight(500).TextColor(p.InkStrong).SingleLine()
 				ui.Box(c).Grow(1)
 				switch {
 				case h.MentionLoading:
-					ui.Text(c, "Reading this project…").FontSize(10).TextColor(p.InkMuted).SingleLine()
+					ui.Text(c, "Reading this project…").FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
 				case h.MentionProblem != "":
-					ui.Text(c, h.MentionProblem).FontSize(10).TextColor(p.Warn).SingleLine()
+					ui.Text(c, h.MentionProblem).FontSize(TypeLabel).TextColor(p.Warn).SingleLine()
 				case len(rows) > 0:
 					// A count is data, not a keyboard legend: the marked
 					// row below shows what Enter would take.
-					mono(ui.Text(c, itoa(len(rows))+" files")).FontSize(9).TextColor(p.InkFaint).SingleLine()
+					mono(ui.Text(c, itoa(len(rows))+" files")).FontSize(TypeBadge).TextColor(p.InkFaint).SingleLine()
 				}
 			})
 			ui.Scroll(c).FillWidth().MaxHeight(220).Children(func() {
@@ -286,11 +286,11 @@ func mentionPicker(c *ui.Context, state *ConversationState, h ConversationHost, 
 						mentionRow(c, state, h, p, file, i == active)
 					}
 				case h.MentionLoading:
-					ui.Text(c, "Reading this project…").FontSize(12).TextColor(p.InkMuted).Padding(12, 10)
+					ui.Text(c, "Reading this project…").FontSize(TypeInput).TextColor(p.InkMuted).Padding(Space6, Space5)
 				case h.MentionProblem != "":
-					ui.Text(c, h.MentionProblem).FontSize(12).TextColor(p.InkMuted).Padding(12, 10)
+					ui.Text(c, h.MentionProblem).FontSize(TypeInput).TextColor(p.InkMuted).Padding(Space6, Space5)
 				default:
-					ui.Text(c, "No file matches").FontSize(12).TextColor(p.InkMuted).Padding(12, 10)
+					ui.Text(c, "No file matches").FontSize(TypeInput).TextColor(p.InkMuted).Padding(Space6, Space5)
 				}
 			})
 		})
@@ -299,21 +299,21 @@ func mentionPicker(c *ui.Context, state *ConversationState, h ConversationHost, 
 // mentionRow is one file. What the message will say is the path, so the row
 // shows the name it is found by first and the folder it lives in second.
 func mentionRow(c *ui.Context, state *ConversationState, h ConversationHost, p Palette, file MentionFile, active bool) {
-	row := ui.Row(c).Key("mention:"+file.Path).FillWidth().Padding(5, 10).AlignItems(ui.Center).Gap(8).
+	row := ui.Row(c).Key("mention:"+file.Path).FillWidth().Padding(Space2, Space5).AlignItems(ui.Center).Gap(Space4).
 		OnClick(func() { acceptMention(state, h, file) })
-	if active {
-		row.Background(p.Sunken)
-	}
+	// Only the highlighted mention is lifted; this picker has no hover state.
+	// It still shares the sidebar's one selection surface (T50).
+	stateSurface(row, p, active, false)
 	row.Children(func() {
-		ui.Text(c, file.Name).FontSize(12).TextColor(p.Ink).SingleLine()
+		ui.Text(c, file.Name).FontSize(TypeInput).TextColor(p.Ink).SingleLine()
 		if file.Dir != "" {
-			ui.Text(c, file.Dir).FontSize(10).TextColor(p.InkMuted).SingleLine()
+			ui.Text(c, file.Dir).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
 		}
 		ui.Box(c).Grow(1)
 		if active {
 			// The return mark sits on the row Enter would take, so the
 			// highlighted row explains the key without a footer sentence.
-			ui.Icon(c, IconReturn).Label("Insert selected file").FontSize(11).TextColor(p.Accent)
+			ui.Icon(c, IconReturn).Label("Insert selected file").FontSize(IconCompact).TextColor(p.Accent)
 		}
 	})
 }

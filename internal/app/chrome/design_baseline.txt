@@ -1,0 +1,4 @@
+# Design-system ratchet baseline — generated, do not hand-edit.
+# Regenerate: DESIGN_UPDATE_BASELINE=1 go test ./internal/app/chrome -run TestDesignSystemUpdateBaseline
+# Every line is file|rule|value|count. A change may only LOWER a count;
+# raising one requires an explicit, documented exception in docs/design-system.md.
