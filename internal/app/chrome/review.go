@@ -12,6 +12,8 @@ type ReviewData struct {
 	Open    bool
 	Branch  string
 	Changes []Change
+	// ListTruncated means the status or line counts hit a read budget.
+	ListTruncated bool
 	// Workspace is the tree read as the drawer reads it: reading, a
 	// repository, not a git repository at all, or unreadable. An empty list
 	// means four different things depending on which one it is.
@@ -106,6 +108,9 @@ func reviewSummary(d ReviewData) string {
 	}
 	if d.Branch != "" {
 		out += " · " + d.Branch
+	}
+	if d.ListTruncated {
+		out += " · list incomplete"
 	}
 	return out
 }

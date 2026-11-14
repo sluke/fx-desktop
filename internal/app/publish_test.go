@@ -33,10 +33,10 @@ func TestStaleReviewReplyCannotWinAfterReturningToTheSamePath(t *testing.T) {
 	s.workspace.beginReviewRead("b.go")
 	lastA := s.workspace.beginReviewRead("a.go")
 
-	if s.workspace.publishReview(firstA, "a.go", []workspace.DiffLine{{Kind: "+", Text: "old"}}, 0, nil) {
+	if s.workspace.publishReview(firstA, "a.go", []workspace.DiffLine{{Kind: "+", Text: "old"}}, 0, false, nil) {
 		t.Fatal("the first A's reply was published after A→B→A")
 	}
-	if !s.workspace.publishReview(lastA, "a.go", []workspace.DiffLine{{Kind: "+", Text: "new"}}, 0, nil) {
+	if !s.workspace.publishReview(lastA, "a.go", []workspace.DiffLine{{Kind: "+", Text: "new"}}, 0, false, nil) {
 		t.Fatal("the newest A's reply was refused")
 	}
 	s.workspace.mu.Lock()

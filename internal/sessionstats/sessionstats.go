@@ -6,7 +6,9 @@
 package sessionstats
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +17,8 @@ import (
 
 	"fx-desktop/internal/configdir"
 )
+
+var ErrClosed = errors.New("session stats store closed")
 
 // maxEntries bounds the store. A record is a few dozen bytes, but the map
 // would otherwise grow with every conversation ever opened.
@@ -44,16 +48,31 @@ type file struct {
 // Store is the in-memory record mirrored to session-stats.json. Windows share
 // one Store, so every method is safe for concurrent use.
 type Store struct {
-	mu   sync.Mutex
+	mu sync.Mutex
+
 	path string
 	data map[string]Stats
+
+	closed bool
+
+	persistOnce sync.Once
+	stopOnce    sync.Once
+	persistCh   chan struct{}
+	workerDone  chan struct{}
+	cond        sync.Cond
+
+	persistGen   uint64
+	committedGen uint64
+	lastErr      error
 }
 
 // New returns an empty store that persists to path. An empty path keeps the
 // store in memory only, which is what tests that do not care about the file
 // use.
 func New(path string) *Store {
-	return &Store{path: path, data: make(map[string]Stats)}
+	s := &Store{path: path, data: make(map[string]Stats)}
+	s.cond.L = &s.mu
+	return s
 }
 
 // Load reads the store from the app's config directory. A missing file is an
@@ -98,31 +117,56 @@ func (s *Store) Get(id string) Stats {
 	return s.data[id]
 }
 
-// Put records id's usage and writes the file. An empty conversation is not
-// recorded: a zero row would only make the file larger without saying
-// anything. Save failures are returned for the caller to log; the in-memory
-// record stays authoritative for this run either way.
+// Put records id's usage. Disk persistence is asynchronous; use Flush or Close
+// when a write must be confirmed. An empty conversation is not recorded.
 func (s *Store) Put(id string, st Stats) error {
 	if s == nil || id == "" || st.Empty() {
 		return nil
 	}
+	if s.path == "" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		st.UpdatedMS = time.Now().UnixMilli()
+		s.data[id] = st
+		s.pruneLocked()
+		return nil
+	}
+	s.startPersist()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
 	st.UpdatedMS = time.Now().UnixMilli()
 	s.data[id] = st
 	s.pruneLocked()
-	return s.saveLocked()
+	s.persistGen++
+	s.mu.Unlock()
+	s.signalPersist()
+	return nil
 }
 
-// Delete forgets each conversation and writes the file once. Deleting a
-// record that is not present is a no-op, and so is calling on a nil store:
-// history cleanup runs after a session directory is already gone.
+// Delete forgets each conversation and schedules a persist.
 func (s *Store) Delete(ids ...string) error {
 	if s == nil || len(ids) == 0 {
 		return nil
 	}
+	if s.path == "" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, id := range ids {
+			if id != "" {
+				delete(s.data, id)
+			}
+		}
+		return nil
+	}
+	s.startPersist()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
 	changed := false
 	for _, id := range ids {
 		if id == "" {
@@ -134,9 +178,147 @@ func (s *Store) Delete(ids ...string) error {
 		}
 	}
 	if !changed {
+		s.mu.Unlock()
 		return nil
 	}
-	return s.saveLocked()
+	s.persistGen++
+	s.mu.Unlock()
+	s.signalPersist()
+	return nil
+}
+
+func (s *Store) startPersist() {
+	if s == nil || s.path == "" {
+		return
+	}
+	s.persistOnce.Do(func() {
+		s.persistCh = make(chan struct{}, 1)
+		s.workerDone = make(chan struct{})
+		go s.persistLoop()
+	})
+}
+
+func (s *Store) signalPersist() {
+	if s == nil || s.persistCh == nil {
+		return
+	}
+	select {
+	case s.persistCh <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Store) persistLoop() {
+	defer close(s.workerDone)
+	for range s.persistCh {
+		for {
+			s.mu.Lock()
+			target := s.persistGen
+			if target <= s.committedGen {
+				s.mu.Unlock()
+				break
+			}
+			snap := make(map[string]Stats, len(s.data))
+			for id, st := range s.data {
+				snap[id] = st
+			}
+			path := s.path
+			s.mu.Unlock()
+
+			err := saveSnapshot(path, snap)
+
+			s.mu.Lock()
+			if err != nil {
+				s.lastErr = err
+			} else {
+				s.lastErr = nil
+				if target > s.committedGen {
+					s.committedGen = target
+				}
+			}
+			stale := s.persistGen != target
+			s.cond.Broadcast()
+			s.mu.Unlock()
+			if !stale {
+				break
+			}
+		}
+	}
+}
+
+// Flush waits until every mutation queued before this call has been persisted
+// successfully or failed definitively for that generation.
+func (s *Store) Flush() error {
+	return s.FlushContext(context.Background())
+}
+
+// FlushContext is Flush with a deadline.
+func (s *Store) FlushContext(ctx context.Context) error {
+	if s == nil || s.path == "" {
+		return nil
+	}
+	s.startPersist()
+	s.mu.Lock()
+	target := s.persistGen
+	s.mu.Unlock()
+	s.signalPersist()
+	return s.waitCommitted(ctx, target)
+}
+
+// Close flushes pending writes, stops the worker, and rejects later Put/Delete.
+func (s *Store) Close(ctx context.Context) error {
+	if s == nil || s.path == "" {
+		return nil
+	}
+	s.startPersist()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	target := s.persistGen
+	s.mu.Unlock()
+
+	s.signalPersist()
+	err := s.waitCommitted(ctx, target)
+
+	s.stopOnce.Do(func() { close(s.persistCh) })
+
+	select {
+	case <-s.workerDone:
+	case <-ctx.Done():
+		if err == nil {
+			err = ctx.Err()
+		}
+	}
+	return err
+}
+
+func (s *Store) waitCommitted(ctx context.Context, target uint64) error {
+	done := make(chan error, 1)
+	go func() {
+		s.mu.Lock()
+		for s.committedGen < target && s.lastErr == nil {
+			s.cond.Wait()
+		}
+		var err error
+		if s.committedGen < target {
+			err = s.lastErr
+		}
+		s.mu.Unlock()
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.cond.Broadcast()
+		s.mu.Unlock()
+		return ctx.Err()
+	}
 }
 
 // Len reports how many conversations are remembered. It exists so the cap can
@@ -175,18 +357,15 @@ func (s *Store) pruneLocked() {
 	}
 }
 
-// saveLocked writes through a temporary file and renames it into place, so a
-// crash mid-write cannot leave a truncated record behind. s.mu is held by the
-// caller.
-func (s *Store) saveLocked() error {
-	if s.path == "" {
+func saveSnapshot(path string, data map[string]Stats) error {
+	if path == "" {
 		return nil
 	}
-	b, err := json.MarshalIndent(file{Version: 1, Sessions: s.data}, "", "  ")
+	b, err := json.MarshalIndent(file{Version: 1, Sessions: data}, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".session-stats-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-stats-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -207,7 +386,7 @@ func (s *Store) saveLocked() error {
 		os.Remove(name)
 		return err
 	}
-	if err := os.Rename(name, s.path); err != nil {
+	if err := os.Rename(name, path); err != nil {
 		os.Remove(name)
 		return err
 	}

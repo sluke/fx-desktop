@@ -76,5 +76,5 @@ func (p Prefs) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return configdir.WriteFile(path, b, 0o644)
 }

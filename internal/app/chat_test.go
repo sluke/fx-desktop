@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -662,6 +663,11 @@ func TestChatRestoresUsageOnResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = store.Close(ctx)
+	})
 	if err := store.Put("fixture-session", sessionstats.Stats{
 		ContextUsed: 777, ContextTotal: 1000, InputTokens: 111, OutputTokens: 22,
 	}); err != nil {

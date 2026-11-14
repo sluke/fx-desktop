@@ -72,11 +72,11 @@ func (s *ProjectWindow) loadReviewDiff(path string) {
 	scope, stop := s.scope("review")
 	go func() {
 		defer stop()
-		lines, omitted, err := gitFileDiff(scope, s.project, path)
+		lines, omitted, truncated, err := gitFileDiff(scope, s.project, path)
 		if scope.Err() != nil {
 			return
 		}
-		if s.workspace.publishReview(gen, path, lines, omitted, err) {
+		if s.workspace.publishReview(gen, path, lines, omitted, truncated, err) {
 			s.invalidate()
 		}
 	}()
@@ -99,6 +99,7 @@ func (c *Coordinator) sessionReview(s *ProjectWindow) chrome.ReviewData {
 	if git != nil {
 		d.Branch = git.Branch
 		d.Changes = git.Changes
+		d.ListTruncated = git.ListTruncated
 	}
 	return d
 }

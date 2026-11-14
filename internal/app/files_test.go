@@ -186,6 +186,26 @@ func TestFileBrowserSteadyFrameDoesNotAllocate(t *testing.T) {
 	}
 }
 
+func TestReadFileEntriesCapsWithoutLosingTotal(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < maxFileEntries+1; i++ {
+		name := fmt.Sprintf("f%04d.txt", i)
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, total, err := readFileEntries(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != maxFileEntries+1 || len(entries) != maxFileEntries {
+		t.Fatalf("total=%d kept=%d", total, len(entries))
+	}
+	if entries[0].name != "f0000.txt" || entries[len(entries)-1].name != fmt.Sprintf("f%04d.txt", maxFileEntries-1) {
+		t.Fatalf("kept range = %s .. %s", entries[0].name, entries[len(entries)-1].name)
+	}
+}
+
 func TestReadFileEntriesOrdersFoldersThenNames(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "Beta"), 0o755); err != nil {

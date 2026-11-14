@@ -228,6 +228,37 @@ func TestStoreCapsAndDropsStaleEntries(t *testing.T) {
 	}
 }
 
+func TestConcurrentSaveKeepsAParseableNewestSnapshot(t *testing.T) {
+	testutil.IsolateHome(t)
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			s.Touch("/proj/" + strconv.Itoa(n))
+			if err := s.Save(); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	s.Touch("/proj/final")
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := again.List(); len(got) == 0 || got[0].Path != "/proj/final" {
+		t.Fatalf("reloaded = %+v", got)
+	}
+}
+
 func TestLoadIsSafeOnEmptyStore(t *testing.T) {
 	testutil.IsolateHome(t)
 	s, err := Load()

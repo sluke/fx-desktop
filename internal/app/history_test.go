@@ -408,6 +408,9 @@ func TestDeleteHistorySessionsRemovesDiskAndStats(t *testing.T) {
 	if err := store.Put("keep", sessionstats.Stats{InputTokens: 7}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	c := &Coordinator{stats: store}
 	deleted, err := c.deleteHistorySessions([]string{"drop"})
 	if err != nil || len(deleted) != 1 || deleted[0] != "drop" {
@@ -424,6 +427,9 @@ func TestDeleteHistorySessionsRemovesDiskAndStats(t *testing.T) {
 	}
 	if got := store.Get("keep"); got.InputTokens != 7 {
 		t.Fatalf("unrelated stats removed: %+v", got)
+	}
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
 	}
 	again, err := sessionstats.Load()
 	if err != nil {

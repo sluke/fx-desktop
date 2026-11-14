@@ -145,6 +145,97 @@ func TestGitInfoOnRepository(t *testing.T) {
 	}
 }
 
+// Staged-only edits must show line counts and diff text: review measures
+// HEAD→working tree, not index→working tree alone.
+func TestGitInfoStagedChangeHasCountsAndDiff(t *testing.T) {
+	isolateWithGit(t)
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "config", "user.email", "t@e.com")
+	runGit(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-q", "-m", "init")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "a.txt")
+
+	info, err := gitInfo(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Changes) != 1 {
+		t.Fatalf("changes: %+v", info.Changes)
+	}
+	ch := info.Changes[0]
+	if ch.Adds == 0 && ch.Dels == 0 {
+		t.Fatalf("staged edit lost numstat: %+v", ch)
+	}
+	lines, _, _, err := gitFileDiff(context.Background(), dir, "a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, line := range lines {
+		if line.Text == "+new" || line.Text == "-old" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("staged diff empty: %v", lines)
+	}
+}
+
+func TestGitInfoFromRepositorySubdirectory(t *testing.T) {
+	isolateWithGit(t)
+	root := t.TempDir()
+	sub := filepath.Join(root, "pkg")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "init", "-q")
+	runGit(t, root, "config", "user.email", "t@e.com")
+	runGit(t, root, "config", "user.name", "t")
+	path := "pkg/a.go"
+	if err := os.WriteFile(filepath.Join(root, path), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "-A")
+	runGit(t, root, "commit", "-q", "-m", "init")
+	if err := os.WriteFile(filepath.Join(root, path), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fromRoot, err := gitInfo(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromSub, err := gitInfo(context.Background(), sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fromSub.Changes) != 1 || fromSub.Changes[0].Path != path {
+		t.Fatalf("subdir status: %+v", fromSub.Changes)
+	}
+	if fromSub.Changes[0].Adds != fromRoot.Changes[0].Adds {
+		t.Fatalf("subdir numstat %+v != root %+v", fromSub.Changes[0], fromRoot.Changes[0])
+	}
+	linesRoot, _, _, err := gitFileDiff(context.Background(), root, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linesSub, _, _, err := gitFileDiff(context.Background(), sub, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(linesRoot) == 0 || len(linesSub) != len(linesRoot) {
+		t.Fatalf("subdir diff %d lines, root %d", len(linesSub), len(linesRoot))
+	}
+}
+
 func TestGitNumstatCountsChangedLines(t *testing.T) {
 	isolateWithGit(t)
 	dir := t.TempDir()
@@ -291,7 +382,7 @@ func TestGitFileDiffClassifiesLines(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lines, omitted, err := gitFileDiff(context.Background(), dir, "a.go")
+	lines, omitted, _, err := gitFileDiff(context.Background(), dir, "a.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +419,7 @@ func TestGitFileDiffReadsUntrackedFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "new.go"), []byte("fresh\nlines\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lines, _, err := gitFileDiff(context.Background(), dir, "new.go")
+	lines, _, _, err := gitFileDiff(context.Background(), dir, "new.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +452,7 @@ func TestGitFileDiffIsEmptyForABinaryFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "bin"), blob, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lines, _, err := gitFileDiff(context.Background(), dir, "bin")
+	lines, _, _, err := gitFileDiff(context.Background(), dir, "bin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,7 +479,7 @@ func TestGitFileDiffIsEmptyForAnUnchangedFile(t *testing.T) {
 	}
 	runGit(t, dir, "add", "-A")
 	runGit(t, dir, "commit", "-q", "-m", "init")
-	lines, omitted, err := gitFileDiff(context.Background(), dir, "a.go")
+	lines, omitted, _, err := gitFileDiff(context.Background(), dir, "a.go")
 	if err != nil {
 		t.Fatal(err)
 	}

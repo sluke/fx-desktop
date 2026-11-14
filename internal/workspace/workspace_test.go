@@ -82,7 +82,7 @@ func TestCompareTexts(t *testing.T) {
 		t.Fatalf("lines = %+v", lines)
 	}
 	huge := strings.Repeat("x\n", MaxDiffLines+1)
-	if lines := CompareTexts("", huge); len(lines) != MaxDiffLines+1 || lines[0].Kind != DiffAdd {
+	if lines := CompareTexts("", huge); len(lines) != MaxDiffLines || lines[0].Kind != DiffAdd {
 		t.Fatalf("degradation = %d lines", len(lines))
 	}
 }

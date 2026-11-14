@@ -25,6 +25,7 @@ type Entry struct {
 // never from a frame.
 type Store struct {
 	mu      sync.RWMutex
+	writeMu sync.Mutex // serializes disk writes so an older Save cannot land last
 	entries []Entry
 }
 
@@ -76,6 +77,8 @@ func (s *Store) normalize() {
 // Save persists recent projects. The disk write happens outside the lock: a
 // slow filesystem must not hold up a frame that only wants to read the list.
 func (s *Store) Save() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	s.normalize()
 	entries := append([]Entry(nil), s.entries...)
@@ -88,7 +91,7 @@ func (s *Store) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	return configdir.WriteFile(path, b, 0o644)
 }
 
 // List returns recent entries newest first. Entries are normalized by Touch,

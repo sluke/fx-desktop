@@ -2,14 +2,16 @@ package app
 
 import (
 	"context"
-	"github.com/egoist/mygo"
-	"github.com/egoist/mygo/ui"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/fxbin"
@@ -120,6 +122,16 @@ func NewCoordinator() *Coordinator {
 
 // Setup registers menus, tray, and deep-link handlers.
 func (c *Coordinator) Setup() {
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		if c.stats == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := c.stats.Close(ctx); err != nil {
+			log.Println("session stats:", err)
+		}
+	})
 	mygo.App.SetName("fx")
 	_ = mygo.App.RegisterURLScheme("fx-desktop")
 	// Clicking an attention notification raises the session it is about.

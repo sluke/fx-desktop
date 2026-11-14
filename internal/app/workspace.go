@@ -123,7 +123,7 @@ func (w *workspaceController) clearReview() {
 }
 
 // publishReview records a diff only for the selection that is still current.
-func (w *workspaceController) publishReview(gen uint64, path string, lines []workspace.DiffLine, omitted int, err error) bool {
+func (w *workspaceController) publishReview(gen uint64, path string, lines []workspace.DiffLine, omitted int, truncated bool, err error) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if gen != w.reviewGen || w.reviewPath != path {
@@ -134,6 +134,8 @@ func (w *workspaceController) publishReview(gen uint64, path string, lines []wor
 	switch {
 	case err != nil:
 		w.reviewNote = "git could not read this file's diff"
+	case truncated:
+		w.reviewNote = "Diff output was too large; showing the first portion only"
 	case len(lines) == 0:
 		// A rename with no content change, or a binary file: there is
 		// nothing to colour, and saying so beats an empty pane.

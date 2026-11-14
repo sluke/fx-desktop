@@ -20,6 +20,9 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err := store.Put("abc", want); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	got := store.Get("abc")
 	if got.ContextUsed != want.ContextUsed || got.ContextTotal != want.ContextTotal ||
 		got.InputTokens != want.InputTokens || got.OutputTokens != want.OutputTokens {
@@ -98,6 +101,9 @@ func TestStoreCorruptFileStartsEmptyAndRepairs(t *testing.T) {
 	if err := store.Put("fixed", Stats{InputTokens: 5}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	if again, err := Load(); err != nil {
 		t.Fatalf("write did not repair the file: %v", err)
 	} else if got := again.Get("fixed"); got.InputTokens != 5 {
@@ -130,6 +136,9 @@ func TestStoreDeleteForgetsRecordsAndPersists(t *testing.T) {
 		}
 	}
 	if err := store.Delete("drop1", "drop2", "missing", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if got := store.Get("drop1"); !got.Empty() {

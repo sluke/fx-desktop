@@ -1,8 +1,10 @@
 package app
 
 import (
+	"container/heap"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -19,6 +21,10 @@ import (
 // the first entries and says how many it left out, so painting the rail stays
 // proportional to what is on screen rather than to what is on disk.
 const maxFileEntries = 400
+
+// maxFileReads bounds how many directory scans one browser runs at once.
+// A refresh of many open folders must not start an unbounded set of reads.
+const maxFileReads = 4
 
 // fileEntry is one name read from a folder: the only fact the tree needs from
 // the disk. Whether it is a folder is resolved when the listing is read, so a
@@ -38,6 +44,7 @@ type fileBrowser struct {
 	problems  map[string]string      // why a read failed
 	loading   map[string]bool        // a read is in flight
 	truncated map[string]int         // entries the cap left out
+	gate      chan struct{}          // limits in-flight directory reads
 	// rows is the flattened projection of all of the above. A frame draws the
 	// same tree many times between two changes, so it is rebuilt lazily on the
 	// first frame after a write instead of on every repaint. Both fields are
@@ -55,6 +62,7 @@ func newFileBrowser() *fileBrowser {
 		loading:   map[string]bool{},
 		truncated: map[string]int{},
 		dirty:     true,
+		gate:      make(chan struct{}, maxFileReads),
 	}
 }
 
@@ -98,6 +106,14 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 
 	s.invalidate()
 	go func() {
+		fb.gate <- struct{}{}
+		defer func() { <-fb.gate }()
+		s.workspace.mu.Lock()
+		current := s.workspace.files == fb
+		s.workspace.mu.Unlock()
+		if !current {
+			return
+		}
 		entries, total, err := readFileEntries(dir)
 		s.workspace.mu.Lock()
 		// A refresh replaces the browser while a read is in flight. The
@@ -127,35 +143,84 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 // without case. A symlinked folder is shown as a folder, since expanding it
 // reads through the link, which is what the click asked for.
 func readFileEntries(dir string) ([]fileEntry, int, error) {
-	items, err := os.ReadDir(dir)
+	f, err := os.Open(dir)
 	if err != nil {
 		return nil, 0, err
 	}
-	entries := make([]fileEntry, 0, len(items))
-	for _, item := range items {
-		isDir := item.IsDir()
-		if !isDir && item.Type()&os.ModeSymlink != 0 {
-			if info, err := os.Stat(filepath.Join(dir, item.Name())); err == nil {
-				isDir = info.IsDir()
+	defer f.Close()
+
+	kept := &entryHeap{}
+	total := 0
+	for {
+		batch, err := f.ReadDir(128)
+		if len(batch) > 0 {
+			for _, item := range batch {
+				total++
+				isDir := item.IsDir()
+				if !isDir && item.Type()&os.ModeSymlink != 0 {
+					if info, statErr := os.Stat(filepath.Join(dir, item.Name())); statErr == nil {
+						isDir = info.IsDir()
+					}
+				}
+				e := rankedEntry{fileEntry: fileEntry{name: item.Name(), dir: isDir}, lower: strings.ToLower(item.Name())}
+				if kept.Len() < maxFileEntries {
+					heap.Push(kept, e)
+					continue
+				}
+				if entryBefore(e, (*kept)[0]) {
+					heap.Pop(kept)
+					heap.Push(kept, e)
+				}
 			}
 		}
-		entries = append(entries, fileEntry{name: item.Name(), dir: isDir})
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, 0, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+	}
+	entries := make([]fileEntry, kept.Len())
+	for i, e := range *kept {
+		entries[i] = e.fileEntry
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].dir != entries[j].dir {
-			return entries[i].dir
-		}
-		li, lj := strings.ToLower(entries[i].name), strings.ToLower(entries[j].name)
-		if li != lj {
-			return li < lj
-		}
-		return entries[i].name < entries[j].name
+		return entryBefore(rankedEntry{fileEntry: entries[i], lower: strings.ToLower(entries[i].name)}, rankedEntry{fileEntry: entries[j], lower: strings.ToLower(entries[j].name)})
 	})
-	total := len(entries)
-	if total > maxFileEntries {
-		entries = entries[:maxFileEntries]
-	}
 	return entries, total, nil
+}
+
+type rankedEntry struct {
+	fileEntry
+	lower string
+}
+
+func entryBefore(a, b rankedEntry) bool {
+	if a.dir != b.dir {
+		return a.dir
+	}
+	if a.lower != b.lower {
+		return a.lower < b.lower
+	}
+	return a.name < b.name
+}
+
+// entryHeap keeps the worst kept name at the root so a better name can replace it.
+type entryHeap []rankedEntry
+
+func (h entryHeap) Len() int { return len(h) }
+func (h entryHeap) Less(i, j int) bool { return entryBefore(h[j], h[i]) }
+func (h entryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *entryHeap) Push(x any) { *h = append(*h, x.(rankedEntry)) }
+func (h *entryHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
 // fileReadProblem is the row's answer for a folder the browser could not read.

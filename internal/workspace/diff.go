@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 // Change is one working-tree change as the workspace read it. Kind is the
@@ -42,6 +43,8 @@ const (
 	// MaxUnifiedDiffLines bounds how much of one file's unified diff is read
 	// into memory.
 	MaxUnifiedDiffLines = 4000
+	// maxCompareTextBytes bounds text passed to line splitting before compare.
+	maxCompareTextBytes = 4 << 20
 )
 
 // CompareTexts classifies each line of oldText/newText as context, added or
@@ -49,16 +52,80 @@ const (
 // degrades to reporting the new text as added, which is honest about having
 // skipped the comparison.
 func CompareTexts(oldText, newText string) []DiffLine {
-	old := splitDiffLines(oldText)
-	next := splitDiffLines(newText)
+	old, oldCut := scanLinesBudget(oldText, maxCompareTextBytes/2, MaxDiffLines)
+	next, newCut := scanLinesBudget(newText, maxCompareTextBytes/2, MaxDiffLines)
+	if oldCut || newCut {
+		return degradeAddedLines(next)
+	}
 	if len(old) > MaxDiffLines || len(next) > MaxDiffLines || len(old)*len(next) > MaxDiffCells {
-		out := make([]DiffLine, 0, len(next))
-		for _, line := range next {
-			out = append(out, DiffLine{Kind: DiffAdd, Text: line})
-		}
-		return out
+		return degradeAddedLines(next)
 	}
 	return lcsDiff(old, next)
+}
+
+func degradeAddedLines(lines []string) []DiffLine {
+	if len(lines) > MaxDiffLines {
+		lines = lines[:MaxDiffLines]
+	}
+	out := make([]DiffLine, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, DiffLine{Kind: DiffAdd, Text: line})
+	}
+	return out
+}
+
+// scanLinesBudget reads at most maxLines lines using at most maxBytes of s
+// without splitting the full string.
+func scanLinesBudget(s string, maxBytes, maxLines int) ([]string, bool) {
+	if s == "" {
+		return nil, false
+	}
+	if maxBytes <= 0 || maxLines <= 0 {
+		return nil, true
+	}
+	var lines []string
+	used := 0
+	truncated := false
+	i := 0
+	for i < len(s) && len(lines) < maxLines {
+		j := i
+		for j < len(s) && s[j] != '\n' {
+			j++
+		}
+		line := s[i:j]
+		if used+len(line) > maxBytes {
+			line = trimUTF8Bytes(line, maxBytes-used)
+			truncated = true
+		}
+		if line != "" || j > i {
+			lines = append(lines, line)
+			used += len(line)
+		}
+		if j < len(s) && s[j] == '\n' {
+			j++
+		}
+		i = j
+		if truncated {
+			break
+		}
+	}
+	if i < len(s) {
+		truncated = true
+	}
+	return lines, truncated
+}
+
+func trimUTF8Bytes(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	if max <= 0 {
+		return ""
+	}
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
+	}
+	return s[:max]
 }
 
 // splitDiffLines splits on \n and drops the single trailing empty line a final

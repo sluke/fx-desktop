@@ -59,3 +59,5 @@ go.work.sum
 # Platform objects
 mygo_windows_*.syso
 docs/design-system.md
+HANDOFF.md
+/docs/

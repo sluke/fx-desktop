@@ -56,6 +56,124 @@ type Client struct {
 
 	doneOnce sync.Once
 	exitOnce sync.Once
+
+	writes    chan writeJob
+	writeOnce sync.Once
+}
+
+// writeJob is one outbound frame. The writer pump owns the pipe: it honours
+// cancellation before send, aborts in-flight blocked writes by tearing the
+// connection down, and never lets unbounded goroutines pile up on the queue.
+type writeJob struct {
+	data    []byte
+	ctx     context.Context
+	done    chan error
+	started chan struct{} // closed once writeMu is held and Write may block
+}
+
+const writeQueueDepth = 64
+
+func (c *Client) startWritePump() {
+	c.writeOnce.Do(func() {
+		c.writes = make(chan writeJob, writeQueueDepth)
+		go c.runWritePump()
+	})
+}
+
+func (c *Client) runWritePump() {
+	for {
+		select {
+		case <-c.done:
+			c.drainWriteQueue()
+			return
+		case job, ok := <-c.writes:
+			if !ok {
+				return
+			}
+			c.performWrite(job)
+		}
+	}
+}
+
+func (c *Client) drainWriteQueue() {
+	for {
+		select {
+		case job := <-c.writes:
+			job.done <- ErrClosed
+		default:
+			return
+		}
+	}
+}
+
+func (c *Client) performWrite(job writeJob) {
+	if err := job.ctx.Err(); err != nil {
+		job.done <- err
+		return
+	}
+	select {
+	case <-c.done:
+		job.done <- ErrClosed
+		return
+	default:
+	}
+
+	finished := make(chan error, 1)
+	go func() {
+		c.writeMu.Lock()
+		if job.started != nil {
+			close(job.started)
+		}
+		defer c.writeMu.Unlock()
+		select {
+		case <-c.done:
+			finished <- ErrClosed
+			return
+		default:
+		}
+		_, err := c.input.Write(job.data)
+		if err != nil {
+			c.finish(err)
+		}
+		finished <- err
+	}()
+
+	if job.started != nil {
+		<-job.started
+	}
+
+	select {
+	case err := <-finished:
+		job.done <- err
+	case <-job.ctx.Done():
+		// A partial frame may have reached the peer; the connection is dead.
+		c.finish(ErrClosed)
+		job.done <- job.ctx.Err()
+		<-finished
+	case <-c.done:
+		job.done <- ErrClosed
+		<-finished
+	}
+}
+
+func (c *Client) enqueueWrite(ctx context.Context, data []byte, started chan struct{}) error {
+	c.startWritePump()
+	job := writeJob{data: data, ctx: ctx, done: make(chan error, 1), started: started}
+	select {
+	case c.writes <- job:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return ErrClosed
+	}
+	select {
+	case err := <-job.done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.done:
+		return ErrClosed
+	}
 }
 
 func Start(ctx context.Context, executable, dir string, args []string, onEvent func(Packet)) (*Client, error) {
@@ -95,6 +213,7 @@ func StartWithGlobals(ctx context.Context, executable, dir string, globals, args
 		return nil, err
 	}
 	c := &Client{input: input, done: make(chan struct{}), exited: make(chan struct{}), pending: make(map[string]chan Packet), cancel: cancel, onEvent: onEvent}
+	c.startWritePump()
 	go func() {
 		// The protocol side ends first: a scanner error, EOF or an unparsable
 		// frame means no reply can arrive, so waiters are released now. The
@@ -215,18 +334,12 @@ func (c *Client) write(v any) error {
 		return err
 	}
 	b = append(b, '\n')
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
 	select {
 	case <-c.done:
 		return ErrClosed
 	default:
 	}
-	_, err = c.input.Write(b)
-	if err != nil {
-		c.finish(err)
-	}
-	return err
+	return c.enqueueWrite(context.Background(), b, nil)
 }
 
 func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
@@ -237,7 +350,13 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	c.pending[key] = ch
 	c.mu.Unlock()
 	defer func() { c.mu.Lock(); delete(c.pending, key); c.mu.Unlock() }()
-	if err := c.write(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(key), "method": method, "params": params}); err != nil {
+
+	payload, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": json.RawMessage(key), "method": method, "params": params})
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	if err := c.enqueueWrite(ctx, payload, nil); err != nil {
 		return err
 	}
 	select {
