@@ -51,25 +51,37 @@ const (
 // removed. It never fails: when the inputs are too large to compare it
 // degrades to reporting the new text as added, which is honest about having
 // skipped the comparison.
-func CompareTexts(oldText, newText string) []DiffLine {
-	old, oldCut := scanLinesBudget(oldText, maxCompareTextBytes/2, MaxDiffLines)
-	next, newCut := scanLinesBudget(newText, maxCompareTextBytes/2, MaxDiffLines)
-	if oldCut || newCut {
-		return degradeAddedLines(next)
-	}
-	if len(old) > MaxDiffLines || len(next) > MaxDiffLines || len(old)*len(next) > MaxDiffCells {
-		return degradeAddedLines(next)
-	}
-	return lcsDiff(old, next)
+// TextDiff is a bounded line classification. Truncated means the input was
+// not fully scanned. ComparisonSkipped means the lines are a preview, not an
+// LCS of the two sides.
+type TextDiff struct {
+	Lines             []DiffLine
+	Truncated         bool
+	ComparisonSkipped bool
 }
 
-func degradeAddedLines(lines []string) []DiffLine {
-	if len(lines) > MaxDiffLines {
-		lines = lines[:MaxDiffLines]
+func CompareTexts(oldText, newText string) TextDiff {
+	old, oldCut := scanLinesBudget(oldText, maxCompareTextBytes/2, MaxDiffLines)
+	next, newCut := scanLinesBudget(newText, maxCompareTextBytes/2, MaxDiffLines)
+	if oldCut || newCut || len(old) > MaxDiffLines || len(next) > MaxDiffLines || len(old)*len(next) > MaxDiffCells {
+		return TextDiff{Lines: previewUncompared(old, next), Truncated: true, ComparisonSkipped: true}
 	}
-	out := make([]DiffLine, 0, len(lines))
-	for _, line := range lines {
-		out = append(out, DiffLine{Kind: DiffAdd, Text: line})
+	return TextDiff{Lines: lcsDiff(old, next)}
+}
+
+func previewUncompared(old, next []string) []DiffLine {
+	src := next
+	kind := DiffAdd
+	if len(src) == 0 {
+		src = old
+		kind = DiffDel
+	}
+	if len(src) > MaxDiffLines {
+		src = src[:MaxDiffLines]
+	}
+	out := make([]DiffLine, 0, len(src))
+	for _, line := range src {
+		out = append(out, DiffLine{Kind: kind, Text: line})
 	}
 	return out
 }
@@ -83,36 +95,41 @@ func scanLinesBudget(s string, maxBytes, maxLines int) ([]string, bool) {
 	if maxBytes <= 0 || maxLines <= 0 {
 		return nil, true
 	}
+	body := s
+	if strings.HasSuffix(s, "\n") && maxBytes > 0 {
+		body = s[:len(s)-1]
+		maxBytes--
+	}
 	var lines []string
 	used := 0
-	truncated := false
 	i := 0
-	for i < len(s) && len(lines) < maxLines {
-		j := i
-		for j < len(s) && s[j] != '\n' {
-			j++
+	for i < len(body) && len(lines) < maxLines && used < maxBytes {
+		remain := maxBytes - used
+		end := i + remain
+		if end > len(body) {
+			end = len(body)
 		}
-		line := s[i:j]
-		if used+len(line) > maxBytes {
-			line = trimUTF8Bytes(line, maxBytes-used)
-			truncated = true
+		nl := -1
+		for j := i; j < end; j++ {
+			if body[j] == '\n' {
+				nl = j
+				break
+			}
 		}
-		if line != "" || j > i {
-			lines = append(lines, line)
-			used += len(line)
+		if nl < 0 {
+			if end < len(body) {
+				line := trimUTF8Bytes(body[i:end], end-i)
+				lines = append(lines, string([]byte(line)))
+				return lines, true
+			}
+			lines = append(lines, body[i:end])
+			return lines, false
 		}
-		if j < len(s) && s[j] == '\n' {
-			j++
-		}
-		i = j
-		if truncated {
-			break
-		}
+		lines = append(lines, body[i:nl])
+		used += nl - i + 1
+		i = nl + 1
 	}
-	if i < len(s) {
-		truncated = true
-	}
-	return lines, truncated
+	return lines, i < len(body)
 }
 
 func trimUTF8Bytes(s string, max int) string {

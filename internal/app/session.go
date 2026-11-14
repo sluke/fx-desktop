@@ -663,6 +663,7 @@ func (c *Coordinator) openSessionWithFlags(project string, args ...string) *Proj
 			// Closing the window ends every task it owns: the submit
 			// preparation, the history queries, the periodic refresh.
 			s.cancel()
+			s.workspace.cancelFileReads()
 			s.abandonSubmit()
 			s.retireImageBatches()
 			close(s.stop)

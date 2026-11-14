@@ -36,6 +36,59 @@ func TestReviewR2TruncationReported(t *testing.T) {
 	}
 }
 
+func TestGitNumstatFileNamedZero(t *testing.T) {
+	isolateWithGit(t)
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "config", "user.email", "t@e.com")
+	runGit(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "0"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-q", "-m", "init")
+	if err := os.WriteFile(filepath.Join(dir, "0"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	info, err := gitInfo(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Changes) != 1 || info.Changes[0].Path != "0" || info.Changes[0].Adds == 0 {
+		t.Fatalf("file named 0 lost its count: %+v", info.Changes)
+	}
+}
+
+func TestGitUntrackedLiteralName(t *testing.T) {
+	isolateWithGit(t)
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "config", "user.email", "t@e.com")
+	runGit(t, dir, "config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-q", "-m", "init")
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other\nchanged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "*.txt"), []byte("star\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lines, _, _, err := gitFileDiff(context.Background(), dir, "*.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text string
+	for _, line := range lines {
+		text += line.Text + "\n"
+	}
+	if !strings.Contains(text, "+star") || strings.Contains(text, "other.txt") {
+		t.Fatalf("untracked literal diff = %s", text)
+	}
+}
+
 func TestGitSHA256UnbornRepoShowsStagedDiff(t *testing.T) {
 	isolateWithGit(t)
 	dir := t.TempDir()

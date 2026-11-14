@@ -100,6 +100,7 @@ func (c *Coordinator) sessionReview(s *ProjectWindow) chrome.ReviewData {
 		d.Branch = git.Branch
 		d.Changes = git.Changes
 		d.ListTruncated = git.ListTruncated
+		d.CountsUnknown = git.CountsUnknown
 	}
 	return d
 }

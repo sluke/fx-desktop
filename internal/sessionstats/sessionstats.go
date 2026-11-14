@@ -53,26 +53,43 @@ type Store struct {
 	path string
 	data map[string]Stats
 
-	closed bool
-
-	persistOnce sync.Once
-	stopOnce    sync.Once
-	persistCh   chan struct{}
-	workerDone  chan struct{}
-	cond        sync.Cond
+	closed     bool
+	stop       bool
+	closeOnce  sync.Once
+	closeDone  chan struct{}
+	closeErr   error
+	wake       chan struct{}
+	workerDone chan struct{}
+	waiters    []*genWait
 
 	persistGen   uint64
 	committedGen uint64
+	failedGen    uint64
 	lastErr      error
+	// persist overrides the disk write in tests.
+	persist func(path string, data map[string]Stats) error
+}
+
+// SetPersistHook replaces the snapshot writer. Tests use it to block or fail
+// a write; production code leaves it unset.
+func (s *Store) SetPersistHook(fn func(path string, data map[string]Stats) error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.persist = fn
+	s.mu.Unlock()
+}
+
+type genWait struct {
+	ch chan struct{}
 }
 
 // New returns an empty store that persists to path. An empty path keeps the
 // store in memory only, which is what tests that do not care about the file
 // use.
 func New(path string) *Store {
-	s := &Store{path: path, data: make(map[string]Stats)}
-	s.cond.L = &s.mu
-	return s
+	return &Store{path: path, data: make(map[string]Stats), closeDone: make(chan struct{})}
 }
 
 // Load reads the store from the app's config directory. A missing file is an
@@ -123,26 +140,20 @@ func (s *Store) Put(id string, st Stats) error {
 	if s == nil || id == "" || st.Empty() {
 		return nil
 	}
-	if s.path == "" {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		st.UpdatedMS = time.Now().UnixMilli()
-		s.data[id] = st
-		s.pruneLocked()
-		return nil
-	}
-	s.startPersist()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
-		s.mu.Unlock()
 		return ErrClosed
 	}
 	st.UpdatedMS = time.Now().UnixMilli()
 	s.data[id] = st
 	s.pruneLocked()
+	if s.path == "" {
+		return nil
+	}
+	s.ensureWorkerLocked()
 	s.persistGen++
-	s.mu.Unlock()
-	s.signalPersist()
+	s.signalLocked()
 	return nil
 }
 
@@ -151,20 +162,9 @@ func (s *Store) Delete(ids ...string) error {
 	if s == nil || len(ids) == 0 {
 		return nil
 	}
-	if s.path == "" {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		for _, id := range ids {
-			if id != "" {
-				delete(s.data, id)
-			}
-		}
-		return nil
-	}
-	s.startPersist()
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
-		s.mu.Unlock()
 		return ErrClosed
 	}
 	changed := false
@@ -177,71 +177,82 @@ func (s *Store) Delete(ids ...string) error {
 			changed = true
 		}
 	}
-	if !changed {
-		s.mu.Unlock()
+	if !changed || s.path == "" {
 		return nil
 	}
+	s.ensureWorkerLocked()
 	s.persistGen++
-	s.mu.Unlock()
-	s.signalPersist()
+	s.signalLocked()
 	return nil
 }
 
-func (s *Store) startPersist() {
-	if s == nil || s.path == "" {
+func (s *Store) ensureWorkerLocked() {
+	if s.path == "" || s.workerDone != nil {
 		return
 	}
-	s.persistOnce.Do(func() {
-		s.persistCh = make(chan struct{}, 1)
-		s.workerDone = make(chan struct{})
-		go s.persistLoop()
-	})
+	s.wake = make(chan struct{}, 1)
+	s.workerDone = make(chan struct{})
+	go s.persistLoop()
 }
 
-func (s *Store) signalPersist() {
-	if s == nil || s.persistCh == nil {
+func (s *Store) signalLocked() {
+	if s.wake == nil {
 		return
 	}
 	select {
-	case s.persistCh <- struct{}{}:
+	case s.wake <- struct{}{}:
 	default:
 	}
 }
 
 func (s *Store) persistLoop() {
 	defer close(s.workerDone)
-	for range s.persistCh {
-		for {
-			s.mu.Lock()
-			target := s.persistGen
-			if target <= s.committedGen {
-				s.mu.Unlock()
-				break
-			}
-			snap := make(map[string]Stats, len(s.data))
+	for {
+		s.mu.Lock()
+		target := s.persistGen
+		idle := target <= s.committedGen || (s.failedGen >= target && target > s.committedGen)
+		if s.stop && idle {
+			s.mu.Unlock()
+			return
+		}
+		need := target > s.committedGen && s.failedGen < target
+		var snap map[string]Stats
+		var path string
+		write := s.persist
+		if need {
+			snap = make(map[string]Stats, len(s.data))
 			for id, st := range s.data {
 				snap[id] = st
 			}
-			path := s.path
-			s.mu.Unlock()
+			path = s.path
+		}
+		s.mu.Unlock()
+		if !need {
+			<-s.wake
+			continue
+		}
+		if write == nil {
+			write = saveSnapshot
+		}
+		err := write(path, snap)
+		s.mu.Lock()
+		if err != nil {
+			s.failedGen = target
+			s.lastErr = err
+		} else if target > s.committedGen {
+			s.committedGen = target
+			s.lastErr = nil
+		}
+		s.notifyLocked()
+		s.mu.Unlock()
+	}
+}
 
-			err := saveSnapshot(path, snap)
-
-			s.mu.Lock()
-			if err != nil {
-				s.lastErr = err
-			} else {
-				s.lastErr = nil
-				if target > s.committedGen {
-					s.committedGen = target
-				}
-			}
-			stale := s.persistGen != target
-			s.cond.Broadcast()
-			s.mu.Unlock()
-			if !stale {
-				break
-			}
+func (s *Store) notifyLocked() {
+	for _, w := range s.waiters {
+		select {
+		case w.ch <- struct{}{}:
+		default:
 		}
 	}
 }
@@ -257,68 +268,107 @@ func (s *Store) FlushContext(ctx context.Context) error {
 	if s == nil || s.path == "" {
 		return nil
 	}
-	s.startPersist()
-	s.mu.Lock()
-	target := s.persistGen
-	s.mu.Unlock()
-	s.signalPersist()
-	return s.waitCommitted(ctx, target)
-}
-
-// Close flushes pending writes, stops the worker, and rejects later Put/Delete.
-func (s *Store) Close(ctx context.Context) error {
-	if s == nil || s.path == "" {
-		return nil
-	}
-	s.startPersist()
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return nil
+		return ErrClosed
 	}
-	s.closed = true
+	s.ensureWorkerLocked()
 	target := s.persistGen
+	s.signalLocked()
 	s.mu.Unlock()
-
-	s.signalPersist()
-	err := s.waitCommitted(ctx, target)
-
-	s.stopOnce.Do(func() { close(s.persistCh) })
-
-	select {
-	case <-s.workerDone:
-	case <-ctx.Done():
-		if err == nil {
-			err = ctx.Err()
-		}
-	}
-	return err
+	return s.waitGen(ctx, target)
 }
 
-func (s *Store) waitCommitted(ctx context.Context, target uint64) error {
-	done := make(chan error, 1)
-	go func() {
-		s.mu.Lock()
-		for s.committedGen < target && s.lastErr == nil {
-			s.cond.Wait()
-		}
-		var err error
-		if s.committedGen < target {
-			err = s.lastErr
-		}
-		s.mu.Unlock()
-		done <- err
-	}()
-
+// Close rejects later Put/Delete, flushes once, and stops the worker.
+// Every caller waits on the same completion. ctx only bounds this caller;
+// a timed-out caller does not cancel the in-flight snapshot.
+func (s *Store) Close(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.closeOnce.Do(func() {
+		s.closed = true
+		go s.finishClose()
+	})
+	done := s.closeDone
+	s.mu.Unlock()
 	select {
-	case err := <-done:
+	case <-done:
+		s.mu.Lock()
+		err := s.closeErr
+		s.mu.Unlock()
 		return err
 	case <-ctx.Done():
-		s.mu.Lock()
-		s.cond.Broadcast()
-		s.mu.Unlock()
 		return ctx.Err()
 	}
+}
+
+func (s *Store) finishClose() {
+	s.mu.Lock()
+	target := s.persistGen
+	wd := s.workerDone
+	if wd != nil {
+		s.signalLocked()
+	}
+	s.mu.Unlock()
+	var err error
+	if s.path != "" && wd != nil && target > 0 {
+		err = s.waitGen(context.Background(), target)
+	}
+	s.mu.Lock()
+	s.stop = true
+	s.signalLocked()
+	s.mu.Unlock()
+	if wd != nil {
+		<-wd
+	}
+	s.mu.Lock()
+	s.closeErr = err
+	close(s.closeDone)
+	s.mu.Unlock()
+}
+
+func (s *Store) waitGen(ctx context.Context, target uint64) error {
+	for {
+		s.mu.Lock()
+		if s.committedGen >= target {
+			s.mu.Unlock()
+			return nil
+		}
+		if s.failedGen >= target && s.lastErr != nil {
+			err := s.lastErr
+			s.mu.Unlock()
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		w := &genWait{ch: make(chan struct{}, 1)}
+		s.waiters = append(s.waiters, w)
+		s.mu.Unlock()
+		select {
+		case <-w.ch:
+			s.dropWaiter(w)
+		case <-ctx.Done():
+			s.dropWaiter(w)
+			return ctx.Err()
+		}
+	}
+}
+
+func (s *Store) dropWaiter(w *genWait) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.waiters[:0]
+	for _, cur := range s.waiters {
+		if cur != w {
+			kept = append(kept, cur)
+		}
+	}
+	s.waiters = kept
 }
 
 // Len reports how many conversations are remembered. It exists so the cap can

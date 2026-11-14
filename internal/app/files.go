@@ -2,6 +2,7 @@ package app
 
 import (
 	"container/heap"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -44,7 +45,6 @@ type fileBrowser struct {
 	problems  map[string]string      // why a read failed
 	loading   map[string]bool        // a read is in flight
 	truncated map[string]int         // entries the cap left out
-	gate      chan struct{}          // limits in-flight directory reads
 	// rows is the flattened projection of all of the above. A frame draws the
 	// same tree many times between two changes, so it is rebuilt lazily on the
 	// first frame after a write instead of on every repaint. Both fields are
@@ -62,9 +62,12 @@ func newFileBrowser() *fileBrowser {
 		loading:   map[string]bool{},
 		truncated: map[string]int{},
 		dirty:     true,
-		gate:      make(chan struct{}, maxFileReads),
 	}
 }
+
+// fileReadHook is called before each directory scan. Tests replace it to
+// block and count in-flight reads. The default observes cancellation.
+var fileReadHook = func(ctx context.Context) error { return ctx.Err() }
 
 // markDirty retires the cached projection. Every write to a listing, an
 // expansion or a read flag goes through it; the caller holds workspace.mu.
@@ -105,21 +108,30 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 	s.workspace.mu.Unlock()
 
 	s.invalidate()
+	ctx, gen, gate := s.workspace.fileReadPermit()
 	go func() {
-		fb.gate <- struct{}{}
-		defer func() { <-fb.gate }()
-		s.workspace.mu.Lock()
-		current := s.workspace.files == fb
-		s.workspace.mu.Unlock()
-		if !current {
+		select {
+		case <-ctx.Done():
+			return
+		case gate <- struct{}{}:
+			defer func() { <-gate }()
+		}
+		if err := fileReadHook(ctx); err != nil {
+			s.workspace.mu.Lock()
+			if s.workspace.files == fb && s.workspace.fileReadGen == gen {
+				delete(fb.loading, dir)
+				fb.markDirty()
+			}
+			s.workspace.mu.Unlock()
+			s.invalidate()
 			return
 		}
-		entries, total, err := readFileEntries(dir)
+		entries, total, err := readFileEntries(ctx, dir)
 		s.workspace.mu.Lock()
 		// A refresh replaces the browser while a read is in flight. The
 		// answer belongs to the browser that asked for it; filing it into
 		// its successor would resurrect rows the refresh discarded.
-		if s.workspace.files != fb {
+		if s.workspace.files != fb || s.workspace.fileReadGen != gen {
 			s.workspace.mu.Unlock()
 			return
 		}
@@ -142,7 +154,10 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 // readFileEntries lists one folder: folders first, then files, each by name
 // without case. A symlinked folder is shown as a folder, since expanding it
 // reads through the link, which is what the click asked for.
-func readFileEntries(dir string) ([]fileEntry, int, error) {
+func readFileEntries(ctx context.Context, dir string) ([]fileEntry, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	f, err := os.Open(dir)
 	if err != nil {
 		return nil, 0, err
@@ -152,12 +167,18 @@ func readFileEntries(dir string) ([]fileEntry, int, error) {
 	kept := &entryHeap{}
 	total := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		batch, err := f.ReadDir(128)
 		if len(batch) > 0 {
 			for _, item := range batch {
 				total++
 				isDir := item.IsDir()
 				if !isDir && item.Type()&os.ModeSymlink != 0 {
+					if ctx.Err() != nil {
+						return nil, 0, ctx.Err()
+					}
 					if info, statErr := os.Stat(filepath.Join(dir, item.Name())); statErr == nil {
 						isDir = info.IsDir()
 					}
@@ -211,10 +232,10 @@ func entryBefore(a, b rankedEntry) bool {
 // entryHeap keeps the worst kept name at the root so a better name can replace it.
 type entryHeap []rankedEntry
 
-func (h entryHeap) Len() int { return len(h) }
+func (h entryHeap) Len() int           { return len(h) }
 func (h entryHeap) Less(i, j int) bool { return entryBefore(h[j], h[i]) }
-func (h entryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *entryHeap) Push(x any) { *h = append(*h, x.(rankedEntry)) }
+func (h entryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *entryHeap) Push(x any)        { *h = append(*h, x.(rankedEntry)) }
 func (h *entryHeap) Pop() any {
 	old := *h
 	n := len(old)
@@ -425,6 +446,9 @@ func (c *Coordinator) refreshFiles(s *ProjectWindow) {
 			expanded = append(expanded, dir)
 		}
 	}
+	s.workspace.mu.Unlock()
+	s.workspace.retireFileReads()
+	s.workspace.mu.Lock()
 	fb := newFileBrowser()
 	for _, dir := range expanded {
 		fb.expanded[dir] = true

@@ -13,7 +13,9 @@ type ReviewData struct {
 	Branch  string
 	Changes []Change
 	// ListTruncated means the status or line counts hit a read budget.
+	// CountsUnknown means a zero tally is not a real measurement.
 	ListTruncated bool
+	CountsUnknown bool
 	// Workspace is the tree read as the drawer reads it: reading, a
 	// repository, not a git repository at all, or unreadable. An empty list
 	// means four different things depending on which one it is.
@@ -103,7 +105,9 @@ func reviewSummary(d ReviewData) string {
 		adds += ch.Adds
 		dels += ch.Dels
 	}
-	if adds > 0 || dels > 0 {
+	if d.CountsUnknown {
+		out += " · counts unavailable"
+	} else if adds > 0 || dels > 0 {
 		out += " · +" + itoa(adds) + " −" + itoa(dels)
 	}
 	if d.Branch != "" {

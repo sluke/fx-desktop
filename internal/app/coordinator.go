@@ -77,6 +77,8 @@ type Coordinator struct {
 	// on the app loop, so neither needs mu.
 	attention map[string]bool
 	badge     int
+
+	quitFlushStarted bool
 }
 
 type pickerModel struct {
@@ -120,17 +122,38 @@ func NewCoordinator() *Coordinator {
 	}
 }
 
-// Setup registers menus, tray, and deep-link handlers.
-func (c *Coordinator) Setup() {
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
-		if c.stats == nil {
-			return
-		}
+// beginQuit lets the quit callback return immediately. The stats flush runs
+// in the background, bounded by 2s, and then quit is invoked again. A second
+// call does not prevent the quit. Hiding a window to the tray never reaches
+// this path, so the store stays open.
+func (c *Coordinator) beginQuit(e interface{ PreventDefault() }, quit func()) {
+	if c == nil || c.stats == nil || quit == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.quitFlushStarted {
+		c.mu.Unlock()
+		return
+	}
+	c.quitFlushStarted = true
+	c.mu.Unlock()
+	if e != nil {
+		e.PreventDefault()
+	}
+	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := c.stats.Close(ctx); err != nil {
 			log.Println("session stats:", err)
 		}
+		quit()
+	}()
+}
+
+// Setup registers menus, tray, and deep-link handlers.
+func (c *Coordinator) Setup() {
+	mygo.App.OnWillQuit(func(e *mygo.QuitEvent) {
+		c.beginQuit(e, mygo.App.Quit)
 	})
 	mygo.App.SetName("fx")
 	_ = mygo.App.RegisterURLScheme("fx-desktop")

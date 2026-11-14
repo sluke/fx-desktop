@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"fx-desktop/internal/acp"
 	"fx-desktop/internal/conversation"
 	"fx-desktop/internal/sessionstats"
+	"fx-desktop/internal/workspace"
 )
 
 // shutdownGrace is how long fx is given to exit after stdin EOF before it is
@@ -423,7 +425,9 @@ func (c *chatSession) saveStats() {
 	if id == "" || st.Empty() {
 		return
 	}
-	_ = c.stats.Put(id, st)
+	if err := c.stats.Put(id, st); err != nil && !errors.Is(err, sessionstats.ErrClosed) {
+		log.Println("session stats:", err)
+	}
 }
 
 func (c *chatSession) snapshot() chatSnapshot {
@@ -1229,6 +1233,7 @@ func toolContent(raw json.RawMessage) (string, *conversation.DiffInfo) {
 	}
 	var out strings.Builder
 	var diff *conversation.DiffInfo
+	diffBlocks := 0
 	for _, b := range blocks {
 		switch {
 		case b.Type == "content" && b.Content.Type == "text":
@@ -1242,10 +1247,31 @@ func toolContent(raw json.RawMessage) (string, *conversation.DiffInfo) {
 			if diff == nil {
 				diff = &conversation.DiffInfo{}
 			}
+			diffBlocks++
 			if diff.Path == "" {
 				diff.Path = b.Path
 			}
-			diff.Lines = append(diff.Lines, lineDiff(b.OldText, b.NewText)...)
+			if diffBlocks > 8 || len(diff.Lines) >= workspace.MaxDiffLines {
+				diff.Truncated = true
+				continue
+			}
+			part := workspace.CompareTexts(b.OldText, b.NewText)
+			if part.Truncated {
+				diff.Truncated = true
+			}
+			if part.ComparisonSkipped {
+				diff.ComparisonSkipped = true
+			}
+			room := workspace.MaxDiffLines - len(diff.Lines)
+			lines := part.Lines
+			if b.Path != "" && b.Path != diff.Path && room > 0 {
+				lines = append([]workspace.DiffLine{{Kind: workspace.DiffContext, Text: b.Path}}, lines...)
+			}
+			if len(lines) > room {
+				lines = lines[:room]
+				diff.Truncated = true
+			}
+			diff.Lines = append(diff.Lines, lines...)
 		}
 	}
 	return truncateText(strings.TrimSpace(out.String()), 128*1024), diff

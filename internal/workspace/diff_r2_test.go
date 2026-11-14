@@ -18,9 +18,22 @@ func BenchmarkCompareTextsMillionShortLines(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		out := CompareTexts("", in)
-		if len(out) > MaxDiffLines {
-			b.Fatalf("len=%d", len(out))
+		if len(out.Lines) > MaxDiffLines {
+			b.Fatalf("len=%d", len(out.Lines))
 		}
+	}
+}
+
+func TestCompareTextsKeepsBlankLineDeletion(t *testing.T) {
+	got := CompareTexts("a\n\nb\n", "a\nb\n")
+	var dels int
+	for _, line := range got.Lines {
+		if line.Kind == DiffDel && line.Text == "" {
+			dels++
+		}
+	}
+	if dels != 1 {
+		t.Fatalf("blank-line deletion missing: %+v", got.Lines)
 	}
 }
 
@@ -32,8 +45,8 @@ func TestReviewR2CompareLineCap(t *testing.T) {
 		b.WriteString("x\n")
 	}
 	out := CompareTexts("", b.String())
-	if len(out) > MaxDiffLines {
-		t.Fatalf("got %d diff lines, want at most %d", len(out), MaxDiffLines)
+	if len(out.Lines) > MaxDiffLines {
+		t.Fatalf("got %d diff lines, want at most %d", len(out.Lines), MaxDiffLines)
 	}
 }
 
@@ -44,7 +57,7 @@ func TestReviewR2CompareUTF8(t *testing.T) {
 	for i := 0; i < maxCompareTextBytes/2/len(unit)+10; i++ {
 		b.WriteString(unit + "\n")
 	}
-	out := CompareTexts("", b.String())
+	out := CompareTexts("", b.String()).Lines
 	for _, line := range out {
 		if !utf8.ValidString(strings.TrimPrefix(line.Text, "+")) && line.Text != "" {
 			// degrade path uses raw line text without +

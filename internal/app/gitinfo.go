@@ -24,9 +24,10 @@ type GitInfo struct {
 	// commit or a review, so the rail does not raise it again.
 	Modified   map[string]time.Time
 	LastCommit time.Time
-	// ListTruncated means status or numstat hit the read budget. The list and
-	// counts that follow are a prefix, not the whole work tree.
+	// ListTruncated means status or numstat hit the read budget. CountsUnknown
+	// means line counts could not be read and must not be shown as zero.
 	ListTruncated bool
+	CountsUnknown bool
 }
 
 // unreviewed reports whether any change is newer than the watermark — the
@@ -55,11 +56,6 @@ func (g *GitInfo) unreviewed(since time.Time) bool {
 // is not a failure: the panels say "Not a git repository" and stay calm.
 var errNoRepo = errors.New("not a git repository")
 
-// gitEmptyTree is git's canonical empty tree object. Before the first commit,
-// diffs are measured from this tree to the working tree so staged work is
-// visible in review.
-const gitEmptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-
 // gitRepoRoot is the work tree root for dir. Git porcelain paths are always
 // relative to this directory, even when the UI opened a subdirectory.
 func gitRepoRoot(ctx context.Context, dir string) (string, error) {
@@ -82,26 +78,37 @@ func gitLiteralPathspec(path string) string {
 
 // gitDiffBase is the object diffs compare against: HEAD when it exists, otherwise
 // the empty tree for repositories with no commits yet.
-func gitDiffBase(ctx context.Context, root string) string {
+func gitDiffBase(ctx context.Context, root string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	verify := exec.CommandContext(ctx, "git", "rev-parse", "-q", "--verify", "HEAD")
 	verify.Dir = root
-	if verify.Run() == nil {
-		return "HEAD"
+	if err := verify.Run(); err == nil {
+		return "HEAD", nil
+	} else if ctx.Err() != nil {
+		return "", ctx.Err()
+	} else {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || (exitErr.ExitCode() != 1 && exitErr.ExitCode() != 128) {
+			return "", err
+		}
 	}
 	cmd := exec.CommandContext(ctx, "git", "hash-object", "-t", "tree", "--stdin")
 	cmd.Dir = root
 	cmd.Stdin = strings.NewReader("")
 	out, err := cmd.Output()
 	if err != nil {
-		return gitEmptyTree
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", err
 	}
-	line := string(out)
-	line = strings.TrimSuffix(line, "\n")
-	line = strings.TrimSuffix(line, "\r")
+	line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")
 	if line == "" {
-		return gitEmptyTree
+		return "", errors.New("git returned an empty tree id")
 	}
-	return line
+	return line, nil
 }
 
 // gitInfo runs git status and git diff in dir. The error is errNoRepo when
@@ -132,8 +139,12 @@ func gitInfo(ctx context.Context, dir string) (*GitInfo, error) {
 		return nil, status.err
 	}
 	out := completeNULRecords(status.data, status.truncated)
-	adds, dels, countsCut := gitNumstat(ctx, root)
+	adds, dels, countsCut, countsErr := gitNumstat(ctx, root)
 	info.ListTruncated = status.truncated || countsCut
+	info.CountsUnknown = countsErr != nil
+	if countsErr != nil {
+		adds, dels = map[string]int{}, map[string]int{}
+	}
 	info.LastCommit = gitLastCommit(ctx, root)
 	info.Modified = map[string]time.Time{}
 
@@ -231,10 +242,17 @@ func gitFileDiff(ctx context.Context, dir, path string) ([]workspace.DiffLine, i
 	if err != nil {
 		return nil, 0, false, err
 	}
-	base := gitDiffBase(ctx, root)
+	base, err := gitDiffBase(ctx, root)
+	if err != nil {
+		return nil, 0, false, err
+	}
 
 	var args []string
-	if gitIsUntracked(ctx, root, path) {
+	untracked, uerr := gitIsUntracked(ctx, root, path)
+	if uerr != nil {
+		return nil, 0, false, uerr
+	}
+	if untracked {
 		full := filepath.Join(root, path)
 		args = []string{"diff", "--no-color", "--no-index", "--", os.DevNull, full}
 	} else {
@@ -264,21 +282,27 @@ func gitFileDiff(ctx context.Context, dir, path string) ([]workspace.DiffLine, i
 
 // gitIsUntracked reports whether git has never seen this path. `git
 // ls-files --error-unmatch` exits non-zero when it is not in the index.
-func gitIsUntracked(ctx context.Context, dir, path string) bool {
-	cmd := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", path)
+func gitIsUntracked(ctx context.Context, dir, path string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "ls-files", "--error-unmatch", "--", gitLiteralPathspec(path))
 	cmd.Dir = dir
 	err := cmd.Run()
 	if err == nil {
-		return false
+		return false, nil
+	}
+	if ctx.Err() != nil {
+		return false, ctx.Err()
 	}
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-		return false
+		return false, err
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, path)); statErr != nil {
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
 // classifyUnifiedDiff classifies a unified diff. The classification is a fact
@@ -321,17 +345,20 @@ func gitMark(xy string) string {
 // gitNumstat maps path to added and deleted line counts from HEAD (or the
 // empty tree) through the working tree — the same range review shows.
 // Untracked files have no diff and so no counts.
-func gitNumstat(ctx context.Context, root string) (map[string]int, map[string]int, bool) {
+func gitNumstat(ctx context.Context, root string) (map[string]int, map[string]int, bool, error) {
 	adds := map[string]int{}
 	dels := map[string]int{}
-	base := gitDiffBase(ctx, root)
+	base, baseErr := gitDiffBase(ctx, root)
+	if baseErr != nil {
+		return adds, dels, false, baseErr
+	}
 	// -z keeps a path with spaces, tabs or quotes as the file's own name. Its
 	// records are "adds<TAB>dels<TAB>path", NUL-terminated.
 	res := gitCommandOutput(ctx, root, maxGitDiffBytes, "diff", "--numstat", "-z", base)
 	if res.err != nil && !res.truncated {
 		var exitErr *exec.ExitError
 		if !errors.As(res.err, &exitErr) || exitErr.ExitCode() != 1 || len(res.data) == 0 {
-			return adds, dels, true
+			return adds, dels, false, res.err
 		}
 	}
 	out := completeNULRecords(res.data, res.truncated)
@@ -353,7 +380,7 @@ func gitNumstat(ctx context.Context, root string) (map[string]int, map[string]in
 		path := record[second+1:]
 		addN := plusOrZero(record[:first])
 		delN := plusOrZero(record[first+1 : second])
-		if path == "" || path == "0" {
+		if path == "" {
 			if i+2 >= len(records) {
 				break
 			}
@@ -375,7 +402,7 @@ func gitNumstat(ctx context.Context, root string) (map[string]int, map[string]in
 		adds[path] += addN
 		dels[path] += delN
 	}
-	return adds, dels, res.truncated
+	return adds, dels, res.truncated, nil
 }
 
 // completeNULRecords drops a trailing partial record when the read stopped

@@ -16,5 +16,5 @@ const (
 // fact about text, not about the palette — and it never fails: when the inputs
 // are too large to compare it degrades to reporting the new text as added.
 func lineDiff(oldText, newText string) []workspace.DiffLine {
-	return workspace.CompareTexts(oldText, newText)
+	return workspace.CompareTexts(oldText, newText).Lines
 }

@@ -47,8 +47,10 @@ type ShellResult struct {
 
 // DiffInfo is one file's change as a list of classified lines.
 type DiffInfo struct {
-	Path  string
-	Lines []workspace.DiffLine
+	Path              string
+	Lines             []workspace.DiffLine
+	Truncated         bool
+	ComparisonSkipped bool
 }
 
 // PermissionOption is one choice an approval request offers. The JSON tags are

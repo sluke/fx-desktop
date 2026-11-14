@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -194,7 +196,7 @@ func TestReadFileEntriesCapsWithoutLosingTotal(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	entries, total, err := readFileEntries(root)
+	entries, total, err := readFileEntries(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +215,7 @@ func TestReadFileEntriesOrdersFoldersThenNames(t *testing.T) {
 	}
 	writeFiles(t, root, "alpha.txt", "Zeta.txt", "beta.txt")
 
-	entries, total, err := readFileEntries(root)
+	entries, total, err := readFileEntries(context.Background(), root)
 	if err != nil || total != 4 || len(entries) != 4 {
 		t.Fatalf("read: entries=%v total=%d err=%v", entries, total, err)
 	}
@@ -227,6 +229,65 @@ func TestReadFileEntriesOrdersFoldersThenNames(t *testing.T) {
 			t.Fatalf("order = %v, want %v", names, want)
 		}
 	}
+}
+
+func TestFileReadsShareOneWindowGate(t *testing.T) {
+	var cur, max atomic.Int32
+	release := make(chan struct{})
+	entered := make(chan struct{}, 16)
+	orig := fileReadHook
+	fileReadHook = func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n := cur.Add(1)
+		for {
+			m := max.Load()
+			if n <= m || max.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		cur.Add(-1)
+		return ctx.Err()
+	}
+	t.Cleanup(func() {
+		fileReadHook = orig
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	c := NewCoordinator()
+	root := t.TempDir()
+	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
+	s.workspace.files = newFileBrowser()
+	for i := 0; i < 6; i++ {
+		dir := filepath.Join(root, fmt.Sprintf("d%d", i))
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		s.workspace.files.expanded[dir] = true
+	}
+	c.refreshFiles(s)
+	for i := 0; i < maxFileReads; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for directory reads")
+		}
+	}
+	c.refreshFiles(s)
+	if got := max.Load(); got > maxFileReads {
+		t.Fatalf("concurrent reads = %d, window cap is %d", got, maxFileReads)
+	}
+	s.workspace.cancelFileReads()
 }
 
 func writeFiles(t *testing.T, root string, paths ...string) {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -47,6 +48,12 @@ type workspaceController struct {
 	// files is the right rail's Files tab: the listings it has read and the
 	// folders the user opened.
 	files *fileBrowser
+	// fileGate is the window's directory-read limit. It outlives a refresh,
+	// which only bumps fileReadGen and cancels the previous context.
+	fileGate    chan struct{}
+	fileReadGen uint64
+	fileCtx     context.Context
+	fileCancel  context.CancelFunc
 	// mentionFiles are the project's files the @ picker offers, mentionErr
 	// is why they could not be listed.
 	mentionFiles   []chrome.MentionFile
@@ -55,6 +62,40 @@ type workspaceController struct {
 	// gen retires an older listing: the picker may be opened twice, and the
 	// slower answer must not overwrite the newer one.
 	gen uint64
+}
+
+func (w *workspaceController) fileReadPermit() (context.Context, uint64, chan struct{}) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fileGate == nil {
+		w.fileGate = make(chan struct{}, maxFileReads)
+	}
+	if w.fileCtx == nil {
+		w.fileCtx, w.fileCancel = context.WithCancel(context.Background())
+	}
+	return w.fileCtx, w.fileReadGen, w.fileGate
+}
+
+func (w *workspaceController) retireFileReads() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.fileReadGen++
+	if w.fileCancel != nil {
+		w.fileCancel()
+	}
+	w.fileCtx, w.fileCancel = context.WithCancel(context.Background())
+	if w.fileGate == nil {
+		w.fileGate = make(chan struct{}, maxFileReads)
+	}
+}
+
+func (w *workspaceController) cancelFileReads() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.fileReadGen++
+	if w.fileCancel != nil {
+		w.fileCancel()
+	}
 }
 
 // gitSnapshot is the working-tree state as the last read left it.

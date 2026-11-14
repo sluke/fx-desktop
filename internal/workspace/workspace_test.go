@@ -77,12 +77,12 @@ func TestClassifyUnifiedDiff(t *testing.T) {
 // A whole-file edit is compared line by line, and a file too large to compare
 // degrades to "all added" rather than allocating the table.
 func TestCompareTexts(t *testing.T) {
-	lines := CompareTexts("a\nb\n", "a\nc\n")
+	lines := CompareTexts("a\nb\n", "a\nc\n").Lines
 	if len(lines) != 3 || lines[1].Kind != DiffDel || lines[2].Kind != DiffAdd {
 		t.Fatalf("lines = %+v", lines)
 	}
 	huge := strings.Repeat("x\n", MaxDiffLines+1)
-	if lines := CompareTexts("", huge); len(lines) != MaxDiffLines || lines[0].Kind != DiffAdd {
+	if lines := CompareTexts("", huge).Lines; len(lines) != MaxDiffLines || lines[0].Kind != DiffAdd {
 		t.Fatalf("degradation = %d lines", len(lines))
 	}
 }
