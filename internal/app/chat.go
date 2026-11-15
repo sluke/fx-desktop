@@ -45,7 +45,66 @@ type closeResult struct {
 	problem error
 }
 
+// producerGroup is the quit drain's independent completion signal (Q5).
+// closedDone only says the process teardown has a result; a runTurn that got
+// its response may still be summing tokens and calling saveStats. Every such
+// producer takes a slot here, and stop() returns a channel that closes only
+// when the last one is gone. enter() refuses new work once the drain began.
+type producerGroup struct {
+	mu       sync.Mutex
+	count    int
+	closed   bool
+	signaled bool
+	done     chan struct{}
+}
+
+func (g *producerGroup) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.count++
+	return true
+}
+
+func (g *producerGroup) exit() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.count > 0 {
+		g.count--
+	}
+	g.signalLocked()
+}
+
+func (g *producerGroup) stopped() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.closed
+}
+
+func (g *producerGroup) stop() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
+	if g.done == nil {
+		g.done = make(chan struct{})
+	}
+	g.signalLocked()
+	return g.done
+}
+
+func (g *producerGroup) signalLocked() {
+	if g.closed && g.count == 0 && !g.signaled {
+		g.signaled = true
+		close(g.done)
+	}
+}
+
 type chatSession struct {
+	// producers tracks every goroutine that can still write session stats.
+	// It is separate from closedDone on purpose (Q5).
+	producers producerGroup
 	// closedDone is closed once the teardown has a result: the fx process is
 	// confirmed reaped, or there is definitely no process. A replacement
 	// conversation waits on it and then reads that result (§4.3).
@@ -429,8 +488,20 @@ func (c *chatSession) restoreStats(id string) {
 
 // saveStats records the conversation's current counters. It must be called
 // without c.mu held: the store writes a file, and the app loop must never
-// wait for that.
+// wait for that. A refused slot means the quit drain has begun; the drain
+// takes one final snapshot after every producer is gone, so skipping this
+// write cannot lose the last counters (Q5).
 func (c *chatSession) saveStats() {
+	if c.stats == nil || !c.producers.enter() {
+		return
+	}
+	defer c.producers.exit()
+	c.snapshotStats()
+}
+
+// snapshotStats is the unconditional write used by the quit owner after it
+// has waited for all producers. It does not take a producer slot.
+func (c *chatSession) snapshotStats() {
 	if c.stats == nil {
 		return
 	}
@@ -1429,6 +1500,9 @@ func (c *chatSession) submit(text string, images []promptImage, mentions []promp
 // ends. appending is false only when the text is already in the transcript
 // (a queued message being delivered).
 func (c *chatSession) send(text string, images []promptImage, mentions []promptMention, appending bool) bool {
+	if c.producers.stopped() {
+		return false
+	}
 	c.mu.Lock()
 	if !c.ready || c.configuring || c.closed {
 		c.mu.Unlock()
@@ -1449,6 +1523,12 @@ func (c *chatSession) send(text string, images []promptImage, mentions []promptM
 		default:
 			return false
 		}
+	}
+	// The turn is a stats producer from the moment it is reserved. A quit
+	// that has begun must not admit another one (Q5).
+	if !c.producers.enter() {
+		c.mu.Unlock()
+		return false
 	}
 	client, sid := c.beginTurnLocked(text, images, mentions, appending)
 	c.mu.Unlock()
@@ -1529,8 +1609,12 @@ func (c *chatSession) runTurn(client *acp.Client, sid, text string, images []pro
 	}
 	c.invalidate()
 	if hasNext {
+		// The producer slot travels with the chain: a queued turn is still
+		// the same stats producer, not a new one the drain could miss.
 		go c.runTurn(next.client, next.sid, next.prompt.text, nil, next.prompt.mentions)
+		return
 	}
+	c.producers.exit()
 }
 
 // activeTurn is a queued message that has just been reserved as a prompt.

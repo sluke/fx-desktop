@@ -154,21 +154,69 @@ func TestVersionContextBoundsHungCLI(t *testing.T) {
 	}
 }
 
+// The wrapper exits but a child still owns stdout. A process timeout alone
+// does not stop Cmd.Output from waiting for that pipe to close; WaitDelay is
+// what releases it. The r5 logs contain 751 ms and 3.001 s failures of the
+// old assertion, which measured the whole Version call including process
+// startup and scheduler delay. This version uses explicit helper signals:
+// a start marker (whose mtime is the phase-0 timestamp), a holder child that
+// keeps stdout open until released, and a completion marker. The parent
+// bounds the helper and reclaims it (T6). VersionContext itself is unchanged.
 func TestVersionContextBoundsInheritedOutputPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the shell helper is POSIX-only")
+	}
 	home := testutil.IsolateHome(t)
 	path := filepath.Join(home, "fx")
-	// The wrapper exits but its child still owns stdout. A process timeout
-	// alone does not stop Cmd.Output from waiting for that pipe to close.
-	script := "#!/bin/sh\n/bin/sleep 1 &\necho 0.0.13\n"
+	started := filepath.Join(home, "started")
+	release := filepath.Join(home, "release")
+	holderDone := filepath.Join(home, "holder-done")
+	script := "#!/bin/sh\n" +
+		"printf started > \"$FX_T6_STARTED\"\n" +
+		"( i=0; while [ $i -lt 100 ]; do [ -f \"$FX_T6_RELEASE\" ] && break; /bin/sleep 0.05; i=$((i+1)); done; printf done > \"$FX_T6_HOLDER_DONE\" ) &\n" +
+		"printf '0.0.13\\n'\n" +
+		"exit 0\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("FX_T6_STARTED", started)
+	t.Setenv("FX_T6_RELEASE", release)
+	t.Setenv("FX_T6_HOLDER_DONE", holderDone)
+	defer func() {
+		_ = os.WriteFile(release, []byte("release"), 0o600)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(holderDone); err == nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Log("holder child did not confirm release within 2s")
+	}()
+
 	start := time.Now()
-	if _, err := Version(path); err == nil {
+	_, err := Version(path)
+	returned := time.Now()
+	info, statErr := os.Stat(started)
+	if statErr != nil {
+		t.Fatalf("wrapper never signalled its start: %v", statErr)
+	}
+	pipeWait := returned.Sub(info.ModTime())
+	t.Logf("fxbin inherited pipe: total=%v after-start=%v", returned.Sub(start), pipeWait)
+	if err == nil {
 		t.Fatal("expected inherited stdout to hit WaitDelay")
 	}
-	if elapsed := time.Since(start); elapsed > 750*time.Millisecond {
-		t.Fatalf("waiting for a child pipe stalled the query: %v", elapsed)
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("the inherited pipe was not released by WaitDelay: %v", err)
+	}
+	// Measure the pipe wait from the wrapper's own start signal, not from a
+	// timer that also pays for process spawn and scheduler contention. The
+	// ceiling is well below VersionContext's 3s parent deadline.
+	if pipeWait > 750*time.Millisecond {
+		t.Fatalf("waiting for a child pipe stalled the query after start: %v", pipeWait)
+	}
+	if _, statErr := os.Stat(holderDone); statErr == nil {
+		t.Fatal("the query waited for the holder child to finish")
 	}
 }
 

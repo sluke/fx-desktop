@@ -162,6 +162,38 @@ func TestDiffHeaderSeparatesWhatItCounts(t *testing.T) {
 	}
 }
 
+// A comparison that was skipped cannot report exact additions/removals: the
+// lines are a preview of one side, so the header says so and the body keeps
+// the neutral mark instead of painting everything as added.
+func TestDiffPreviewDoesNotImpersonateExactCounts(t *testing.T) {
+	state := ConversationState{}
+	h := ConversationHost{Ready: true, Messages: []ChatMessage{{
+		ID: 5, Role: "tool", Title: "Edit big.go", Status: "completed", Done: true,
+		Diff: &DiffInfo{Path: "big.go", ComparisonSkipped: true, Truncated: true, Lines: []DiffLine{
+			{Kind: DiffAdd, Text: "one"},
+			{Kind: DiffAdd, Text: "two"},
+		}},
+	}}}
+	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 900, 700)
+	mustHave(t, ts, "big.go", "preview", "one", "two")
+	mustNotHaveToken(t, ts, "+2", "−0", "+", "-")
+}
+
+// A truncated diff did classify what it kept, but it is not the whole file,
+// so the counts are marked partial rather than presented as the final figures.
+func TestDiffTruncatedMarksCountsPartial(t *testing.T) {
+	state := ConversationState{}
+	h := ConversationHost{Ready: true, Messages: []ChatMessage{{
+		ID: 5, Role: "tool", Title: "Edit big.go", Status: "completed", Done: true,
+		Diff: &DiffInfo{Path: "big.go", Truncated: true, Lines: []DiffLine{
+			{Kind: DiffDel, Text: "old"},
+			{Kind: DiffAdd, Text: "new"},
+		}},
+	}}}
+	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 900, 700)
+	mustHave(t, ts, "big.go", "+1", "−1", "partial", "old", "new")
+}
+
 // While a turn runs the composer stays open and says what Enter will do:
 // steer the turn when fx can take it, queue the text when it cannot.
 func TestConversationComposerKeepsWorkingWhileBusy(t *testing.T) {

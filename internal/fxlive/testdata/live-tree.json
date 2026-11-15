@@ -1,0 +1,35 @@
+{
+  "kind": "live_sessions",
+  "count": 2,
+  "generated_at": "2026-11-15T10:03:00Z",
+  "sessions": [
+    {
+      "id": "01J9ZQ7K3M4N5P6Q7R8S9T0V1W",
+      "title": "Fix the diff renderer",
+      "state": "working",
+      "model": "claude-sonnet-4-5",
+      "profile": "builder",
+      "workspace_root": "/Users/dev/project",
+      "updated_at": "2026-11-15T10:02:41Z",
+      "token_usage": { "input": 1200, "output": 340 },
+      "agents": [
+        {
+          "name": "reviewer",
+          "state": "idle",
+          "profile": "reviewer",
+          "agent_profile": "reviewer",
+          "agents": [
+            { "name": "helper", "state": "working", "unknown_field": true }
+          ]
+        },
+        { "name": "reviewer", "state": "idle", "profile": "reviewer" }
+      ]
+    },
+    {
+      "session_id": "01J9ZQ8B4C5D6E7F8G9H0J1K2M",
+      "title": "Docs pass",
+      "status": "idle",
+      "agents": []
+    }
+  ]
+}

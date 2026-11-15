@@ -43,14 +43,8 @@ type GitHubForm struct {
 // A composite agent path is not a session id and must not be given to delete.
 func sessionReadArgs(ref, tail string) ([]string, error) {
 	ref = strings.TrimSpace(ref)
-	parts := strings.Split(ref, "/")
-	if ref == "" || len(parts) > 4 {
+	if !fxsessions.ValidRef(ref) {
 		return nil, fmt.Errorf("Enter a session id")
-	}
-	for _, part := range parts {
-		if !fxsessions.ValidID(part) {
-			return nil, fmt.Errorf("Enter a session id")
-		}
 	}
 	args := []string{"session", ref, "--json"}
 	if strings.TrimSpace(tail) == "" {

@@ -30,6 +30,13 @@ import (
 // path.
 const maxIDLength = 128
 
+// MaxRefSegments is the deepest session/agent address the local read adapter
+// will hand to fx. Both the live-session parser and the management command
+// builder use ValidRef, so a row the GUI offers for selection is always one
+// the command layer can construct (L6b). This is a local validation ceiling,
+// not a claim about how deep a real fx build can address.
+const MaxRefSegments = 4
+
 // ValidID reports whether id is safe to use as one path component under the
 // sessions root. fx IDs use letters, digits, '-' and '_'; anything else could
 // escape the root or name the catalog file beside it.
@@ -43,6 +50,25 @@ func ValidID(id string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// ValidRef reports whether a slash-separated session/agent address is one
+// the command layer will pass to fx. It is shared by the live parser and the
+// command builder so the two cannot disagree about a selectable row.
+func ValidRef(ref string) bool {
+	if ref == "" {
+		return false
+	}
+	parts := strings.Split(ref, "/")
+	if len(parts) > MaxRefSegments {
+		return false
+	}
+	for _, part := range parts {
+		if !ValidID(part) {
+			return false
+		}
 	}
 	return true
 }

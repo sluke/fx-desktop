@@ -235,8 +235,15 @@ func TestFileReadsShareOneWindowGate(t *testing.T) {
 	var cur, max atomic.Int32
 	release := make(chan struct{})
 	entered := make(chan struct{}, 16)
-	orig := fileReadHook
-	fileReadHook = func(ctx context.Context) error {
+
+	c := NewCoordinator()
+	root := t.TempDir()
+	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
+	s.workspace.files = newFileBrowser()
+	// The gate belongs to this window and is fixed before the first read
+	// starts. The old test replaced a process-wide hook and then restored it
+	// during cleanup, which raced a read that had already been scheduled (R4).
+	s.workspace.fileRead = func(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -255,19 +262,20 @@ func TestFileReadsShareOneWindowGate(t *testing.T) {
 		cur.Add(-1)
 		return ctx.Err()
 	}
+	// Cancel first, then unblock whatever is already inside the gate, then
+	// wait for every started read to return — including the ones still
+	// queued on the gate. Restoring the gate is unnecessary: it dies with
+	// this window.
 	t.Cleanup(func() {
-		fileReadHook = orig
+		s.workspace.cancelFileReads()
 		select {
 		case <-release:
 		default:
 			close(release)
 		}
+		s.workspace.waitFileReads()
 	})
 
-	c := NewCoordinator()
-	root := t.TempDir()
-	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
-	s.workspace.files = newFileBrowser()
 	for i := 0; i < 6; i++ {
 		dir := filepath.Join(root, fmt.Sprintf("d%d", i))
 		if err := os.Mkdir(dir, 0o755); err != nil {
@@ -287,7 +295,6 @@ func TestFileReadsShareOneWindowGate(t *testing.T) {
 	if got := max.Load(); got > maxFileReads {
 		t.Fatalf("concurrent reads = %d, window cap is %d", got, maxFileReads)
 	}
-	s.workspace.cancelFileReads()
 }
 
 func writeFiles(t *testing.T, root string, paths ...string) {

@@ -65,10 +65,6 @@ func newFileBrowser() *fileBrowser {
 	}
 }
 
-// fileReadHook is called before each directory scan. Tests replace it to
-// block and count in-flight reads. The default observes cancellation.
-var fileReadHook = func(ctx context.Context) error { return ctx.Err() }
-
 // markDirty retires the cached projection. Every write to a listing, an
 // expansion or a read flag goes through it; the caller holds workspace.mu.
 func (fb *fileBrowser) markDirty() {
@@ -108,15 +104,20 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 	s.workspace.mu.Unlock()
 
 	s.invalidate()
+	// Fix the gate before the goroutine exists, so a test that injects one
+	// cannot be read while a read is already running (R4).
+	readGate := s.workspace.fileReadGate()
 	ctx, gen, gate := s.workspace.fileReadPermit()
+	s.workspace.fileReads.Add(1)
 	go func() {
+		defer s.workspace.fileReads.Done()
 		select {
 		case <-ctx.Done():
 			return
 		case gate <- struct{}{}:
 			defer func() { <-gate }()
 		}
-		if err := fileReadHook(ctx); err != nil {
+		if err := readGate(ctx); err != nil {
 			s.workspace.mu.Lock()
 			if s.workspace.files == fb && s.workspace.fileReadGen == gen {
 				delete(fb.loading, dir)

@@ -234,30 +234,47 @@ func Run(ctx context.Context, fxPath, dir string, dst any, args ...string) error
 	// wait for a grandchild that still holds stdout.
 	cmd.WaitDelay = 100 * time.Millisecond
 	out, err := cmd.Output()
-	if err != nil {
-		if doctorReport(args, err) {
-			if uerr := json.Unmarshal(out, dst); uerr != nil {
-				return fmt.Errorf("fx doctor: %w", uerr)
+	if isDoctor(args) {
+		// A doctor exit code alone is not proof of a report: exit 2 is a
+		// usage error whose stdout is an error object, and decoding that
+		// left an empty report looking successful (A4).
+		if _, ok := ParseDoctor(out, err); !ok {
+			if err != nil {
+				return err
 			}
-			return nil
+			return fmt.Errorf("fx doctor: output is not a report")
 		}
+		return json.Unmarshal(out, dst)
+	}
+	if err != nil {
 		return err
 	}
 	return json.Unmarshal(out, dst)
 }
 
-// doctorReport is true when fx doctor exited 1 or 2. Those codes mean the
-// report itself contains failures; the JSON on stdout is still the result.
-func doctorReport(args []string, err error) bool {
-	if len(args) == 0 || args[0] != "doctor" {
-		return false
+func isDoctor(args []string) bool {
+	return len(args) > 0 && args[0] == "doctor"
+}
+
+// ParseDoctor decodes the machine-readable doctor report. It accepts exit 0
+// and exit 1, where fx documents the report itself as the failure result; any
+// other exit is a usage or crash error and stays a command failure. A JSON
+// object without checks is not a report even when it decodes.
+func ParseDoctor(out []byte, runErr error) (Doctor, bool) {
+	var doctor Doctor
+	if json.Unmarshal(out, &doctor) != nil {
+		return Doctor{}, false
 	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return false
+	if len(doctor.Checks) == 0 {
+		return Doctor{}, false
 	}
-	code := exitErr.ExitCode()
-	return code == 1 || code == 2
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 {
+			return Doctor{}, false
+		}
+	}
+	return doctor, true
 }
 
 // query runs one inspection under its own deadline.

@@ -87,7 +87,9 @@ func previewUncompared(old, next []string) []DiffLine {
 }
 
 // scanLinesBudget reads at most maxLines lines using at most maxBytes of s
-// without splitting the full string.
+// without splitting the full string. A final newline is the separator after
+// the last line, not the start of another one, so "a\n" and "a" scan the
+// same; a blank line before it is still a line ("a\n\n" scans "a", "").
 func scanLinesBudget(s string, maxBytes, maxLines int) ([]string, bool) {
 	if s == "" {
 		return nil, false
@@ -96,15 +98,20 @@ func scanLinesBudget(s string, maxBytes, maxLines int) ([]string, bool) {
 		return nil, true
 	}
 	body := s
-	if strings.HasSuffix(s, "\n") && maxBytes > 0 {
-		body = s[:len(s)-1]
-		maxBytes--
+	if strings.HasSuffix(body, "\n") {
+		body = body[:len(body)-1]
 	}
 	var lines []string
 	used := 0
 	i := 0
-	for i < len(body) && len(lines) < maxLines && used < maxBytes {
+	for {
+		if len(lines) >= maxLines {
+			return lines, true
+		}
 		remain := maxBytes - used
+		if remain <= 0 {
+			return lines, true
+		}
 		end := i + remain
 		if end > len(body) {
 			end = len(body)
@@ -118,8 +125,8 @@ func scanLinesBudget(s string, maxBytes, maxLines int) ([]string, bool) {
 		}
 		if nl < 0 {
 			if end < len(body) {
-				line := trimUTF8Bytes(body[i:end], end-i)
-				lines = append(lines, string([]byte(line)))
+				// The budget cut this line; keep only complete runes.
+				lines = append(lines, validUTF8Prefix(body[i:end]))
 				return lines, true
 			}
 			lines = append(lines, body[i:end])
@@ -129,20 +136,15 @@ func scanLinesBudget(s string, maxBytes, maxLines int) ([]string, bool) {
 		used += nl - i + 1
 		i = nl + 1
 	}
-	return lines, i < len(body)
 }
 
-func trimUTF8Bytes(s string, max int) string {
-	if len(s) <= max {
-		return s
+// validUTF8Prefix cuts a byte slice back to a complete rune. A budget is in
+// bytes, but emitting half a character is not a shorter line.
+func validUTF8Prefix(s string) string {
+	for i := 0; i < utf8.UTFMax-1 && len(s) > 0 && !utf8.ValidString(s); i++ {
+		s = s[:len(s)-1]
 	}
-	if max <= 0 {
-		return ""
-	}
-	for max > 0 && !utf8.RuneStart(s[max]) {
-		max--
-	}
-	return s[:max]
+	return s
 }
 
 // splitDiffLines splits on \n and drops the single trailing empty line a final
@@ -214,7 +216,7 @@ func ClassifyUnifiedDiff(text string) ([]DiffLine, int) {
 	if text == "" {
 		return nil, 0
 	}
-	raw := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	raw := splitDiffLines(text)
 	omitted := 0
 	if len(raw) > MaxUnifiedDiffLines {
 		omitted = len(raw) - MaxUnifiedDiffLines

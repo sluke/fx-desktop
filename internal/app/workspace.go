@@ -48,6 +48,16 @@ type workspaceController struct {
 	// files is the right rail's Files tab: the listings it has read and the
 	// folders the user opened.
 	files *fileBrowser
+	// fileRead is the gate every directory read passes through before it
+	// touches the disk. It is a per-window value fixed before the first read
+	// starts rather than a process-wide variable, so a read that is already
+	// running can never observe a different function than the one it started
+	// with (R4). A nil value means "observe the context".
+	fileRead func(context.Context) error
+	// fileReads counts directory reads that have been started but not yet
+	// returned. Tests wait on it to prove a window quiesced instead of racing
+	// their own cleanup against a scheduled goroutine (R4).
+	fileReads sync.WaitGroup
 	// fileGate is the window's directory-read limit. It outlives a refresh,
 	// which only bumps fileReadGen and cancels the previous context.
 	fileGate    chan struct{}
@@ -74,6 +84,25 @@ func (w *workspaceController) fileReadPermit() (context.Context, uint64, chan st
 		w.fileCtx, w.fileCancel = context.WithCancel(context.Background())
 	}
 	return w.fileCtx, w.fileReadGen, w.fileGate
+}
+
+// fileReadGate returns the gate a read must pass before touching the disk. The
+// caller captures it before starting the goroutine, so the read uses the
+// function that was fixed when it was scheduled.
+func (w *workspaceController) fileReadGate() func(context.Context) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fileRead != nil {
+		return w.fileRead
+	}
+	return func(ctx context.Context) error { return ctx.Err() }
+}
+
+// waitFileReads blocks until every directory read the window has started has
+// returned. It exists for tests that inject a gate; the UI thread never waits
+// on the disk.
+func (w *workspaceController) waitFileReads() {
+	w.fileReads.Wait()
 }
 
 func (w *workspaceController) retireFileReads() {

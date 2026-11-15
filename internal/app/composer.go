@@ -96,7 +96,7 @@ func promptOversizeProblem(text string, images []promptImage, mentions []promptM
 // consumed yet: the composer keeps what the user typed until the prompt is
 // actually accepted, so a slow or failed read never eats the message.
 func (s *ProjectWindow) sendDraft(text string, attachments []chrome.Attachment) bool {
-	if s.chat == nil || s.project == "" {
+	if s.chat == nil || s.project == "" || s.coord.quitting() {
 		return false
 	}
 	// Count the edit this submit is based on: a keystroke that arrived since
@@ -222,7 +222,7 @@ func (s *ProjectWindow) acceptSubmit(request *submitRequest, mentions []promptMe
 	current := s.swap.generation()
 	s.preparing = nil
 	s.mu.Unlock()
-	if s.chat == nil || current != request.conversation {
+	if s.chat == nil || current != request.conversation || s.coord.quitting() {
 		return
 	}
 	// An edit may have landed without an event (the control publishes its

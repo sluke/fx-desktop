@@ -79,8 +79,32 @@ type Coordinator struct {
 	attention map[string]bool
 	badge     int
 
-	quitFlushStarted bool
+	quitPhase quitPhase
+	// quitBudget overrides quitFlushBudget for a test that must not wait the
+	// production two seconds. Zero means the default.
+	quitBudget time.Duration
 }
+
+// quitPhase names how far the app's single quit owner has got. A quit may be
+// asked for many times — a second Cmd+Q, a tray item, a window — but only the
+// draining → ready transition lets the process end (Q4).
+type quitPhase int
+
+const (
+	// quitIdle is normal operation: nothing is being drained.
+	quitIdle quitPhase = iota
+	// quitDraining means the stats producers are being stopped and the store
+	// is being flushed. Every quit request in this phase is held.
+	quitDraining
+	// quitReady means the final snapshot is settled (or its budget expired)
+	// and the owner's own quit may proceed.
+	quitReady
+)
+
+// quitFlushBudget bounds the whole drain: stopping producers, waiting for them
+// to be reaped, and flushing the store. It matches the previous flush budget;
+// a stuck disk gets a logged timeout rather than a hang.
+const quitFlushBudget = 2 * time.Second
 
 type pickerModel struct {
 	status string
@@ -123,37 +147,145 @@ func NewCoordinator() *Coordinator {
 	}
 }
 
-// beginQuit lets the quit callback return immediately. The stats flush runs
-// in the background, bounded by 2s, and then quit is invoked again. A second
-// call does not prevent the quit. Hiding a window to the tray never reaches
-// this path, so the store stays open.
+// beginQuit lets the quit callback return immediately, then drains on its own
+// goroutine. While draining, every quit request is held: a user pressing Cmd+Q
+// again must not skip the flush, and the app must not read "the flush has been
+// asked for" as "the flush is done" (Q4).
+//
+// The owner's completion is the only transition to quitReady, and the only
+// caller of quit. MyGo's App.Quit posts to the main thread, so the background
+// goroutine may call it.
 func (c *Coordinator) beginQuit(e interface{ PreventDefault() }, quit func()) {
 	if c == nil || c.stats == nil || quit == nil {
 		return
 	}
 	c.mu.Lock()
-	if c.quitFlushStarted {
-		c.mu.Unlock()
+	phase := c.quitPhase
+	if phase == quitIdle {
+		c.quitPhase = quitDraining
+	}
+	c.mu.Unlock()
+
+	// A quit that arrives while draining — or while the owner is already
+	// ready — never starts a second drain. Draining holds it; ready is the
+	// owner's own quit, so it may pass.
+	if phase == quitDraining && e != nil {
+		e.PreventDefault()
+	}
+	if phase != quitIdle {
 		return
 	}
-	c.quitFlushStarted = true
-	c.mu.Unlock()
 	if e != nil {
 		e.PreventDefault()
 	}
+	// Close admission on the app loop, then wait off it. Candidates are the
+	// displayed chat, the conversation that actually owns the process barrier
+	// and the one still waiting to be admitted: during a swap s.chat may
+	// already be B while A is still producing stats (Q5).
+	drain := c.stopStatsProducers()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), c.flushBudget())
 		defer cancel()
+		for _, done := range drain.wait {
+			select {
+			case <-done:
+			case <-ctx.Done():
+				// The budget is an explicit degradation boundary: a stuck
+				// disk or process must not trap the app, and the final
+				// snapshot is best-effort at this point.
+				log.Println("session stats: producer still stopping at quit budget")
+				goto snapshot
+			}
+		}
+	snapshot:
+		// Only after every producer is gone are the counters final. Close
+		// Store afterwards, so the last accepted stats are actually written.
+		for _, chat := range drain.chats {
+			chat.snapshotStats()
+		}
 		if err := c.stats.Close(ctx); err != nil {
 			log.Println("session stats:", err)
 		}
+		c.mu.Lock()
+		c.quitPhase = quitReady
+		c.mu.Unlock()
 		quit()
 	}()
 }
 
+// flushBudget is how long the drain may take: stopping producers, waiting for
+// them, and closing the store share one deadline.
+func (c *Coordinator) flushBudget() time.Duration {
+	if c.quitBudget > 0 {
+		return c.quitBudget
+	}
+	return quitFlushBudget
+}
+
+// statsDrain is what the quit owner must wait for before it may fix the last
+// snapshot and close the store. wait has one signal per process teardown and
+// one per stats producer group; chats are the sessions whose counters are
+// still eligible to be persisted (Q5).
+type statsDrain struct {
+	wait  []<-chan struct{}
+	chats []*chatSession
+}
+
+// stopStatsProducers closes new admission, withdraws replacements that are
+// still waiting, and collects every producer that could still write session
+// statistics. It runs on the app loop so it never races a conversation swap.
+func (c *Coordinator) stopStatsProducers() statsDrain {
+	var drain statsDrain
+	seen := map[*chatSession]bool{}
+	for _, s := range c.sessionsSnapshot() {
+		if s == nil {
+			continue
+		}
+		candidates := s.conversationCandidates()
+		s.swap.cancelPending()
+		for _, chat := range candidates {
+			if chat == nil || seen[chat] {
+				continue
+			}
+			seen[chat] = true
+			drain.chats = append(drain.chats, chat)
+			chat.Close()
+			drain.wait = append(drain.wait, chat.closedDone)
+			drain.wait = append(drain.wait, chat.producers.stop())
+		}
+	}
+	return drain
+}
+
+// conversationCandidates is every chatSession this window may still own: the
+// displayed one, the one holding the process barrier, and a request waiting
+// to replace them. Reads happen on the app loop.
+func (s *ProjectWindow) conversationCandidates() []*chatSession {
+	s.swap.mu.Lock()
+	started, waiting := s.swap.started, s.swap.waiting
+	s.swap.mu.Unlock()
+	return []*chatSession{s.chat, started, waiting}
+}
+
+// quitting reports whether the app has begun its final drain. New work is
+// refused from that point: the store is about to close, so a prompt started
+// now could not record its usage.
+func (c *Coordinator) quitting() bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.quitPhase != quitIdle
+}
+
 // Setup registers menus, tray, and deep-link handlers.
 func (c *Coordinator) Setup() {
-	mygo.App.OnWillQuit(func(e *mygo.QuitEvent) {
+	// Before-quit, not will-quit: MyGo destroys the windows before it fires
+	// OnWillQuit, so draining there would leave the app running without a
+	// window for up to the flush budget. Holding the quit before the windows
+	// close keeps the app intact until the owner is ready (Q4).
+	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
 		c.beginQuit(e, mygo.App.Quit)
 	})
 	mygo.App.SetName("fx")
@@ -174,6 +306,9 @@ func (c *Coordinator) Setup() {
 
 // Launch handles startup after mygo is ready.
 func (c *Coordinator) Launch() {
+	if c.quitting() {
+		return
+	}
 	c.refreshFx()
 	if c.fxPathSnapshot() == "" {
 		c.showWelcome()
@@ -211,6 +346,10 @@ func (c *Coordinator) Launch() {
 
 // HandleSecondInstance opens projects from another instance's argv.
 func (c *Coordinator) HandleSecondInstance(args []string, wd string) {
+	// A deep link arriving during the final drain must not open a project.
+	if c.quitting() {
+		return
+	}
 	for _, arg := range args {
 		if path, ok := ProjectFromArg(arg, wd); ok {
 			c.OpenProject(path)
@@ -443,6 +582,9 @@ func (c *Coordinator) OpenProject(path string) {
 }
 
 func (c *Coordinator) openProjectWithFlags(path string, args ...string) {
+	if c.quitting() {
+		return
+	}
 	path = filepath.Clean(path)
 	st, err := os.Stat(path)
 	if err != nil || !st.IsDir() {

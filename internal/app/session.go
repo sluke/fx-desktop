@@ -241,6 +241,12 @@ func (s *ProjectWindow) optionalHosts(c *Coordinator) (
 	}
 	if s.shell.Tools.Open {
 		management = c.sessionManagement(s)
+	} else {
+		// The native sheet can also be dismissed by the backdrop or Escape,
+		// which never reaches the Close button. Stop the scans that panel
+		// owns when it is not showing (P5).
+		s.cancelFeature("skills")
+		s.cancelFeature("management-read")
 	}
 	if s.shell.History.Open {
 		history = c.sessionHistory(s)
@@ -629,6 +635,9 @@ func (s *ProjectWindow) setExited(code int) {
 // openSessionWithFlags opens a session, passing extra launch flags such as
 // --model <id>, -c or --resume <id> straight through to fx.
 func (c *Coordinator) openSessionWithFlags(project string, args ...string) *ProjectWindow {
+	if c.quitting() {
+		return nil
+	}
 	project = filepath.Clean(project)
 	modelFlag := os.Getenv("FX_DESKTOP_MODEL")
 	if modelFlag != "" {
@@ -809,6 +818,9 @@ func itoa3(n int) string {
 // replaceConversation keeps one project window while fx owns each saved thread.
 // The prior process finishes shutdown before its replacement is started.
 func (s *ProjectWindow) replaceConversation(args []string) {
+	if s.coord != nil && s.coord.quitting() {
+		return
+	}
 	previous := s.chat
 	model := os.Getenv("FX_DESKTOP_MODEL")
 	inheritModel := true
@@ -853,6 +865,10 @@ func (s *ProjectWindow) replaceConversation(args []string) {
 // has begun writing (T9, R3).
 func (s *ProjectWindow) startConversation(next *chatSession) {
 	if next == nil {
+		return
+	}
+	if s.coord != nil && s.coord.quitting() {
+		next.Close()
 		return
 	}
 	if s.coord != nil {

@@ -10,12 +10,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/egoist/mygo"
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/app/presenter"
+	"fx-desktop/internal/fxcli"
 	"fx-desktop/internal/fxhome"
 	"fx-desktop/internal/fxlive"
 	"fx-desktop/internal/fxprofile"
@@ -90,6 +93,10 @@ func (c *Coordinator) openManagementPage(s *ProjectWindow, page string) {
 func (c *Coordinator) sessionManagement(s *ProjectWindow) chrome.ManagementHost {
 	return chrome.ManagementHost{
 		Run: func(action string) { mygo.App.WhenReady(func() { c.runManagement(s, action) }) },
+		Close: func() {
+			s.cancelFeature("skills")
+			s.cancelFeature("management-read")
+		},
 		PickDirectory: func() {
 			c.pickDirectory(s.winSnapshot(), "Choose additional workspace directory", func(dir string) { s.shell.Tools.Directory = dir; s.invalidate() })
 		},
@@ -109,6 +116,11 @@ func (c *Coordinator) sessionManagement(s *ProjectWindow) chrome.ManagementHost 
 		},
 		Resume: func(id, workspace string) {
 			s.dispatch(func() {
+				if c.quitting() {
+					s.shell.Tools.Output = errQuitting.Error()
+					s.invalidate()
+					return
+				}
 				if workspace == "" {
 					workspace = s.project
 				}
@@ -146,6 +158,11 @@ func (c *Coordinator) sessionManagement(s *ProjectWindow) chrome.ManagementHost 
 }
 
 func (c *Coordinator) runManagement(s *ProjectWindow, action string) {
+	if c.quitting() {
+		s.shell.Tools.Output = errQuitting.Error()
+		s.invalidate()
+		return
+	}
 	if w := s.winSnapshot(); w == nil || w.IsDestroyed() {
 		return
 	}
@@ -395,25 +412,322 @@ func (c *Coordinator) runManagementJob(s *ProjectWindow, action string, args []s
 	}()
 }
 
+// managementOutput bounds one captured stream. Each stream keeps its own
+// budget and its own truncation flag: stdout is the payload, stderr is the
+// diagnostic, and concatenating them would make a warning look like an
+// answer (A4).
+//
+// Capture and progress are separate budgets (O5). The capture is a bounded
+// byte buffer; progress is a bounded *line* buffer that only ever sees the
+// bytes of the newest Write. Once the capture is full, the pipe is still
+// drained and status lines keep arriving — a full capture must not freeze
+// the UI at an old retry message.
 type managementOutput struct {
 	buffer    bytes.Buffer
 	truncated bool
 	limit     int
+
+	mu sync.Mutex
+	// emit, when set, receives the newest non-empty line at most once per
+	// progressInterval. It lets a long command report progress without one
+	// layout pass per write.
+	emit func(string)
+	// last is the last publish time; current is the bounded partial line
+	// (complete runes only); incomplete holds at most one rune split across
+	// two Writes. latest is the newest completed line; pending is the newest
+	// line not yet published; published is the last line handed to emit.
+	last          time.Time
+	current       []byte
+	incomplete    [utf8.UTFMax]byte
+	incompleteLen int
+	lastLine      []byte
+	latest        string
+	pending       string
+	published     string
 }
 
+const (
+	progressInterval = 250 * time.Millisecond
+	// maxProgressLineBytes bounds both the partial-line buffer and every
+	// string handed to emit. A 16 MiB line without a newline costs one
+	// bounded tail, not one unbounded allocation.
+	maxProgressLineBytes = 4 << 10
+)
+
+// Write returns the full length of p: the pipe is always drained, even when
+// the capture budget is spent. Progress parsing sees the whole chunk before
+// the capture is truncated, so the cap cannot hide newer status (O5).
 func (b *managementOutput) Write(p []byte) (int, error) {
 	n := len(p)
 	limit := b.limit
 	if limit <= 0 {
 		limit = 64 * 1024
 	}
+	b.mu.Lock()
 	room := limit - b.buffer.Len()
+	captured := p
 	if room < len(p) {
 		b.truncated = true
-		p = p[:max(0, room)]
+		captured = p[:max(0, room)]
 	}
-	_, _ = b.buffer.Write(p)
+	_, _ = b.buffer.Write(captured)
+
+	emit := b.emit
+	var fire string
+	if emit != nil {
+		b.feed(p)
+		// pending must always describe the newest unpublished fact (P6a).
+		// When the newest line returns to what was already published, an
+		// older throttled line is stale and must be withdrawn.
+		switch {
+		case b.latest == b.published:
+			b.pending = ""
+		case b.latest == "":
+			// No completed line yet; keep the existing state.
+		case time.Since(b.last) >= progressInterval:
+			fire = b.latest
+			b.published = fire
+			b.last = time.Now()
+			b.pending = ""
+		default:
+			// Keep only the newest pending line: a throttled run must
+			// never queue one callback per status line.
+			b.pending = b.latest
+		}
+	}
+	b.mu.Unlock()
+	if fire != "" {
+		emit(fire)
+	}
 	return n, nil
+}
+
+// feed consumes only the new bytes, keeping at most one bounded line in
+// memory. It handles \n, \r\n and lone \r (progress bars), cross-chunk lines
+// and UTF-8 runes split between Writes (P6b): current holds complete runes
+// only, while a partially received rune lives in incomplete.
+func (b *managementOutput) feed(data []byte) {
+	// Only the newest line of a chunk can be published. Keep it as bytes and
+	// allocate one string per Write, not one per status line (O5).
+	have := false
+	for len(data) > 0 {
+		i := indexLineEnd(data)
+		if i < 0 {
+			b.appendSegment(data)
+			break
+		}
+		delimiter := data[i]
+		b.appendSegment(data[:i])
+		// A rune left unfinished at a line boundary is invalid source data,
+		// not a character to publish. current is already valid UTF-8.
+		b.incompleteLen = 0
+		if trimmed := bytes.TrimSpace(b.current); len(trimmed) > 0 {
+			b.lastLine = append(b.lastLine[:0], trimmed...)
+			have = true
+		}
+		b.current = b.current[:0]
+		data = data[i+1:]
+		if delimiter == '\r' && len(data) > 0 && data[0] == '\n' {
+			data = data[1:]
+		}
+	}
+	if have {
+		b.latest = string(b.lastLine)
+	}
+}
+
+// indexLineEnd finds \n or \r without allocating. IndexAny takes a string
+// and its general path can allocate per call, which a 2048-line chunk would
+// turn into one allocation per status line (O5).
+func indexLineEnd(data []byte) int {
+	for i, c := range data {
+		if c == '\n' || c == '\r' {
+			return i
+		}
+	}
+	return -1
+}
+
+// appendSegment adds one line fragment. The common all-ASCII case is a single
+// bounded append. Otherwise the longest prefix of complete runes is appended
+// in bulk, and only the trailing unfinished rune is carried to the next
+// Write. Invalid source bytes become U+FFFD rather than leaking into the UI.
+func (b *managementOutput) appendSegment(data []byte) {
+	if b.incompleteLen == 0 && allASCII(data) {
+		b.current = append(b.current, data...)
+		b.trimCurrent()
+		return
+	}
+	for len(data) > 0 {
+		if b.incompleteLen > 0 {
+			total := runeLength(b.incomplete[0])
+			if total <= b.incompleteLen {
+				b.appendReplacement()
+				b.incompleteLen = 0
+				continue
+			}
+			need := total - b.incompleteLen
+			if len(data) < need {
+				copy(b.incomplete[b.incompleteLen:], data)
+				b.incompleteLen += len(data)
+				return
+			}
+			var buf [utf8.UTFMax]byte
+			copy(buf[:], b.incomplete[:b.incompleteLen])
+			copy(buf[b.incompleteLen:], data[:need])
+			r, size := utf8.DecodeRune(buf[:total])
+			b.incompleteLen = 0
+			if r == utf8.RuneError && size == 1 {
+				// The carried bytes never formed a rune; do not consume the
+				// new bytes, they belong to the next character.
+				b.appendReplacement()
+				continue
+			}
+			b.current = append(b.current, buf[:total]...)
+			b.trimCurrent()
+			data = data[need:]
+			continue
+		}
+		if i := validRunePrefix(data); i > 0 {
+			b.current = append(b.current, data[:i]...)
+			b.trimCurrent()
+			data = data[i:]
+			continue
+		}
+		if !utf8.FullRune(data) {
+			b.incompleteLen = copy(b.incomplete[:], data)
+			return
+		}
+		b.appendReplacement()
+		data = data[1:]
+	}
+}
+
+func allASCII(data []byte) bool {
+	for _, c := range data {
+		if c >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// validRunePrefix returns the length of the leading sequence of complete,
+// valid runes. It stops before an unfinished or invalid rune so the caller
+// can deal with that one explicitly.
+func validRunePrefix(data []byte) int {
+	i := 0
+	for i < len(data) {
+		if !utf8.FullRune(data[i:]) {
+			break
+		}
+		r, size := utf8.DecodeRune(data[i:])
+		if r == utf8.RuneError && size == 1 {
+			break
+		}
+		i += size
+	}
+	return i
+}
+
+func runeLength(lead byte) int {
+	switch {
+	case lead < utf8.RuneSelf:
+		return 1
+	case lead&0xE0 == 0xC0:
+		return 2
+	case lead&0xF0 == 0xE0:
+		return 3
+	case lead&0xF8 == 0xF0:
+		return 4
+	default:
+		return 1
+	}
+}
+
+func (b *managementOutput) appendReplacement() {
+	var buf [utf8.UTFMax]byte
+	n := utf8.EncodeRune(buf[:], utf8.RuneError)
+	b.current = append(b.current, buf[:n]...)
+	b.trimCurrent()
+}
+
+// trimCurrent drops whole runes from the head until the tail fits the budget.
+// It runs once per appended segment, not once per byte, so a 16 MiB line is
+// still linear work with a bounded live buffer (O5/P6b).
+func (b *managementOutput) trimCurrent() {
+	if len(b.current) <= maxProgressLineBytes {
+		return
+	}
+	cut := len(b.current) - maxProgressLineBytes
+	for cut < len(b.current) && !utf8.RuneStart(b.current[cut]) {
+		cut++
+	}
+	if cut >= len(b.current) {
+		b.current = b.current[:0]
+		return
+	}
+	b.current = append(b.current[:0], b.current[cut:]...)
+}
+
+// flushPending publishes the newest status at the end of a run, including a
+// final line that never ended with a newline. It starts no timers or
+// goroutines and is idempotent. A callback string is a bounded copy, never a
+// window onto the capture's backing buffer.
+func (b *managementOutput) flushPending() string {
+	b.mu.Lock()
+	emit := b.emit
+	if emit != nil && len(b.current) > 0 {
+		// current is valid UTF-8 and already bounded; a rune still split at
+		// the end of the stream is not a fact we can publish.
+		if text := strings.TrimSpace(string(b.current)); text != "" {
+			b.latest = text
+			b.pending = text
+		}
+		b.current = b.current[:0]
+		b.incompleteLen = 0
+	}
+	// pending must describe the newest unpublished fact (P6a).
+	if b.pending != "" && b.pending != b.latest {
+		b.pending = b.latest
+	}
+	if b.pending == b.published {
+		b.pending = ""
+	}
+	line := b.pending
+	if emit == nil || line == "" {
+		b.pending = ""
+		b.mu.Unlock()
+		return ""
+	}
+	b.published = line
+	b.pending = ""
+	b.last = time.Now()
+	b.mu.Unlock()
+	emit(line)
+	return line
+}
+
+// liveSummary says what the read established: fx's own count when it sent
+// one, otherwise that the rows are merely what was listed, plus any entries
+// that could not be read. A missing count must not become zero.
+func liveSummary(report fxlive.Report) string {
+	var b strings.Builder
+	if report.Count != nil {
+		fmt.Fprintf(&b, "%d live session(s)", *report.Count)
+	} else {
+		fmt.Fprintf(&b, "%d live session(s) listed · count not reported", len(report.Agents))
+	}
+	if report.Skipped > 0 {
+		fmt.Fprintf(&b, " · %d not shown", report.Skipped)
+	}
+	if report.Partial {
+		fmt.Fprintf(&b, " · list is partial")
+	}
+	if report.Ambiguous > 0 {
+		fmt.Fprintf(&b, " · %d ambiguous (cannot be queried)", report.Ambiguous)
+	}
+	return b.String()
 }
 
 func liveAgents(in []fxlive.Agent) []chrome.LiveAgent {
@@ -421,8 +735,9 @@ func liveAgents(in []fxlive.Agent) []chrome.LiveAgent {
 	var walk func(fxlive.Agent, int)
 	walk = func(agent fxlive.Agent, depth int) {
 		out = append(out, chrome.LiveAgent{
-			Ref: agent.Ref, Name: agent.Name, Title: agent.Title, State: agent.State,
+			CLIRef: agent.CLIRef, UIKey: agent.UIKey, Name: agent.Name, Title: agent.Title, State: agent.State,
 			Model: agent.Model, Profile: agent.Profile, Workspace: agent.Workspace, Depth: depth,
+			Ambiguous: agent.Ambiguous, Note: agent.Note,
 		})
 		for _, child := range agent.Agents {
 			walk(child, depth+1)
@@ -435,65 +750,90 @@ func liveAgents(in []fxlive.Agent) []chrome.LiveAgent {
 }
 
 func decodeDoctor(text string, err error) (FxDoctor, bool) {
-	var doctor FxDoctor
-	if json.Unmarshal([]byte(text), &doctor) != nil {
-		return FxDoctor{}, false
-	}
-	if err != nil && !doctorExit(err) {
-		return FxDoctor{}, false
-	}
-	return doctor, true
-}
-
-func doctorExit(err error) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return false
-	}
-	code := exitErr.ExitCode()
-	return code == 1 || code == 2
+	return fxcli.ParseDoctor([]byte(text), err)
 }
 
 func managementRead(ctx context.Context, executable, dir string, args ...string) (string, error) {
 	return managementReadLimit(ctx, executable, dir, 64*1024, args...)
 }
 
-// managementReadLimit is managementRead with an explicit cap. Quick Ask uses
-// a larger cap because a useful one-shot answer can exceed the management
-// panel's 64 KiB budget.
+// fxStreams is one finished fx invocation. The two streams stay separate,
+// each with its own truncation flag, and the exit/cancel/timeout outcome is
+// explicit rather than inferred from an empty string (A4).
 type fxStreams struct {
-	stdout, stderr string
-	err            error
+	stdout, stderr  string
+	stdoutTruncated bool
+	stderrTruncated bool
+	exitCode        int
+	canceled        bool
+	timedOut        bool
+	err             error
 }
 
 func managementStreams(ctx context.Context, executable, dir string, limit int, args ...string) fxStreams {
+	return runManagementStreams(ctx, executable, dir, limit, nil, args...)
+}
+
+// managementStreamsProgress is managementStreams with a throttled stderr
+// sink. Quick Ask uses it so a long turn shows fx's latest line instead of
+// nothing until the process exits.
+func managementStreamsProgress(ctx context.Context, executable, dir string, limit int, progress func(string), args ...string) fxStreams {
+	return runManagementStreams(ctx, executable, dir, limit, progress, args...)
+}
+
+func runManagementStreams(ctx context.Context, executable, dir string, limit int, progress func(string), args ...string) fxStreams {
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = 100 * time.Millisecond
 	var stdout, stderr managementOutput
 	stdout.limit = limit
+	if limit <= 0 {
+		stdout.limit = 64 * 1024
+	}
 	stderr.limit = 32 * 1024
+	stderr.emit = progress
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	text := strings.TrimSpace(stdout.buffer.String())
-	errText := strings.TrimSpace(stderr.buffer.String())
-	if stdout.truncated {
-		text += fmt.Sprintf("\n[Output truncated at %d KiB]", limit/1024)
+	// The process is done, so a status line that was held back by the
+	// throttle is now final. Publish it once, then never again (O5).
+	stderr.flushPending()
+	streams := fxStreams{
+		stdout:          strings.TrimSpace(stdout.buffer.String()),
+		stderr:          strings.TrimSpace(stderr.buffer.String()),
+		stdoutTruncated: stdout.truncated,
+		stderrTruncated: stderr.truncated,
 	}
 	if err != nil {
-		if text == "" {
-			text = errText
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			streams.exitCode = exitErr.ExitCode()
 		}
-		err = fmt.Errorf("fx %s: %w", strings.Join(args, " "), err)
+		streams.canceled = errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled
+		streams.timedOut = errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded
+		streams.err = fmt.Errorf("fx %s: %w", strings.Join(args, " "), err)
+		if streams.stderr != "" {
+			streams.err = fmt.Errorf("%w: %s", streams.err, streams.stderr)
+		}
+		if streams.stderrTruncated {
+			streams.err = fmt.Errorf("%w [stderr truncated]", streams.err)
+		}
 	}
-	return fxStreams{stdout: text, stderr: errText, err: err}
+	return streams
 }
 
 func managementReadLimit(ctx context.Context, executable, dir string, limit int, args ...string) (string, error) {
 	streams := managementStreams(ctx, executable, dir, limit, args...)
 	if streams.err != nil {
+		// stdout stays the command's stdout; stderr is already part of the
+		// error, never a replacement answer.
 		return streams.stdout, streams.err
+	}
+	if streams.stdoutTruncated {
+		// A cut-off JSON document is not a smaller result. Report the cap
+		// here, where the caller cannot mistake the prefix for the whole
+		// answer (A4).
+		return streams.stdout, fmt.Errorf("fx %s: output exceeded %d KiB", strings.Join(args, " "), limit/1024)
 	}
 	var formatted bytes.Buffer
 	if json.Indent(&formatted, []byte(streams.stdout), "", "  ") == nil {
@@ -698,11 +1038,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			report, parseErr := fxlive.Parse([]byte(text))
 			if err == nil && parseErr == nil {
 				result.live = liveAgents(report.Agents)
-				if report.Count != nil {
-					result.output = fmt.Sprintf("%d live session(s)", *report.Count)
-				} else {
-					result.output = fmt.Sprintf("%d live session(s)", len(report.Agents))
-				}
+				result.output = liveSummary(report)
 			} else {
 				result.output, result.problem = text, err
 				if parseErr != nil {
@@ -715,9 +1051,9 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			root, rootErr := fxhome.Root()
 			if rootErr != nil {
 				root = ""
-				result.problem = rootErr
 			}
-			for _, profile := range fxprofile.Scan(root, dir) {
+			scan := fxprofile.ScanContext(ctx, root, dir)
+			for _, profile := range scan.Profiles {
 				result.profiles = append(result.profiles, chrome.ProfileInfo{
 					Name: profile.Name, Source: profile.Source, Path: profile.Path,
 					Description: profile.Description, Permission: profile.Permission,
@@ -726,6 +1062,18 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 					RepoPermissionIgnored: profile.RepoPermissionIgnored,
 					Problem:               profile.Problem, PromptPreview: profile.PromptPreview,
 				})
+			}
+			notes := append([]string(nil), scan.Problems...)
+			if rootErr != nil {
+				notes = append([]string{rootErr.Error()}, notes...)
+			}
+			if scan.Partial {
+				notes = append(notes, "Profile scan stopped early.")
+			}
+			if len(notes) > 0 {
+				// An incomplete scan is not "no profiles": say what was
+				// skipped and why (P4).
+				result.problem = errors.New(strings.Join(notes, "; "))
 			}
 			result.output = fmt.Sprintf("%d profile(s)", len(result.profiles))
 		case "credits":

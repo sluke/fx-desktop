@@ -40,6 +40,11 @@ type conversationSwap struct {
 // errSuperseded retires a request that a newer one replaced while it waited.
 var errSuperseded = errors.New("conversation request superseded")
 
+// errQuitting refuses every admission once the quit drain has begun. The
+// stats store is about to close, so a conversation started now could not
+// record its usage (Q5).
+var errQuitting = errors.New("The app is quitting; no new conversation can be started.")
+
 // errWindowGone refuses a request that has no window left to show it in.
 var errWindowGone = errors.New("This conversation was not opened: the window closed.")
 
@@ -54,6 +59,11 @@ func (sw *conversationSwap) generation() uint64 {
 // current process barrier. It is called on the app loop.
 func (sw *conversationSwap) request(next *chatSession) {
 	sw.mu.Lock()
+	if sw.window != nil && sw.window.coord != nil && sw.window.coord.quitting() {
+		sw.mu.Unlock()
+		next.Close()
+		return
+	}
 	sw.gen++
 	generation := sw.gen
 	replaced := sw.waiting
@@ -184,6 +194,11 @@ func (sw *conversationSwap) admit(generation uint64, next *chatSession) error {
 	if sw.lifetime().Err() != nil {
 		return errWindowGone
 	}
+	// Final admission is checked here too, not only at the UI entry: a
+	// request that was queued before the quit must not slip through (Q5).
+	if sw.window != nil && sw.window.coord != nil && sw.window.coord.quitting() {
+		return errQuitting
+	}
 	if sw.window != nil {
 		if w := sw.window.winSnapshot(); w != nil && w.IsDestroyed() {
 			return errWindowGone
@@ -192,6 +207,20 @@ func (sw *conversationSwap) admit(generation uint64, next *chatSession) error {
 	sw.waiting = nil
 	sw.started = next
 	return nil
+}
+
+// cancelPending withdraws every request that has not been admitted. The
+// generation advance makes an already-running run() retire itself, so a
+// late launcher cannot start fx after the quit began (Q5).
+func (sw *conversationSwap) cancelPending() {
+	sw.mu.Lock()
+	sw.gen++
+	pending := sw.waiting
+	sw.waiting = nil
+	sw.mu.Unlock()
+	if pending != nil {
+		pending.Close()
+	}
 }
 
 // retire drops a request that will never start. The barrier is left alone: a

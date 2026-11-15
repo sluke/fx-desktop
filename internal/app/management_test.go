@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/fxcli"
+	"fx-desktop/internal/fxlive"
 )
 
 func TestManagementCommandsAreExplicitArgv(t *testing.T) {
@@ -124,25 +127,89 @@ func TestChatAdvancedLaunchArgumentsSplitGlobalsFromAcpFlags(t *testing.T) {
 	}
 }
 
-func TestManagementReadsBoundOutputAndPreserveFailures(t *testing.T) {
+func TestManagementReadsBoundOutputAndKeepStreamsSeparate(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "fx")
 	for _, tc := range []struct {
-		script string
-		want   string
-		failed bool
+		name    string
+		script  string
+		wantOut string
+		wantErr string
 	}{
-		{"#!/bin/sh\nprintf '%s' '{\"count\":0,\"sessions\":[]}'\n", "\"sessions\": []", false},
-		{"#!/bin/sh\necho 'usage unavailable' >&2\nexit 2\n", "usage unavailable", true},
-		{"#!/bin/sh\nprintf '%070000d' 0\n", "Output truncated at 64 KiB", false},
+		{"json", "#!/bin/sh\nprintf '%s' '{\"count\":0,\"sessions\":[]}'\n", "\"sessions\": []", ""},
+		{"stderr-only", "#!/bin/sh\necho 'usage unavailable' >&2\nexit 2\n", "", "usage unavailable"},
+		{"truncated", "#!/bin/sh\nprintf '%070000d' 0\n", "", "exceeded 64 KiB"},
 	} {
-		if err := os.WriteFile(file, []byte(tc.script), 0700); err != nil {
-			t.Fatal(err)
-		}
-		text, err := managementRead(context.Background(), file, dir, "sessions", "--all", "--json")
-		if (err != nil) != tc.failed || !strings.Contains(text, tc.want) || len(text) > 65600 {
-			t.Fatalf("bounded read len=%d error=%v output=%q", len(text), err, text[:min(100, len(text))])
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(file, []byte(tc.script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			text, err := managementRead(context.Background(), file, dir, "sessions", "--all", "--json")
+			if !strings.Contains(text, tc.wantOut) || len(text) > 65600 {
+				t.Fatalf("bounded read len=%d output=%q", len(text), text[:min(100, len(text))])
+			}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error=%v, want %q", err, tc.wantErr)
+			}
+			if tc.name == "stderr-only" && strings.Contains(text, "usage unavailable") {
+				t.Fatalf("stderr was copied into stdout: %q", text)
+			}
+		})
+	}
+}
+
+// A truncated stdout is not a smaller JSON document: the caller gets the
+// bounded prefix and an explicit cap error, and no marker is appended to the
+// payload (A4).
+func TestManagementStreamsReportTruncationAndIdentity(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "fx")
+	script := "#!/bin/sh\nprintf 'answer partial'\nprintf 'diagnostic' >&2\n"
+	if err := os.WriteFile(file, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	streams := managementStreams(context.Background(), file, dir, 64*1024, "status", "--json")
+	if streams.stdout != "answer partial" || streams.stderr != "diagnostic" || streams.err != nil {
+		t.Fatalf("streams=%+v", streams)
+	}
+	if streams.stdoutTruncated || streams.stderrTruncated {
+		t.Fatalf("small output reported truncated: %+v", streams)
+	}
+
+	big := "#!/bin/sh\nprintf '%040000d' 0 >&2\n"
+	if err := os.WriteFile(file, []byte(big), 0700); err != nil {
+		t.Fatal(err)
+	}
+	streams = managementStreams(context.Background(), file, dir, 64, "status", "--json")
+	if !streams.stderrTruncated || len(streams.stderr) != 32*1024 {
+		t.Fatalf("stderr truncation not observable: truncated=%v len=%d", streams.stderrTruncated, len(streams.stderr))
+	}
+}
+
+// A long Ask publishes bounded stderr progress instead of waiting for exit.
+func TestManagementStreamsPublishProgress(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "fx")
+	script := "#!/bin/sh\necho 'contacting model' >&2\necho 'done' >&2\nprintf '{}'\n"
+	if err := os.WriteFile(file, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	streams := managementStreamsProgress(context.Background(), file, dir, 64*1024, func(line string) {
+		lines = append(lines, line)
+	}, "ask", "--json", "hi")
+	if streams.err != nil || streams.stdout != "{}" {
+		t.Fatalf("streams=%+v", streams)
+	}
+	joined := strings.Join(lines, "\n")
+	if len(lines) == 0 || strings.TrimSpace(joined) == "" {
+		t.Fatalf("no progress published: %v", lines)
 	}
 }
 
@@ -157,6 +224,75 @@ func TestDoctorExitOneKeepsChecks(t *testing.T) {
 	doctor, ok := decodeDoctor(text, err)
 	if !ok || doctor.FailCount != 1 || len(doctor.Checks) != 1 || strings.Contains(text, "noise") {
 		t.Fatalf("doctor text=%q err=%v ok=%v report=%+v", text, err, ok, doctor)
+	}
+}
+
+// JSON that decodes is not a doctor report. Exit 2 is a usage error, and an
+// error object without checks is not a report even on exit 1 (A4).
+func TestDoctorUsageAndChecklessJSONAreNotReports(t *testing.T) {
+	usage := exec.Command("/bin/sh", "-c", "exit 2").Run()
+	if _, ok := decodeDoctor(`{"error":"unknown flag"}`, usage); ok {
+		t.Fatal("decodeDoctor accepted a usage error as an empty report")
+	}
+	exitOne := exec.Command("/bin/sh", "-c", "exit 1").Run()
+	if _, ok := decodeDoctor(`{"error":"unknown flag"}`, exitOne); ok {
+		t.Fatal("decodeDoctor accepted a checkless object on exit 1")
+	}
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "fx")
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"error\":\"unknown flag\"}'\nexit 2\n"
+	if err := os.WriteFile(file, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var report FxDoctor
+	if err := fxcli.Run(context.Background(), file, dir, &report, "doctor"); err == nil {
+		t.Fatal("fxcli.Run hid a doctor usage error")
+	}
+}
+
+func TestAskAuthFailureObjectKeepsPartialAnswer(t *testing.T) {
+	raw := `{"output":"partial answer","final_output":"","exit_code":1,"auth_failure":{"source":"fx login","reason":"expired","http_status":401},"recovery":{"state":"need_user","need":"reconnect","attempt":1}}`
+	var result fxAskResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("documented auth_failure object rejected the result: %v", err)
+	}
+	output, meta, problem := askPresentation(result, true, raw, "", nil)
+	if output != "partial answer" {
+		t.Fatalf("partial answer lost: %q", output)
+	}
+	if !strings.Contains(meta, "partial output") {
+		t.Fatalf("partial output not marked: %q", meta)
+	}
+	for _, want := range []string{"fx login", "expired", "HTTP 401"} {
+		if !strings.Contains(problem, want) {
+			t.Fatalf("problem=%q missing %q", problem, want)
+		}
+	}
+}
+
+// A string where the object belongs is protocol drift: say so, and still show
+// the answer that arrived. It must not be printed as the assistant answer.
+func TestAskAuthFailureTypeDriftIsAProtocolError(t *testing.T) {
+	raw := `{"output":"partial answer","auth_failure":"expired"}`
+	var result fxAskResult
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		t.Fatalf("type drift discarded the whole result: %v", err)
+	}
+	output, _, problem := askPresentation(result, true, raw, "", nil)
+	if output != "partial answer" {
+		t.Fatalf("partial answer lost: %q", output)
+	}
+	if !strings.Contains(problem, "auth_failure is not an object") {
+		t.Fatalf("problem=%q", problem)
+	}
+}
+
+func TestAskRecoveryNeedIsShown(t *testing.T) {
+	result := fxAskResult{Recovery: &fxAskRecovery{State: "need_user", Need: "reconnect the provider"}}
+	_, _, problem := askPresentation(result, true, "", "", nil)
+	if !strings.Contains(problem, "reconnect the provider") {
+		t.Fatalf("recovery.need not shown: %q", problem)
 	}
 }
 
@@ -252,10 +388,10 @@ func TestAskResultMetaSummarizesMachineFields(t *testing.T) {
 		t.Fatalf("plain result produced meta %q", got)
 	}
 	partial, meta, problem := askPresentation(fxAskResult{
-		Output: "draft", Model: "m", AuthFailure: "sign in",
+		Output: "draft", Model: "m", AuthFailure: json.RawMessage(`{"source":"fx login","reason":"expired"}`),
 		Recovery: &fxAskRecovery{State: "need_user", Message: "sign in"},
 	}, true, "", "retrying", nil)
-	if partial != "draft" || !strings.Contains(meta, "partial output") || !strings.Contains(problem, "sign in") || !strings.Contains(meta, "retrying") {
+	if partial != "draft" || !strings.Contains(meta, "partial output") || !strings.Contains(problem, "fx login") || !strings.Contains(meta, "retrying") {
 		t.Fatalf("ask presentation output=%q meta=%q problem=%q", partial, meta, problem)
 	}
 	final, _, problem := askPresentation(fxAskResult{Output: "draft", FinalOutput: "done"}, true, "", "", nil)
@@ -391,5 +527,61 @@ func TestChatKeepsGlobalContextLimitAndAddDir(t *testing.T) {
 	}
 	if want := []string{"--model", "m"}; !reflect.DeepEqual(c.args, want) {
 		t.Fatalf("acp args=%v, want %v", c.args, want)
+	}
+}
+
+// The live readout must not turn a count fx omitted into a number it never
+// sent, and it must say when entries were dropped (L4).
+func TestLiveSummaryKeepsUnknownCountAndSkippedEntries(t *testing.T) {
+	two := 2
+	tests := []struct {
+		name   string
+		report fxlive.Report
+		want   string
+	}{
+		{
+			name:   "count omitted",
+			report: fxlive.Report{Agents: []fxlive.Agent{{CLIRef: "a"}, {CLIRef: "b"}}},
+			want:   "2 live session(s) listed · count not reported",
+		},
+		{
+			name:   "count zero",
+			report: fxlive.Report{Count: new(int)},
+			want:   "0 live session(s)",
+		},
+		{
+			name:   "count with skipped entries",
+			report: fxlive.Report{Count: &two, Skipped: 2},
+			want:   "2 live session(s) · 2 not shown",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := liveSummary(tt.report); got != tt.want {
+				t.Fatalf("liveSummary = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLiveAgentsKeepDepthAndOrder(t *testing.T) {
+	got := liveAgents([]fxlive.Agent{{
+		CLIRef: "a",
+		Agents: []fxlive.Agent{{
+			CLIRef: "a/reviewer",
+			Agents: []fxlive.Agent{{CLIRef: "a/reviewer/helper"}},
+		}},
+	}})
+	if len(got) != 3 {
+		t.Fatalf("rows=%+v", got)
+	}
+	want := []struct {
+		ref   string
+		depth int
+	}{{"a", 0}, {"a/reviewer", 1}, {"a/reviewer/helper", 2}}
+	for i, w := range want {
+		if got[i].CLIRef != w.ref || got[i].Depth != w.depth {
+			t.Fatalf("row %d = %+v, want %s at depth %d", i, got[i], w.ref, w.depth)
+		}
 	}
 }

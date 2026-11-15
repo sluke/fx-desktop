@@ -49,26 +49,55 @@ func TestConsoleDrawerHostsALiveTerminal(t *testing.T) {
 	sh.ConsoleRun = 1
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
 
+	// The process writing stdout, the terminal noticing the exit, and the
+	// drawer rendering the exit line are three separate events. Waiting for
+	// only the first made this test fail under a full -race run: text had
+	// arrived, but neither the exit callback nor the rendered prompt had.
+	// Observe all three within one deadline and keep driving tester frames,
+	// which is what lets the terminal flush its own output into the view (R5).
 	deadline := time.Now().Add(15 * time.Second)
-	for !strings.Contains(term.Text(), "hello-from-console") && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	var (
+		sawOutput bool
+		sawPrompt bool
+		gotExit   bool
+		exitCode  int
+	)
+	for time.Now().Before(deadline) {
 		ts.Frame()
+		text := term.Text()
+		if strings.Contains(text, "hello-from-console") {
+			sawOutput = true
+		}
+		if strings.Contains(text, "Process exited with code 3") {
+			sawPrompt = true
+		}
+		select {
+		case c := <-codes:
+			gotExit = true
+			exitCode = c
+		default:
+		}
+		if sawOutput && gotExit && sawPrompt {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	text := term.Text()
-	if !strings.Contains(text, "hello-from-console") || !strings.Contains(text, "Process exited with code 3") {
-		t.Fatalf("the embedded terminal did not run: %q", text)
+	if !sawOutput {
+		t.Fatalf("the process output never reached the embedded terminal: %q", text)
+	}
+	if !gotExit {
+		t.Fatalf("the process did not exit: no exit callback within the deadline; terminal text %q", text)
+	}
+	if exitCode != 3 {
+		t.Fatalf("exit code = %d, want 3", exitCode)
+	}
+	if !sawPrompt {
+		t.Fatalf("the exit callback arrived but the exit prompt never rendered: %q", text)
 	}
 	// The drawer's own size is the terminal's: the frame really laid it out.
 	if cols, rows := term.Size(); cols < 40 || rows < 5 {
 		t.Fatalf("the drawer sized the terminal %d×%d", cols, rows)
-	}
-	select {
-	case c := <-codes:
-		if c != 3 {
-			t.Fatalf("exit code = %d, want 3", c)
-		}
-	default:
-		t.Fatal("no exit callback")
 	}
 
 	// ... and the tab reports the code the process reported.

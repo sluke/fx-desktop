@@ -78,11 +78,16 @@ type MCPServerDetail struct {
 	Tools   []MCPToolInfo
 }
 
-// LiveAgent is one row of `fx sessions --live`. Ref is the read-only
-// session path, including a subagent suffix. It is not a delete id.
+// LiveAgent is one row of `fx sessions --live`. CLIRef is the read-only
+// session path fx reported, including subagent segments; UIKey is the row's
+// stable selection identity and is never sent to fx. A row with no verified
+// CLIRef, or one whose CLIRef addresses several agents, is Ambiguous and
+// cannot be queried (L5). Neither field is a delete id.
 type LiveAgent struct {
-	Ref, Name, Title, State, Model, Profile, Workspace string
-	Depth                                              int
+	CLIRef, UIKey, Name, Title, State, Model, Profile, Workspace string
+	Ambiguous                                                    bool
+	Note                                                         string
+	Depth                                                        int
 }
 
 // ProfileInfo is one agent profile from a built-in name or a profile folder.
@@ -151,6 +156,9 @@ type ManagementHost struct {
 	Run           func(action string)
 	PickDirectory func()
 	Resume        func(id, workspace string)
+	// Close cancels the scans this panel started. Hiding the panel must not
+	// leave a directory walk running against a generation nobody will read.
+	Close func()
 	// Allowlist applies one add/remove/reset to fx's settings. key is the
 	// tool category or the raw rule key; pattern is the command/url/domain.
 	Allowlist func(action, scope, kind, key, pattern string)
@@ -201,7 +209,12 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 			ui.Row(c).FillWidth().Padding(Space5, Space7).AlignItems(ui.Center).Shrink(0).Children(func() {
 				sheetTitle(c, "Workspace tools", p.InkStrong)
 				ui.Box(c).Grow(1)
-				ui.Button(c, "Close").FontSize(TypeControl).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).OnClick(func() { state.Open = false })
+				ui.Button(c, "Close").FontSize(TypeControl).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).OnClick(func() {
+					state.Open = false
+					if h.Close != nil {
+						h.Close()
+					}
+				})
 			})
 			ui.Column(c).FillWidth().Padding(Space0, toolTabPaddingX, Space4, toolTabPaddingX).Gap(toolTabGapX).Shrink(0).Children(func() {
 				for _, row := range toolPageRows {
@@ -510,20 +523,29 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 								label += agent.Name
 							} else if agent.Title != "" {
 								label += agent.Title
-							} else {
-								label += agent.Ref
-							}
-							stateName := agent.State
-							if stateName == "" {
-								stateName = "未提供"
-							}
-							ui.Row(c).FillWidth().Gap(Space3).AlignItems(ui.Center).Children(func() {
-								ui.Text(c, label).FontSize(TypeControl).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
-								ui.Text(c, stateName).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
-								ui.Button(c, "Select").Label("Select "+agent.Ref).FontSize(TypeControl).Padding(InlinePadY, InlinePadX).Disabled(agent.Ref == "").OnClick(func() {
-									state.SessionID = agent.Ref
-								})
+						} else {
+							label += agent.CLIRef
+						}
+						stateName := agent.State
+						if stateName == "" {
+							stateName = "未提供"
+						}
+						if agent.Ambiguous {
+							stateName += " · " + agent.Note
+						}
+						ui.Row(c).FillWidth().Gap(Space3).AlignItems(ui.Center).Children(func() {
+							ui.Text(c, label).FontSize(TypeControl).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
+							ui.Text(c, stateName).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
+							ui.Button(c, "Select").Label("Select "+agent.UIKey).FontSize(TypeControl).Padding(InlinePadY, InlinePadX).Disabled(agent.CLIRef == "" || agent.Ambiguous).OnClick(func() {
+								// A disabled control must not dispatch either:
+								// the check here is the behaviour, not only
+								// the greyed-out look.
+								if agent.CLIRef == "" || agent.Ambiguous {
+									return
+								}
+								state.SessionID = agent.CLIRef
 							})
+						})
 						}
 						for _, profile := range state.Profiles {
 							ui.Column(c).FillWidth().Gap(Space1).Padding(Space3, Space4).Radius(RadiusChip).Background(p.Sunken).Children(func() {

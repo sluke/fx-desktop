@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -207,6 +210,37 @@ type fxAskRecovery struct {
 	State   string `json:"state"`
 	Attempt int    `json:"attempt"`
 	Message string `json:"message"`
+	// Need is what fx says the user must do, e.g. "quota" or "sign_in".
+	Need string `json:"need"`
+}
+
+// fxAskAuthFailure is the documented authentication failure object. It used
+// to be modelled as a string, which made the whole result fail to decode and
+// threw away the partial answer (A4).
+type fxAskAuthFailure struct {
+	Source     string `json:"source"`
+	Reason     string `json:"reason"`
+	HTTPStatus int    `json:"http_status"`
+}
+
+// Label is the one-line summary shown beside the partial answer.
+func (a *fxAskAuthFailure) Label() string {
+	if a == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if a.Source != "" {
+		parts = append(parts, a.Source)
+	}
+	if a.Reason != "" {
+		parts = append(parts, a.Reason)
+	} else if len(parts) == 0 {
+		parts = append(parts, "authentication required")
+	}
+	if a.HTTPStatus != 0 {
+		parts = append(parts, fmt.Sprintf("HTTP %d", a.HTTPStatus))
+	}
+	return strings.Join(parts, " · ")
 }
 
 type fxAskResult struct {
@@ -220,8 +254,26 @@ type fxAskResult struct {
 	ToolCalls        []json.RawMessage `json:"tool_calls"`
 	Usage            *fxAskUsage       `json:"usage"`
 	Error            string            `json:"error"`
-	AuthFailure      string            `json:"auth_failure"`
-	Recovery         *fxAskRecovery    `json:"recovery"`
+	// AuthFailure stays raw so a documented object decodes as one, while a
+	// string or other type becomes an explicit protocol error instead of
+	// failing the whole result.
+	AuthFailure json.RawMessage `json:"auth_failure"`
+	Recovery    *fxAskRecovery  `json:"recovery"`
+}
+
+// authFailure decodes the object form. A non-empty value of another type is
+// reported as protocol drift; an empty string or null means fx named no
+// authentication failure.
+func (r fxAskResult) authFailure() (*fxAskAuthFailure, error) {
+	raw := bytes.TrimSpace(r.AuthFailure)
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == `""` {
+		return nil, nil
+	}
+	var failure fxAskAuthFailure
+	if err := json.Unmarshal(raw, &failure); err != nil {
+		return nil, fmt.Errorf("fx ask: auth_failure is not an object")
+	}
+	return &failure, nil
 }
 
 // askResultMeta summarizes the machine-readable fields fx adds around the
@@ -262,7 +314,7 @@ func askResultMeta(result fxAskResult) string {
 	if result.SessionID != "" {
 		parts = append(parts, "session "+result.SessionID)
 	}
-	if result.FinalOutput == "" && strings.TrimSpace(result.Output) != "" && (result.Model != "" || result.Recovery != nil || result.Error != "" || result.AuthFailure != "") {
+	if result.FinalOutput == "" && strings.TrimSpace(result.Output) != "" && (result.Model != "" || result.Recovery != nil || result.Error != "" || len(bytes.TrimSpace(result.AuthFailure)) > 0) {
 		parts = append(parts, "partial output")
 	}
 	if result.Recovery != nil && result.Recovery.State != "" {
@@ -275,43 +327,140 @@ func askResultMeta(result fxAskResult) string {
 	return strings.Join(parts, " · ")
 }
 
-func askPresentation(result fxAskResult, parsed bool, text, stderr string, runErr error) (output, meta, problem string) {
-	switch {
-	case parsed:
-		output = strings.TrimSpace(result.FinalOutput)
-		if output == "" {
-			output = strings.TrimSpace(result.Output)
+// maxAskDiagnosticBytes bounds the raw output shown when fx did not return
+// the --json document it was asked for. A protocol failure must be visible,
+// but it must not dump a 2 MiB JSON prefix into the result panel (A5).
+const maxAskDiagnosticBytes = 512
+
+// askOutcome is the Ask domain result of one fx invocation. It is the single
+// boundary between command streams and the UI model, so truncation, decode
+// status, cancellation and process outcome cannot be lost on the way there
+// (A5). Quick Ask no longer decodes stdout on its own.
+type askOutcome struct {
+	result  fxAskResult
+	parsed  bool
+	text    string
+	stderr  string
+	runErr  error
+	decode  error
+	notes   []string
+	truncated bool
+}
+
+// resolveAskOutcome turns a complete fxStreams into an Ask result. A leading
+// JSON document is decoded with a streaming decoder so that valid JSON
+// followed by junk is reported as extra output rather than silently guessed
+// at. Every kind of incompleteness becomes an explicit note.
+func resolveAskOutcome(streams fxStreams) askOutcome {
+	o := askOutcome{text: streams.stdout, stderr: streams.stderr, runErr: streams.err}
+	decoder := json.NewDecoder(strings.NewReader(streams.stdout))
+	var result fxAskResult
+	if err := decoder.Decode(&result); err == nil {
+		o.parsed = true
+		o.result = result
+		var extra json.RawMessage
+		if trailing := decoder.Decode(&extra); !errors.Is(trailing, io.EOF) {
+			o.notes = append(o.notes, "fx ask sent extra output after the JSON document; the result is incomplete.")
 		}
-		meta = askResultMeta(result)
+	} else {
+		o.decode = err
+	}
+	if streams.stdoutTruncated {
+		o.truncated = true
+		o.notes = append(o.notes, "fx ask output exceeded the capture limit; the answer is incomplete.")
+	}
+	if streams.stderrTruncated {
+		o.notes = append(o.notes, "fx ask diagnostics were truncated.")
+	}
+	if streams.canceled {
+		o.notes = append(o.notes, "fx ask was cancelled before it finished.")
+	}
+	if streams.timedOut {
+		o.notes = append(o.notes, "fx ask timed out before it finished.")
+	}
+	return o
+}
+
+// boundedDiagnostic keeps a short, valid-UTF-8 prefix of raw output for the
+// problem text. It is deliberately never used as the assistant answer.
+func boundedDiagnostic(text string) string {
+	if len(text) > maxAskDiagnosticBytes {
+		text = text[:maxAskDiagnosticBytes]
+	}
+	return strings.TrimSpace(strings.ToValidUTF8(text, ""))
+}
+
+func (o askOutcome) presentation() (output, meta, problem string) {
+	switch {
+	case o.parsed:
+		output = strings.TrimSpace(o.result.FinalOutput)
+		if output == "" {
+			output = strings.TrimSpace(o.result.Output)
+		}
+		meta = askResultMeta(o.result)
+		auth, authErr := o.result.authFailure()
 		switch {
-		case result.AuthFailure != "":
-			problem = "fx ask: " + result.AuthFailure
-		case result.Error != "":
-			problem = "fx ask: " + result.Error
-		case result.Recovery != nil && (result.Recovery.State == "need" || result.Recovery.State == "need_user"):
-			problem = "fx ask: " + recoveryLabel(result.Recovery.State, result.Recovery.Attempt, result.Recovery.Message)
-		case strings.TrimSpace(output) == "":
+		case authErr != nil:
+			// The answer already received stays in output; only the reason
+			// is reported as a protocol problem, never as the answer (A4).
+			problem = authErr.Error()
+		case auth != nil:
+			problem = "fx ask: " + auth.Label()
+		case o.result.Error != "":
+			problem = "fx ask: " + o.result.Error
+		case o.result.Recovery != nil && (o.result.Recovery.State == "need" || o.result.Recovery.State == "need_user"):
+			detail := o.result.Recovery.Message
+			if strings.TrimSpace(detail) == "" {
+				detail = o.result.Recovery.Need
+			}
+			problem = "fx ask: " + recoveryLabel(o.result.Recovery.State, o.result.Recovery.Attempt, detail)
+		case strings.TrimSpace(output) == "" && len(o.notes) == 0:
 			problem = "fx returned no assistant output"
 		}
-	case strings.TrimSpace(text) != "":
-		output = text
+	case strings.TrimSpace(o.text) != "":
+		// The command asked for --json. An arbitrary prefix of a cut-off
+		// document is neither an answer nor a trustworthy partial one.
+		if o.truncated {
+			problem = "fx ask: --json output was cut off before it could be decoded."
+		} else {
+			problem = "fx ask: fx did not return a readable --json result."
+		}
+		if diagnostic := boundedDiagnostic(o.text); diagnostic != "" {
+			problem += "\n\nRaw output (bounded): " + diagnostic
+		}
 	default:
 		problem = "fx returned no output"
 	}
-	if note := strings.TrimSpace(stderr); note != "" {
-		if parsed {
+	if note := strings.TrimSpace(o.stderr); note != "" {
+		if o.parsed {
 			if meta != "" {
 				meta += " · "
 			}
 			meta += note
-		} else if problem == "" {
+		} else if problem != "" {
+			problem += "\n\n" + note
+		} else {
 			problem = note
 		}
 	}
-	if runErr != nil && problem == "" {
-		problem = runErr.Error()
+	if o.runErr != nil && problem == "" {
+		problem = o.runErr.Error()
 	}
-	return output, meta, problem
+	// Incompleteness is never downgraded to a normal success: it is shown
+	// even when a partial answer was decoded.
+	var parts []string
+	if problem != "" {
+		parts = append(parts, problem)
+	}
+	parts = append(parts, o.notes...)
+	return output, meta, strings.Join(parts, "\n\n")
+}
+
+// askPresentation is the legacy entry point for callers that already hold a
+// decoded result. New code must go through resolveAskOutcome so no stream
+// metadata is skipped.
+func askPresentation(result fxAskResult, parsed bool, text, stderr string, runErr error) (output, meta, problem string) {
+	return askOutcome{result: result, parsed: parsed, text: text, stderr: stderr, runErr: runErr}.presentation()
 }
 
 func (c *Coordinator) cancelAsk(s *ProjectWindow) {
@@ -323,6 +472,14 @@ func (c *Coordinator) cancelAsk(s *ProjectWindow) {
 }
 
 func (c *Coordinator) runAsk(s *ProjectWindow, req chrome.AskRequest) {
+	if c.quitting() {
+		s.shell.AskBusy = false
+		s.shell.AskOutput = ""
+		s.shell.AskMeta = ""
+		s.shell.AskProblem = errQuitting.Error()
+		s.invalidate()
+		return
+	}
 	args, err := askArgs(req)
 	if err != nil {
 		s.shell.AskBusy = false
@@ -350,15 +507,24 @@ func (c *Coordinator) runAsk(s *ProjectWindow, req chrome.AskRequest) {
 		defer stop()
 		ctx, cancel := context.WithTimeout(scope, wait)
 		defer cancel()
-		streams := managementStreams(ctx, executable, dir, 2*1024*1024, args...)
-		var result fxAskResult
-		parsed := json.Unmarshal([]byte(streams.stdout), &result) == nil
+		streams := managementStreamsProgress(ctx, executable, dir, 2*1024*1024, func(line string) {
+			s.dispatch(func() {
+				// A progress line belongs to the request that produced it; a
+				// cancelled run must not paint over the next one.
+				if s.shell.AskGeneration != generation {
+					return
+				}
+				s.shell.AskMeta = "fx: " + line
+				s.invalidate()
+			})
+		}, args...)
+		outcome := resolveAskOutcome(streams)
 		s.dispatch(func() {
 			if s.shell.AskGeneration != generation {
 				return
 			}
 			s.shell.AskBusy = false
-			s.shell.AskOutput, s.shell.AskMeta, s.shell.AskProblem = askPresentation(result, parsed, streams.stdout, streams.stderr, streams.err)
+			s.shell.AskOutput, s.shell.AskMeta, s.shell.AskProblem = outcome.presentation()
 			s.invalidate()
 		})
 	}()

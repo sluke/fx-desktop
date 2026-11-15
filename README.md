@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-Community desktop client for [fx](https://fx.sh/) — a native [MyGo](https://github.com/egoist/mygo) app that connects to the **fx** agent over ACP. Conversations, tool output and permissions are rendered natively; noninteractive fx commands run behind native forms, and only interactive authentication (`fx login`, `fx login vercel --api-key`, `teams`) uses the in-window console.
+Community desktop client for [fx](https://fx.sh/) — a native [MyGo](https://github.com/egoist/mygo) app that connects to the **fx** agent over ACP. Conversations, tool output and permissions are rendered natively; noninteractive fx commands run behind native forms, and only interactive authentication (`fx login`, `fx login vercel --api-key` / setup, `teams`) uses the in-window console.
 
 This is not an official Vercel Labs release.
 
@@ -16,6 +16,8 @@ This is not an official Vercel Labs release.
 - **Inline permissions** — requests wait for an explicit choice; operational notices stay outside the conversation
 - **Quick Ask** — a native form for `fx ask` (model, effort, access, system prompt, images, resume, provider order, context limits, extra directories)
 - **Workspace tools** — native Account, MCP, Folders, Details, Sessions, Launch, Models, Rules, Skills, Slack and GitHub pages
+- **Live sessions** — list running fx sessions and their subagents with unique refs; an omitted count is shown as unknown, and entries that cannot be read are reported instead of silently dropped
+- **Honest diffs** — timeline diffs mark truncated changes as `partial` and uncompared previews as `preview`, so an exact +/− count is never invented
 - **Model and launch controls** — provider order, effort, fast/Ultra, context limits, additional directories and a live model picker
 - **Allowlist editor** — add, remove and reset user or workspace fx permission rules in the fx state directory's `settings.json`
 - **Files tab** — browse the workspace in the right rail, expand folders in place, open with the default application, or right-click a file to open it in the text editor
@@ -71,6 +73,14 @@ go test ./...
 
 Tests isolate `HOME` and `PATH` through `internal/testutil`; installer tests use `httptest` and never call GitHub.
 
+## Reliability and limits
+
+- File-tree refreshes are serialized per window and cancelled when the window closes; profile and skill scans are bounded to fixed byte and line limits, cut previews at a valid UTF-8 boundary, and stop when the user refreshes or closes.
+- An invalid `FX_HOME` (relative path, filesystem root, home folder, or an existing file) is reported instead of silently used; a folder that does not exist yet is accepted for creation.
+- Profile scanning resolves symlinks: links inside the state directory are followed, links that escape it are rejected, and FIFOs or other special files are skipped with a visible note.
+- `fx doctor` accepts its exit-1 "findings" report; stdout and stderr stay separate, and truncated command output is an explicit error rather than a silently shortened result.
+- Quitting waits for the final usage-stats flush, and repeated quit requests cannot bypass waiting for it.
+
 ## Project layout
 
 ```text
@@ -85,6 +95,9 @@ internal/management/   fx management operations
 internal/workspace/    workspace files, mentions and changes
 internal/fxcli/        fx command execution
 internal/fxbin/        fx binary install and upgrade
+internal/fxhome/       fx state-directory root validation
+internal/fxlive/       live-session and subagent JSON
+internal/fxprofile/    agent profile and prompt scanning
 internal/fxsessions/   saved-session inspection and removal
 internal/projects/     recent projects and persistence
 internal/prefs/        application preferences

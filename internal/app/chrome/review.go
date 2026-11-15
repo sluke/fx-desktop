@@ -209,7 +209,7 @@ func reviewDiff(c *ui.Context, h Host, p Palette) {
 			case d.Note != "":
 				ui.Text(c, d.Note).FontSize(TypeControl).TextColor(p.InkMuted).Padding(Space2, panelPad)
 			default:
-				diffLines(c, d.Diff, p, maxDiffRenderLines)
+				diffLines(c, d.Diff, p, maxDiffRenderLines, false)
 				if d.Omitted > 0 {
 					ui.Text(c, "… "+itoa(d.Omitted)+" more lines not read").FontSize(TypeLabel).
 						TextColor(p.InkMuted).Padding(Space2, panelPad)

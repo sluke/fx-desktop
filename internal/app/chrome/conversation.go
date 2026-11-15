@@ -786,18 +786,10 @@ func shellNotes(r *ShellResult, p Palette) []shellNote {
 // away (§4.2).
 func diffBlock(c *ui.Context, state *ConversationState, m ChatMessage, p Palette) {
 	d := m.Diff
-	added, removed := 0, 0
-	for _, line := range d.Lines {
-		switch line.Kind {
-		case DiffAdd:
-			added++
-		case DiffDel:
-			removed++
-		}
-	}
+	added, removed, exact := diffCounts(d)
 	folded := state.DiffFolded[m.ID]
 	ui.Column(c).FillWidth().Radius(RadiusControl).Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
-		ui.ButtonBase(c).Label(fmt.Sprintf("%s +%d −%d", d.Path, added, removed)).FillWidth().Padding(Space3, panelPad).
+		ui.ButtonBase(c).Label(diffLabel(d, added, removed)).FillWidth().Padding(Space3, panelPad).
 			OnClick(func() {
 				if state.DiffFolded == nil {
 					state.DiffFolded = map[uint64]bool{}
@@ -812,8 +804,17 @@ func diffBlock(c *ui.Context, state *ConversationState, m ChatMessage, p Palette
 			// row's own gutter between them. The minus is the app's own
 			// (U+2212, as the rail and the review drawer draw it).
 			ui.Row(c).Gap(Space3).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "+"+itoa(added)).FontSize(TypeLabel).TextColor(p.OK).Shrink(0)
-				ui.Text(c, "−"+itoa(removed)).FontSize(TypeLabel).TextColor(p.Danger).Shrink(0)
+				if !exact {
+					// No exact count exists, so the header says what it is
+					// instead of showing a number the reader would trust.
+					ui.Text(c, "preview").FontSize(TypeLabel).TextColor(p.InkMuted).Shrink(0)
+				} else {
+					ui.Text(c, "+"+itoa(added)).FontSize(TypeLabel).TextColor(p.OK).Shrink(0)
+					ui.Text(c, "−"+itoa(removed)).FontSize(TypeLabel).TextColor(p.Danger).Shrink(0)
+					if d.Truncated {
+						ui.Text(c, "partial").FontSize(TypeLabel).TextColor(p.Warn).Shrink(0)
+					}
+				}
 				ui.Text(c, diffFoldHint(folded)).FontSize(TypeLabel).TextColor(p.InkMuted).Shrink(0)
 			})
 		})
@@ -822,33 +823,69 @@ func diffBlock(c *ui.Context, state *ConversationState, m ChatMessage, p Palette
 		}
 		ui.Scroll(c).FillWidth().MaxHeight(320).Children(func() {
 			ui.Column(c).FillWidth().Padding(Space0, Space0, Space3, Space0).Children(func() {
-				diffLines(c, d.Lines, p, maxDiffRenderLines)
+				diffLines(c, d.Lines, p, maxDiffRenderLines, d.ComparisonSkipped)
 			})
 		})
 	})
+}
+
+// diffCounts counts classified lines only when the two sides were actually
+// compared. A skipped comparison yields a preview of one side, and counting
+// that as additions would present a guess as an exact figure.
+func diffCounts(d *DiffInfo) (added, removed int, exact bool) {
+	if d.ComparisonSkipped {
+		return 0, 0, false
+	}
+	for _, line := range d.Lines {
+		switch line.Kind {
+		case DiffAdd:
+			added++
+		case DiffDel:
+			removed++
+		}
+	}
+	return added, removed, true
+}
+
+// diffLabel is the header's accessible/clickable name. It carries the same
+// completeness fact the header row draws.
+func diffLabel(d *DiffInfo, added, removed int) string {
+	switch {
+	case d.ComparisonSkipped:
+		return d.Path + " preview"
+	case d.Truncated:
+		return fmt.Sprintf("%s +%d −%d partial", d.Path, added, removed)
+	default:
+		return fmt.Sprintf("%s +%d −%d", d.Path, added, removed)
+	}
 }
 
 // diffLines draws classified diff lines, at most max of them (max <= 0 means
 // no cap), and says how many it left out. The timeline and the review drawer
 // both show diffs, so the rules live in one place: one mark column, a
 // monospace body, and an empty line that still gets a body so the diff keeps
-// its spacing instead of collapsing.
-func diffLines(c *ui.Context, lines []DiffLine, p Palette, max int) {
+// its spacing instead of collapsing. preview means the lines were not
+// classified against the other side, so they keep the neutral mark.
+func diffLines(c *ui.Context, lines []DiffLine, p Palette, max int, preview bool) {
 	shown := 0
 	for _, line := range lines {
 		if max > 0 && shown >= max {
 			break
 		}
 		shown++
+		kind := line.Kind
+		if preview {
+			kind = DiffContext
+		}
 		mark, col := " ", p.InkMuted
-		switch line.Kind {
+		switch kind {
 		case DiffAdd:
 			mark, col = "+", p.OK
 		case DiffDel:
 			mark, col = "-", p.Danger
 		}
 		row := ui.Row(c).FillWidth().AlignItems(ui.Start).Gap(Space3).Padding(Space0, panelPad)
-		switch line.Kind {
+		switch kind {
 		case DiffAdd:
 			row.Background(p.OK.Alpha(0.09))
 		case DiffDel:
@@ -995,16 +1032,15 @@ func conversationMessage(c *ui.Context, state *ConversationState, m ChatMessage,
 					mono(ui.Text(c, stateText)).FontSize(TypeBadge).TextColor(stateCol)
 				}
 				if m.Diff != nil {
-					add, del := 0, 0
-					for _, line := range m.Diff.Lines {
-						switch line.Kind {
-						case DiffAdd:
-							add++
-						case DiffDel:
-							del++
+					add, del, exact := diffCounts(m.Diff)
+					summary := "preview"
+					if exact {
+						summary = "+" + itoa(add) + " −" + itoa(del)
+						if m.Diff.Truncated {
+							summary += " partial"
 						}
 					}
-					mono(ui.Text(c, "+"+itoa(add)+" −"+itoa(del))).FontSize(TypeBadge).TextColor(p.InkFaint)
+					mono(ui.Text(c, summary)).FontSize(TypeBadge).TextColor(p.InkFaint)
 				}
 			})
 			// The diff is the exception to "tool output starts collapsed":
