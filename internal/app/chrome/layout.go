@@ -103,6 +103,10 @@ type ShellState struct {
 	AskSession          string
 	AskAddDirs          string
 	AskContextLimits    string
+	AskProvider         string
+	AskConfig           string
+	AskTimeout          string
+	AskWaitMinutes      string
 	AskStrict           bool
 	AskNoSave           bool
 	AskNoAdditionalDirs bool
@@ -212,6 +216,10 @@ type AskRequest struct {
 	Fast, Ultra      string
 	System           string
 	ProviderOrder    string
+	Provider         string
+	Config           string
+	Timeout          string
+	WaitMinutes      string
 	Images           string
 	Session          string
 	AddDirs          string
@@ -260,6 +268,8 @@ type Actions struct {
 	// AskAdvanced is the native Quick ask form. When it is set the form
 	// uses it; Ask remains the small command-window fallback.
 	AskAdvanced func(AskRequest)
+	// CancelAsk stops the Quick ask that is running in this window.
+	CancelAsk func()
 	// SetAppearance persists System/Dark/Light.
 	SetAppearance func(mode string)
 	// StageAll stages the working tree.
@@ -390,7 +400,7 @@ var Commands = []Command{
 	{ID: "check-updates", Label: "fx: Check for Updates", Icon: IconClock},
 	{ID: "show-credits", Label: "fx: Credits and balance", Icon: IconClock},
 	{ID: "mcp-list", Label: "fx: List MCP servers", Icon: IconChanges},
-	{ID: "open-config", Label: "fx: Open ~/.fx", Icon: IconFile},
+	{ID: "open-config", Label: "fx: Open fx state", Icon: IconFile},
 	{ID: "refresh-status", Label: "fx: Refresh model and usage", Icon: IconClock},
 	{ID: "refresh-git", Label: "Changes: Refresh", Icon: IconChanges},
 	// View group. The table is sliced at projectAgentCommands, so everything
@@ -1321,7 +1331,7 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 						ui.Column(c).FillWidth().Gap(Space1).Children(func() {
 							mono(ui.Text(c, "Access")).FontSize(TypeBadge).TextColor(p.InkMuted)
 							ui.RadioGroup(c, func() {
-								ui.Radio(c, &sh.AskAccess, "auto", "Auto safety review").FontSize(TypeControl)
+								ui.Radio(c, &sh.AskAccess, "auto", "Auto · rules, then review").FontSize(TypeControl)
 								ui.Radio(c, &sh.AskAccess, "full-access", "Full access").FontSize(TypeControl)
 							})
 						})
@@ -1347,6 +1357,18 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 							ui.Checkbox(c, &sh.AskNoSave, "Do not save this request as a session").FontSize(TypeControl).Disabled(sh.AskBusy)
 							ui.Checkbox(c, &sh.AskStrict, "Restrict gateway providers to the order below").FontSize(TypeControl).Disabled(sh.AskBusy)
 							ui.Checkbox(c, &sh.AskNoAdditionalDirs, "Ignore saved additional directories").FontSize(TypeControl).Disabled(sh.AskBusy)
+						})
+						field("Provider override", func() {
+							ui.TextInput(c, &sh.AskProvider).Placeholder("gateway, codex, grok").FillWidth().Disabled(sh.AskBusy)
+						})
+						field("Config overrides", func() {
+							ui.TextArea(c, &sh.AskConfig).Label("Config overrides").FontSize(TypeInput).Placeholder("key=value, one per line").Lines(1, 3).FillWidth().Disabled(sh.AskBusy)
+						})
+						field("fx timeout (seconds)", func() {
+							ui.TextInput(c, &sh.AskTimeout).Placeholder("fx --timeout").FillWidth().Disabled(sh.AskBusy)
+						})
+						field("Wait limit (minutes)", func() {
+							ui.TextInput(c, &sh.AskWaitMinutes).Placeholder("10").FillWidth().Disabled(sh.AskBusy)
 						})
 						field("Provider order (optional, comma-separated)", func() {
 							ui.TextInput(c, &sh.AskProviderOrder).Placeholder("gateway-a,gateway-b").FillWidth().Disabled(sh.AskBusy)
@@ -1381,8 +1403,17 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 				})
 				ui.Row(c).FillWidth().Padding(Space5, panelPad, Space6, panelPad).Gap(Space4).Justify(ui.End).
 					BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).Children(func() {
-					ui.Button(c, "Cancel").Padding(Space3, Space7).Radius(controlRadius).TextColor(p.Ink).Disabled(sh.AskBusy).
-						OnClick(func() { sh.AskOpen = false })
+					ui.Button(c, "Cancel").Padding(Space3, Space7).Radius(controlRadius).TextColor(p.Ink).
+						Disabled(sh.AskBusy && h.Actions.CancelAsk == nil).
+						OnClick(func() {
+							if sh.AskBusy {
+								if h.Actions.CancelAsk != nil {
+									h.Actions.CancelAsk()
+								}
+								return
+							}
+							sh.AskOpen = false
+						})
 					ui.PrimaryButton(c, "Run").Background(p.Ink).Padding(Space3, Space7).Disabled(sh.AskBusy).
 						OnClick(func() {
 							prompt := strings.TrimSpace(sh.AskPrompt)
@@ -1397,7 +1428,9 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 								h.Actions.AskAdvanced(AskRequest{
 									Prompt: prompt, Model: sh.AskModel, Effort: sh.AskEffort,
 									Access: sh.AskAccess, Fast: sh.AskFast, Ultra: sh.AskUltra,
-									System: sh.AskSystem, ProviderOrder: sh.AskProviderOrder, Images: sh.AskImages,
+									System: sh.AskSystem, ProviderOrder: sh.AskProviderOrder, Provider: sh.AskProvider,
+									Config: sh.AskConfig, Timeout: sh.AskTimeout, WaitMinutes: sh.AskWaitMinutes,
+									Images:  sh.AskImages,
 									Session: sh.AskSession, AddDirs: sh.AskAddDirs, ContextLimits: sh.AskContextLimits,
 									Strict: sh.AskStrict, NoSave: sh.AskNoSave,
 									NoAdditionalDirs: sh.AskNoAdditionalDirs,

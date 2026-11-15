@@ -2,12 +2,12 @@ package chrome
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
 
+	"fx-desktop/internal/fxhome"
 	"fx-desktop/internal/management"
 )
 
@@ -37,6 +37,9 @@ type ManagementState struct {
 	MCPProblem     string
 	SessionView    *SessionDetail
 	SessionProblem string
+	Live           []LiveAgent
+	LiveProblem    string
+	Profiles       []ProfileInfo
 	// Allowlist edits fx's persistent local/user allow rules. The UI keeps
 	// the selected scope, rule kind and tool, plus the raw rows loaded from
 	// ~/.fx/settings.json.
@@ -73,6 +76,21 @@ type MCPServerDetail struct {
 	URL     string
 	Command string
 	Tools   []MCPToolInfo
+}
+
+// LiveAgent is one row of `fx sessions --live`. Ref is the read-only
+// session path, including a subagent suffix. It is not a delete id.
+type LiveAgent struct {
+	Ref, Name, Title, State, Model, Profile, Workspace string
+	Depth                                              int
+}
+
+// ProfileInfo is one agent profile from a built-in name or a profile folder.
+type ProfileInfo struct {
+	Name, Source, Path, Description, Permission, Model, Effort, PromptMode string
+	Tools                                                                  []string
+	Ignored, RepoPermissionIgnored                                         bool
+	Problem, PromptPreview                                                 string
 }
 
 // SessionDetail is the native view of `fx session --json`.
@@ -330,6 +348,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							})
 						}
 						check("Write to this project's .mcp.json", &state.MCPProject)
+						check("Save without signing in", &state.MCPNoLogin)
 						ui.Row(c).Gap(Space4).Children(func() {
 							button("Add server", "mcp-add")
 							button("Sign in server", "mcp-login")
@@ -423,8 +442,8 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						})
 						ui.Button(c, "Open diagnostics folder").FontSize(TypeControl).Disabled(h.OpenPath == nil).OnClick(func() {
 							if h.OpenPath != nil {
-								if home, err := os.UserHomeDir(); err == nil {
-									h.OpenPath(filepath.Join(home, ".fx", "diagnostics"))
+								if root, err := fxhome.Root(); err == nil {
+									h.OpenPath(filepath.Join(root, "diagnostics"))
 								}
 							}
 						})
@@ -474,6 +493,54 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							button("Inspect session", "session-inspect")
 							button("Recover corrupt session", "session-recover")
 						})
+						field("Tail turns", &state.Tail)
+						check("Include other workspaces", &state.LiveAll)
+						ui.Row(c).Gap(Space4).Children(func() {
+							button("Show live sessions", "sessions-live")
+							button("Read session tail", "session-tail")
+							button("Refresh profiles", "profiles")
+						})
+						if state.LiveProblem != "" {
+							statusLine(state.LiveProblem)
+						}
+						for _, agent := range state.Live {
+							agent := agent
+							label := strings.Repeat("  ", agent.Depth)
+							if agent.Name != "" {
+								label += agent.Name
+							} else if agent.Title != "" {
+								label += agent.Title
+							} else {
+								label += agent.Ref
+							}
+							stateName := agent.State
+							if stateName == "" {
+								stateName = "未提供"
+							}
+							ui.Row(c).FillWidth().Gap(Space3).AlignItems(ui.Center).Children(func() {
+								ui.Text(c, label).FontSize(TypeControl).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
+								ui.Text(c, stateName).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
+								ui.Button(c, "Select").Label("Select "+agent.Ref).FontSize(TypeControl).Padding(InlinePadY, InlinePadX).Disabled(agent.Ref == "").OnClick(func() {
+									state.SessionID = agent.Ref
+								})
+							})
+						}
+						for _, profile := range state.Profiles {
+							ui.Column(c).FillWidth().Gap(Space1).Padding(Space3, Space4).Radius(RadiusChip).Background(p.Sunken).Children(func() {
+								ui.Text(c, profile.Name+" · "+profile.Source).FontSize(TypeControl).TextColor(p.Ink).SingleLine()
+								if profile.Description != "" {
+									ui.Text(c, profile.Description).FontSize(TypeLabel).TextColor(p.InkMuted).Wrap()
+								}
+								if profile.RepoPermissionIgnored {
+									ui.Text(c, "Workspace profiles cannot set a permission mode.").FontSize(TypeLabel).TextColor(p.Warn).Wrap()
+								} else if profile.Permission != "" {
+									ui.Text(c, "Permission "+profile.Permission).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
+								}
+								if profile.Problem != "" {
+									ui.Text(c, profile.Problem).FontSize(TypeLabel).TextColor(p.Danger).Wrap()
+								}
+							})
+						}
 						ui.Box(c).Height(1)
 						section("Conversion")
 						button("Convert old sessions", "sessions-convert")
@@ -589,7 +656,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 					case "Rules":
 						// The file is a location, not an explanation: naming it
 						// beside the scope controls is enough.
-						labelText(c, "~/.fx/settings.json", p.InkMuted).SingleLine()
+						labelText(c, fxSettingsLabel(), p.InkMuted).SingleLine()
 						badge("Applies to new sessions")
 						ui.RadioGroup(c, func() {
 							ui.Radio(c, &state.AllowScope, "local", "This workspace").FontSize(TypeControl)
@@ -604,9 +671,9 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						if state.AllowKind == "tool" {
 							ui.RadioGroup(c, func() {
 								for _, tool := range []struct{ key, label string }{
-									{"read", "Read files"}, {"write", "Write files"}, {"edit", "Edit files"},
+									{"read", "Read files"}, {"edit", "Edit files"},
 									{"glob", "Glob files"}, {"grep", "Grep files"}, {"skill", "Skills"},
-									{"install_skill", "Install skills"}, {"subagent", "Subagents"},
+									{"subagent", "Subagents"},
 								} {
 									ui.Radio(c, &state.AllowTool, tool.key, tool.label).FontSize(TypeControl)
 								}
@@ -652,6 +719,14 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 								})
 							})
 						}
+						section("Preferences")
+						field("Key", &state.ConfigKey)
+						field("Value", &state.ConfigValue)
+						ui.Row(c).Gap(Space4).Children(func() {
+							button("List settings", "config-list")
+							button("Save setting", "config-set")
+							button("Remove setting", "config-unset")
+						})
 					case "Skills":
 						field("Filter skills", &state.SkillQuery)
 						ui.Row(c).Gap(Space4).Children(func() {
@@ -748,6 +823,14 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 			})
 		})
 	})
+}
+
+func fxSettingsLabel() string {
+	root, err := fxhome.Root()
+	if err != nil {
+		return "fx settings.json"
+	}
+	return filepath.Join(root, "settings.json")
 }
 
 func valueOrDash(value string) string {

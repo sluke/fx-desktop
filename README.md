@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-Community desktop client for [fx](https://fx.sh/) — a native [MyGo](https://github.com/egoist/mygo) app that connects to the **fx** agent over ACP. Conversations, tool output and permissions are rendered natively; noninteractive fx commands run behind native forms, and only interactive authentication (`fx login`, `setup`, `teams`) uses the in-window console.
+Community desktop client for [fx](https://fx.sh/) — a native [MyGo](https://github.com/egoist/mygo) app that connects to the **fx** agent over ACP. Conversations, tool output and permissions are rendered natively; noninteractive fx commands run behind native forms, and only interactive authentication (`fx login`, `fx login vercel --api-key`, `teams`) uses the in-window console.
 
 This is not an official Vercel Labs release.
 
@@ -17,11 +17,11 @@ This is not an official Vercel Labs release.
 - **Quick Ask** — a native form for `fx ask` (model, effort, access, system prompt, images, resume, provider order, context limits, extra directories)
 - **Workspace tools** — native Account, MCP, Folders, Details, Sessions, Launch, Models, Rules, Skills, Slack and GitHub pages
 - **Model and launch controls** — provider order, effort, fast/Ultra, context limits, additional directories and a live model picker
-- **Allowlist editor** — add, remove and reset user or workspace fx permission rules in `~/.fx/settings.json`
+- **Allowlist editor** — add, remove and reset user or workspace fx permission rules in the fx state directory's `settings.json`
 - **Files tab** — browse the workspace in the right rail, expand folders in place, open with the default application, or right-click a file to open it in the text editor
 - **Changes panel** — live `git status` / `git diff` tree and a quick commit box
 - **Everyday shell** — command palette, recent projects, open-folder, restore-last-project, reveal-in-Finder
-- **fx management** — install or upgrade fx, run `fx doctor`, open `~/.fx`
+- **fx management** — install or upgrade fx, run `fx doctor`, open the fx state directory
 - **Preferences** — default project folder, theme, terminal font, tray and update behavior
 - **System integration** — menu-bar tray, close-to-tray, single instance and `fx-desktop://` deep links
 - **Themes** — System, Light and Dark, previewed live and applied everywhere when saved

@@ -110,8 +110,10 @@ type chatSession struct {
 	sessionClaims []*sessionClaim
 	// args are the flags fx acp itself accepts. globalArgs are the fx launch
 	// flags that must precede the `acp` subcommand (context-limit, add-dir and
-	// no-additional-dirs); app-only flags such as effort and fast are applied
-	// through session/set_config_option after the session opens.
+	// no-additional-dirs). Provider, effort and fast are acp flags on
+	// fx 0.0.17, so an explicit launch value is placed there once.
+	// providerArgv, effortArgv and fastArgv record that placement so the
+	// same value is not sent again through session/set_config_option.
 	args       []string
 	globalArgs []string
 	resume     string
@@ -175,7 +177,14 @@ type chatSession struct {
 	initialEffort   string
 	initialFast     *bool
 	initialProvider string
+	providerArgv    bool
+	effortArgv      bool
+	fastArgv        bool
 	advancedProblem string
+	recovery        string
+	thought         string
+	turnGen         int
+	ignoreRecovery  bool
 	// title is the conversation name fx generates. It arrives after the
 	// first turn as session_info_update, so it is empty until then.
 	title                string
@@ -250,7 +259,9 @@ type chatSnapshot struct {
 	// session.
 	Effort, AdvancedProblem string
 	Fast, Ultra             bool
-	Permission              *conversation.Permission
+	// Recovery and Thought are status, never transcript text.
+	Recovery, Thought string
+	Permission        *conversation.Permission
 }
 
 func newChatSession(executable, project string, args []string, changed func()) *chatSession {
@@ -303,28 +314,36 @@ func newChatSessionWithContext(ctx context.Context, executable, project string, 
 				c.model = args[i]
 			}
 		case "--provider":
-			// fx rejects --provider after `acp`; apply it through the
-			// session's provider config once the session exists.
 			if i+1 < len(args) {
 				i++
 				c.initialProvider = strings.TrimSpace(args[i])
+				if c.initialProvider != "" {
+					c.args = append(c.args, "--provider", c.initialProvider)
+					c.providerArgv = true
+				}
 			}
 		case "--effort":
 			if i+1 < len(args) {
 				i++
 				c.initialEffort = strings.TrimSpace(args[i])
-				if c.initialEffort != "" {
+				if c.initialEffort != "" && !strings.EqualFold(c.initialEffort, "auto") {
 					c.effort = c.initialEffort
+					c.args = append(c.args, "--effort", c.initialEffort)
+					c.effortArgv = true
 				}
 			}
 		case "--fast":
 			value := true
 			c.initialFast = &value
 			c.fast = true
+			c.args = append(c.args, "--fast")
+			c.fastArgv = true
 		case "--no-fast":
 			value := false
 			c.initialFast = &value
 			c.fast = false
+			c.args = append(c.args, "--no-fast")
+			c.fastArgv = true
 		case "--resume":
 			if i+1 < len(args) {
 				i++
@@ -373,6 +392,8 @@ func (c *chatSession) statusLocked() chatStatus {
 		Mode:           c.mode,
 		SessionID:      c.sessionID,
 		SessionTitle:   c.title,
+		Recovery:       c.recovery,
+		Thought:        c.thought,
 	}
 }
 
@@ -458,6 +479,8 @@ func (c *chatSession) snapshotLocked(messages []conversation.Message) chatSnapsh
 		InputTokens: st.InputTokens, OutputTokens: st.OutputTokens,
 		Configs: append([]conversation.ConfigOption(nil), c.configs...), Modes: append([]conversation.ModeOption(nil), c.modes...),
 		SessionTitle: st.SessionTitle,
+		Recovery:     st.Recovery,
+		Thought:      st.Thought,
 		Effort:       c.effort, Fast: c.fast, Ultra: c.ultra,
 		AdvancedProblem: c.advancedProblem,
 		Messages:        messages,
@@ -743,31 +766,36 @@ func (c *chatSession) start() (*acp.Client, error) {
 	return client, nil
 }
 
-// applyInitialAdvanced sends the launch-time effort/fast choices. fx rejects
-// these on the acp command line but accepts them through
-// session/set_config_option; a model that does not support one reports an
-// error on the settings panel rather than preventing the session from opening.
+// applyInitialAdvanced sends launch-time choices that were not already
+// placed on the acp command line. fx 0.0.17 accepts --provider, --effort
+// and --fast there, and those values take effect before initialize, so
+// repeating them as set_config_option would apply the same choice twice.
+// A live change after the session exists still uses set_config_option.
 func (c *chatSession) applyInitialAdvanced(client *acp.Client) {
 	c.mu.Lock()
 	effort, fast, provider, sid := c.initialEffort, c.initialFast, c.initialProvider, c.sessionID
+	providerArgv, effortArgv, fastArgv := c.providerArgv, c.effortArgv, c.fastArgv
 	c.mu.Unlock()
 	if effort == "" && fast == nil && provider == "" {
 		return
 	}
 	type request struct{ id, value string }
 	var requests []request
-	if provider != "" {
+	if provider != "" && !providerArgv {
 		requests = append(requests, request{"provider", provider})
 	}
-	if effort != "" && !strings.EqualFold(effort, "auto") {
+	if effort != "" && !strings.EqualFold(effort, "auto") && !effortArgv {
 		requests = append(requests, request{"effort", effort})
 	}
-	if fast != nil {
+	if fast != nil && !fastArgv {
 		value := "false"
 		if *fast {
 			value = "true"
 		}
 		requests = append(requests, request{"fast", value})
+	}
+	if len(requests) == 0 {
+		return
 	}
 	for _, request := range requests {
 		ctx, cancel := context.WithTimeout(c.handshakeCtx, 20*time.Second)
@@ -1029,6 +1057,75 @@ func (c *chatSession) appendStreamText(index int, text string) {
 	c.markMessageDirtyLocked(index)
 }
 
+// recoveryValue distinguishes a missing modelResponseRecovery key from an
+// explicit null. A missing key leaves the current status alone; null clears it.
+type recoveryValue struct {
+	seen       bool
+	clear      bool
+	state      string
+	attempt    int
+	message    string
+	generation *int
+}
+
+func (r *recoveryValue) UnmarshalJSON(b []byte) error {
+	r.seen = true
+	if string(b) == "null" {
+		r.clear = true
+		return nil
+	}
+	var body struct {
+		State      string `json:"state"`
+		Attempt    int    `json:"attempt"`
+		Message    string `json:"message"`
+		Generation *int   `json:"generation"`
+	}
+	if err := json.Unmarshal(b, &body); err != nil {
+		return err
+	}
+	r.state = body.State
+	r.attempt = body.Attempt
+	r.message = body.Message
+	r.generation = body.Generation
+	return nil
+}
+
+func (c *chatSession) applyRecoveryLocked(r recoveryValue) {
+	if c.ignoreRecovery {
+		return
+	}
+	if r.generation != nil && *r.generation < c.turnGen {
+		return
+	}
+	if r.clear {
+		c.recovery = ""
+		return
+	}
+	c.recovery = recoveryLabel(r.state, r.attempt, r.message)
+}
+
+func recoveryLabel(state string, attempt int, message string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "retry", "retrying":
+		if attempt > 0 {
+			return fmt.Sprintf("Retrying model response · attempt %d", attempt)
+		}
+		return "Retrying model response…"
+	case "need", "need_user":
+		if strings.TrimSpace(message) != "" {
+			return "Needs attention · " + strings.TrimSpace(message)
+		}
+		return "Needs attention"
+	case "recovered":
+		return "Recovered"
+	default:
+		if strings.TrimSpace(message) != "" {
+			return strings.TrimSpace(message)
+		}
+		return strings.TrimSpace(state)
+	}
+}
+
 func (c *chatSession) event(p acp.Packet) {
 	if p.Method == "session/request_permission" {
 		var params struct {
@@ -1087,6 +1184,7 @@ func (c *chatSession) event(p acp.Packet) {
 					Tool struct {
 						Internal bool `json:"internal"`
 					} `json:"toolCall"`
+					Recovery recoveryValue `json:"modelResponseRecovery"`
 				} `json:"fx"`
 			} `json:"_meta"`
 		} `json:"update"`
@@ -1100,7 +1198,18 @@ func (c *chatSession) event(p acp.Packet) {
 		c.mu.Unlock()
 		return
 	}
+	recoveryChanged := false
+	if u.Meta.Fx.Recovery.seen {
+		before := c.recovery
+		c.applyRecoveryLocked(u.Meta.Fx.Recovery)
+		recoveryChanged = c.recovery != before
+	}
 	switch u.Kind {
+	case "agent_thought_chunk":
+		var content struct{ Type, Text string }
+		if json.Unmarshal(u.Content, &content) == nil && content.Type == "text" && content.Text != "" {
+			c.thought = content.Text
+		}
 	case "agent_message_chunk", "user_message_chunk":
 		var content struct{ Type, Text string }
 		if json.Unmarshal(u.Content, &content) != nil || content.Type != "text" {
@@ -1210,8 +1319,10 @@ func (c *chatSession) event(p acp.Packet) {
 			c.notices = c.notices[len(c.notices)-8:]
 		}
 	default:
-		c.mu.Unlock()
-		return
+		if !recoveryChanged {
+			c.mu.Unlock()
+			return
+		}
 	}
 	usage := u.Kind == "usage_update"
 	c.mu.Unlock()
@@ -1353,6 +1464,10 @@ func (c *chatSession) send(text string, images []promptImage, mentions []promptM
 func (c *chatSession) beginTurnLocked(text string, images []promptImage, mentions []promptMention, appending bool) (*acp.Client, string) {
 	c.busy = true
 	c.problem = ""
+	c.turnGen++
+	c.ignoreRecovery = false
+	c.recovery = ""
+	c.thought = ""
 	for key := range c.byID {
 		if strings.HasPrefix(key, "assistant:") || strings.HasPrefix(key, "tool:") || strings.HasPrefix(key, "hidden-tool:") {
 			delete(c.byID, key)
@@ -1387,6 +1502,11 @@ func (c *chatSession) runTurn(client *acp.Client, sid, text string, images []pro
 	c.mu.Lock()
 	c.busy = false
 	c.stopping = false
+	c.ignoreRecovery = false
+	if strings.HasPrefix(c.recovery, "Retrying") {
+		c.recovery = ""
+	}
+	c.thought = ""
 	c.permission = nil
 	c.finishMessagesLocked()
 	if err != nil && !c.closed {
@@ -1576,6 +1696,9 @@ func (c *chatSession) stopTurn() {
 		return
 	}
 	c.stopping = true
+	c.ignoreRecovery = true
+	c.recovery = ""
+	c.thought = ""
 	client, sid := c.client, c.sessionID
 	c.mu.Unlock()
 	c.invalidate()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,49 @@ func TestAllowlistMutatesLocalAndUserRulesWithoutLosingSettings(t *testing.T) {
 	}
 	if _, ok := root["providers"]; !ok {
 		t.Fatal("unknown top-level settings were lost")
+	}
+}
+
+func TestAllowlistMapsFileAndSkillNamesOntoCheckedKeys(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"write_file", "edit"},
+		{"edit_file", "edit"},
+		{"write", "edit"},
+		{"install_skill", "skill"},
+		{"read", "read"},
+	} {
+		got, err := allowlistCategory("tool", tc.in)
+		if err != nil || got != tc.want {
+			t.Fatalf("%s -> %s, %v; want %s", tc.in, got, err, tc.want)
+		}
+	}
+}
+
+func TestPresentCreditsKeepsZeroAndNamesNull(t *testing.T) {
+	got, err := presentCredits(`{"balance":null,"remaining":0}`, nil)
+	if err != nil || !strings.Contains(got, "balance: 未提供") || !strings.Contains(got, "remaining: 0") || !strings.Contains(got, "Source: fx credits") {
+		t.Fatalf("credits=%q err=%v", got, err)
+	}
+	pass, err := presentCredits(`{"token_pass":{"remaining":null,"resets_at":"2026-12-01"}}`, nil)
+	if err != nil || !strings.Contains(pass, "remaining: 未提供") || strings.Contains(pass, "remaining: 0") {
+		t.Fatalf("token pass=%q err=%v", pass, err)
+	}
+}
+
+func TestFX17SettingsUsesFXHome(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("FX_HOME", root)
+	got, err := fxSettingsPath()
+	want := filepath.Join(root, "settings.json")
+	if err != nil || got != want {
+		t.Fatalf("fxSettingsPath() = %q, %v; want %q", got, err, want)
+	}
+}
+
+func TestFX17SettingsRejectsRelativeFXHome(t *testing.T) {
+	t.Setenv("FX_HOME", "relative/fx")
+	if _, err := fxSettingsPath(); err == nil {
+		t.Fatal("relative FX_HOME was accepted")
 	}
 }
 

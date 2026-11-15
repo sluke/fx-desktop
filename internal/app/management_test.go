@@ -25,7 +25,7 @@ func TestManagementCommandsAreExplicitArgv(t *testing.T) {
 	}{
 		{"login", chrome.ManagementState{Provider: "codex"}, []string{"login", "codex"}, false},
 		{"logout", chrome.ManagementState{Provider: "grok"}, []string{"logout", "grok"}, true},
-		{"setup", chrome.ManagementState{}, []string{"setup"}, false},
+		{"setup", chrome.ManagementState{}, []string{"login", "vercel", "--api-key"}, false},
 		{"teams", chrome.ManagementState{}, []string{"teams"}, false},
 		{"mcp-add", chrome.ManagementState{Name: "local", Transport: "stdio", Command: "/a path/server", Arguments: "--name\na b\n$(touch nope)"}, []string{"mcp", "add", "local", "--", "/a path/server", "--name", "a b", "$(touch nope)"}, false},
 		{"mcp-add", chrome.ManagementState{Name: "local", Transport: "stdio", Command: "server", MCPProject: true, Environment: "TOKEN=a=b\nEMPTY="}, []string{"mcp", "add", "--project", "--env", "TOKEN=a=b", "--env", "EMPTY=", "local", "--", "server"}, false},
@@ -60,6 +60,12 @@ func TestManagementCommandsCoverTheNoninteractiveFxSurface(t *testing.T) {
 		{"mcp-list", chrome.ManagementState{}, []string{"mcp", "list", "--json"}, false},
 		{"mcp-show", chrome.ManagementState{Name: "local"}, []string{"mcp", "show", "local", "--json"}, false},
 		{"mcp-add-slack", chrome.ManagementState{}, []string{"mcp", "add", "slack"}, true},
+		{"mcp-add-slack", chrome.ManagementState{MCPNoLogin: true}, []string{"mcp", "add", "--no-login", "slack"}, true},
+		{"config-list", chrome.ManagementState{}, []string{"config", "list", "--show-origin", "--json"}, false},
+		{"config-set", chrome.ManagementState{ConfigKey: "fast_mode", ConfigValue: "true"}, []string{"config", "set", "fast_mode", "true"}, true},
+		{"sessions-live", chrome.ManagementState{}, []string{"sessions", "--live", "--json"}, false},
+		{"sessions-live", chrome.ManagementState{LiveAll: true}, []string{"sessions", "--live", "--all", "--json"}, false},
+		{"session-tail", chrome.ManagementState{SessionID: "abc/agent", Tail: "5"}, []string{"session", "abc/agent", "--json", "--tail", "5"}, false},
 		{"mcp-approve-all", chrome.ManagementState{}, []string{"mcp", "approve", "--all"}, true},
 		{"provider-set", chrome.ManagementState{ProviderDefault: "gateway"}, []string{"provider", "gateway"}, true},
 		{"upgrade-channel", chrome.ManagementState{Channel: "dev"}, []string{"upgrade", "--channel", "dev"}, true},
@@ -104,7 +110,7 @@ func TestChatAdvancedLaunchArgumentsSplitGlobalsFromAcpFlags(t *testing.T) {
 		"--sessions-v2", "--no-additional-dirs", "--provider", "gateway", "--model", "m", "--effort", "xhigh", "--fast", "--ultrafast", "--log-file", "/tmp/acp.jsonl",
 	}, nil)
 	defer c.Close()
-	if want := []string{"--model", "m", "--ultrafast", "--log-file", "/tmp/acp.jsonl"}; !reflect.DeepEqual(c.args, want) {
+	if want := []string{"--provider", "gateway", "--model", "m", "--effort", "xhigh", "--fast", "--ultrafast", "--log-file", "/tmp/acp.jsonl"}; !reflect.DeepEqual(c.args, want) {
 		t.Fatalf("acp args=%v, want %v", c.args, want)
 	}
 	if want := []string{"--no-additional-dirs"}; !reflect.DeepEqual(c.globalArgs, want) {
@@ -113,8 +119,8 @@ func TestChatAdvancedLaunchArgumentsSplitGlobalsFromAcpFlags(t *testing.T) {
 	if c.initialProvider != "gateway" || c.initialEffort != "xhigh" || c.initialFast == nil || !*c.initialFast || !c.ultra {
 		t.Fatalf("advanced launch state=%q,%q,%v,%v", c.initialProvider, c.initialEffort, c.initialFast, c.ultra)
 	}
-	if strings.Contains(strings.Join(c.args, " "), "--provider") {
-		t.Fatalf("provider leaked into acp args: %v", c.args)
+	if !c.providerArgv || !c.effortArgv || !c.fastArgv {
+		t.Fatalf("startup flags were not recorded as argv: provider=%v effort=%v fast=%v", c.providerArgv, c.effortArgv, c.fastArgv)
 	}
 }
 
@@ -140,6 +146,20 @@ func TestManagementReadsBoundOutputAndPreserveFailures(t *testing.T) {
 	}
 }
 
+func TestDoctorExitOneKeepsChecks(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "fx")
+	script := "#!/bin/sh\necho 'noise' >&2\nprintf '%s' '{\"ok_count\":1,\"warn_count\":0,\"fail_count\":1,\"checks\":[{\"name\":\"auth\",\"status\":\"fail\"}]}'\nexit 1\n"
+	if err := os.WriteFile(file, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	text, err := managementRead(context.Background(), file, dir, "doctor", "--json")
+	doctor, ok := decodeDoctor(text, err)
+	if !ok || doctor.FailCount != 1 || len(doctor.Checks) != 1 || strings.Contains(text, "noise") {
+		t.Fatalf("doctor text=%q err=%v ok=%v report=%+v", text, err, ok, doctor)
+	}
+}
+
 func TestManagementRejectsInvalidFormsAndUnsupportedOperations(t *testing.T) {
 	for _, tc := range []struct {
 		action string
@@ -156,6 +176,8 @@ func TestManagementRejectsInvalidFormsAndUnsupportedOperations(t *testing.T) {
 		{"launch", chrome.ManagementState{Ultra: "maybe"}},
 		{"upgrade-channel", chrome.ManagementState{Channel: "nightly"}},
 		{"provider-set", chrome.ManagementState{}},
+		{"config-set", chrome.ManagementState{ConfigKey: "permission", ConfigValue: "allow"}},
+		{"session-tail", chrome.ManagementState{SessionID: "../keep", Tail: "1"}},
 		{"mcp-reload", chrome.ManagementState{}}, {"tui", chrome.ManagementState{}},
 	} {
 		if _, _, err := managementCommand(tc.action, tc.state); err == nil {
@@ -228,6 +250,17 @@ func TestAskResultMetaSummarizesMachineFields(t *testing.T) {
 	}
 	if got := askResultMeta(fxAskResult{Output: "only text"}); got != "" {
 		t.Fatalf("plain result produced meta %q", got)
+	}
+	partial, meta, problem := askPresentation(fxAskResult{
+		Output: "draft", Model: "m", AuthFailure: "sign in",
+		Recovery: &fxAskRecovery{State: "need_user", Message: "sign in"},
+	}, true, "", "retrying", nil)
+	if partial != "draft" || !strings.Contains(meta, "partial output") || !strings.Contains(problem, "sign in") || !strings.Contains(meta, "retrying") {
+		t.Fatalf("ask presentation output=%q meta=%q problem=%q", partial, meta, problem)
+	}
+	final, _, problem := askPresentation(fxAskResult{Output: "draft", FinalOutput: "done"}, true, "", "", nil)
+	if final != "done" || problem != "" {
+		t.Fatalf("final presentation output=%q problem=%q", final, problem)
 	}
 	if got := askResultMeta(fxAskResult{Usage: &fxAskUsage{}}); got != "" {
 		t.Fatalf("empty usage produced meta %q", got)

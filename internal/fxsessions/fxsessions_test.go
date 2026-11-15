@@ -140,6 +140,42 @@ func TestDeleteManyMissingRootIsAnError(t *testing.T) {
 	}
 }
 
+func TestDeleteManyStaysInsideFXHome(t *testing.T) {
+	home := testutil.IsolateHome(t)
+	state := t.TempDir()
+	t.Setenv("FX_HOME", state)
+	id := "sameid"
+	writeFile(t, filepath.Join(home, ".fx", "sessions", id, "session.json"), "{}")
+	writeFile(t, filepath.Join(state, "sessions", id, "session.json"), "{}")
+	writeFile(t, filepath.Join(state, "continue", "p"), id+"\n")
+
+	if _, err := DeleteMany([]string{id}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".fx", "sessions", id)); err != nil {
+		t.Fatalf("home session was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "sessions", id)); !os.IsNotExist(err) {
+		t.Fatalf("FX_HOME session still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "continue", "p")); !os.IsNotExist(err) {
+		t.Fatalf("FX_HOME continue pointer still exists: %v", err)
+	}
+}
+
+func TestDeleteManyRejectsRelativeFXHome(t *testing.T) {
+	home := testutil.IsolateHome(t)
+	t.Setenv("FX_HOME", "relative/fx")
+	victim := filepath.Join(home, ".fx", "sessions", "keep", "session.json")
+	writeFile(t, victim, "{}")
+	if _, err := DeleteMany([]string{"keep"}); err == nil {
+		t.Fatal("relative FX_HOME was accepted")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("fallback deleted the home session: %v", err)
+	}
+}
+
 func TestDeleteManyIgnoresLegacyV2Environment(t *testing.T) {
 	home := testutil.IsolateHome(t)
 	t.Setenv("FX_SESSIONS_V2", "1")

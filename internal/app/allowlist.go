@@ -11,6 +11,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/fxhome"
 )
 
 // fx writes persistent allow rules in two places in ~/.fx/settings.json:
@@ -23,22 +24,33 @@ import (
 // read and rewritten through the same settings.lock fx itself uses, and the
 // replacement is atomic.
 var allowlistToolNames = map[string]string{
-	"read":          "Read files",
-	"write":         "Write files",
-	"edit":          "Edit files",
-	"glob":          "Glob files",
-	"grep":          "Grep files",
-	"skill":         "Skills",
-	"install_skill": "Install skills",
-	"subagent":      "Subagents",
+	"read":     "Read files",
+	"edit":     "Edit files",
+	"glob":     "Glob files",
+	"grep":     "Grep files",
+	"skill":    "Skills",
+	"subagent": "Subagents",
+}
+
+// allowlistToolAlias maps older tool names onto the key fx actually checks.
+// write_file and edit_file are edit; installing or opening a skill is skill.
+func allowlistToolAlias(category string) string {
+	switch category {
+	case "write", "write_file", "edit_file":
+		return "edit"
+	case "install_skill":
+		return "skill"
+	default:
+		return category
+	}
 }
 
 func fxSettingsPath() (string, error) {
-	home, err := os.UserHomeDir()
+	root, err := fxhome.Root()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".fx", "settings.json"), nil
+	return filepath.Join(root, "settings.json"), nil
 }
 
 func settingsLockPath(path string) string {
@@ -123,7 +135,7 @@ func localWorkspaceKey(workspaces map[string]json.RawMessage, workspace string) 
 func allowlistCategory(kind, tool string) (string, error) {
 	switch kind {
 	case "tool":
-		category := strings.TrimSpace(tool)
+		category := allowlistToolAlias(strings.TrimSpace(tool))
 		if category == "" {
 			return "", fmt.Errorf("Choose a tool")
 		}

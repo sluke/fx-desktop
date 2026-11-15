@@ -184,6 +184,9 @@ func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	a.AskAdvanced = func(req chrome.AskRequest) {
 		mygo.App.WhenReady(func() { c.runAsk(s, req) })
 	}
+	a.CancelAsk = func() {
+		mygo.App.WhenReady(func() { c.cancelAsk(s) })
+	}
 	// The picker belongs to the conversation, so opening it is UI state and
 	// not a session call: the strip and the palette must open the same panel
 	// rather than keep one each.

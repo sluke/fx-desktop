@@ -9,8 +9,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"fx-desktop/internal/fxconfig"
+	"fx-desktop/internal/fxsessions"
 )
 
 // Form is the request form the command builders read. The management panel's
@@ -21,7 +25,8 @@ type Form struct {
 	Period, SessionID, Model, Ultra, LogPath, Channel, Effort, Fast string
 	ContextLimits, AddDirs, ProviderOverride                        string
 	Headers, Environment                                            string
-	MCPProject, NoAdditionalDirs                                    bool
+	ConfigKey, ConfigValue, Tail                                    string
+	MCPProject, NoAdditionalDirs, MCPNoLogin, LiveAll               bool
 	ProviderDefault                                                 string
 	Project                                                         string
 }
@@ -32,6 +37,30 @@ type GitHubForm struct {
 	Context string
 	Auto    bool
 	Create  bool
+}
+
+// sessionReadArgs is the read-only `fx session <id>[/<agent>]` form.
+// A composite agent path is not a session id and must not be given to delete.
+func sessionReadArgs(ref, tail string) ([]string, error) {
+	ref = strings.TrimSpace(ref)
+	parts := strings.Split(ref, "/")
+	if ref == "" || len(parts) > 4 {
+		return nil, fmt.Errorf("Enter a session id")
+	}
+	for _, part := range parts {
+		if !fxsessions.ValidID(part) {
+			return nil, fmt.Errorf("Enter a session id")
+		}
+	}
+	args := []string{"session", ref, "--json"}
+	if strings.TrimSpace(tail) == "" {
+		return args, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(tail))
+	if err != nil || n < 1 || n > 1000 {
+		return nil, fmt.Errorf("Enter a tail from 1 to 1000")
+	}
+	return append(args, "--tail", strconv.Itoa(n)), nil
 }
 
 func Command(action string, form Form) ([]string, bool, error) {
@@ -53,7 +82,11 @@ func Command(action string, form Form) ([]string, bool, error) {
 			args = append(args, provider)
 		}
 		return args, action == "logout", nil
-	case "setup", "teams":
+	case "setup":
+		// fx 0.0.17 deprecated `fx setup` and removes it in 0.0.18. The
+		// interactive console still runs the replacement login.
+		return []string{"login", "vercel", "--api-key"}, false, nil
+	case "teams":
 		return []string{action}, false, nil
 	case "mcp-list":
 		return []string{"mcp", "list", "--json"}, false, nil
@@ -64,7 +97,11 @@ func Command(action string, form Form) ([]string, bool, error) {
 		}
 		return []string{"mcp", "show", name, "--json"}, false, nil
 	case "mcp-add-slack":
-		return []string{"mcp", "add", "slack"}, true, nil
+		args := []string{"mcp", "add"}
+		if form.MCPNoLogin {
+			args = append(args, "--no-login")
+		}
+		return append(args, "slack"), true, nil
 	case "mcp-approve-all":
 		return []string{"mcp", "approve", "--all"}, true, nil
 	case "mcp-add", "mcp-login", "mcp-logout", "mcp-remove", "mcp-approve", "mcp-reject":
@@ -79,6 +116,9 @@ func Command(action string, form Form) ([]string, bool, error) {
 				args = append(args, "--project")
 			}
 			if form.Transport == "http" {
+				if form.MCPNoLogin {
+					args = append(args, "--no-login")
+				}
 				u, err := url.Parse(strings.TrimSpace(form.URL))
 				if err != nil || u.Host == "" || u.Scheme != "http" && u.Scheme != "https" {
 					return nil, false, fmt.Errorf("Enter an http or https MCP URL")
@@ -153,6 +193,33 @@ func Command(action string, form Form) ([]string, bool, error) {
 		return []string{"slack", "install", "--json"}, true, nil
 	case "slack-refresh":
 		return []string{"slack", "refresh", "--json"}, true, nil
+	case "config-list":
+		return []string{"config", "list", "--show-origin", "--json"}, false, nil
+	case "config-set":
+		args, err := fxconfig.SetArgs(form.ConfigKey, form.ConfigValue)
+		if err != nil {
+			return nil, false, err
+		}
+		return args, true, nil
+	case "config-unset":
+		args, err := fxconfig.UnsetArgs(form.ConfigKey)
+		if err != nil {
+			return nil, false, err
+		}
+		return args, true, nil
+	case "sessions-live":
+		// --live does not take the saved-session page cursor.
+		args := []string{"sessions", "--live"}
+		if form.LiveAll {
+			args = append(args, "--all")
+		}
+		return append(args, "--json"), false, nil
+	case "session-tail":
+		args, err := sessionReadArgs(form.SessionID, form.Tail)
+		if err != nil {
+			return nil, false, err
+		}
+		return args, false, nil
 	case "sessions-convert":
 		// fx 0.0.15 removed --sessions-v2; conversion is now the default
 		// store and `sessions convert` takes no global store flag.

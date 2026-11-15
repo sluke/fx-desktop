@@ -7,6 +7,7 @@ package fxcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"time"
@@ -234,9 +235,29 @@ func Run(ctx context.Context, fxPath, dir string, dst any, args ...string) error
 	cmd.WaitDelay = 100 * time.Millisecond
 	out, err := cmd.Output()
 	if err != nil {
+		if doctorReport(args, err) {
+			if uerr := json.Unmarshal(out, dst); uerr != nil {
+				return fmt.Errorf("fx doctor: %w", uerr)
+			}
+			return nil
+		}
 		return err
 	}
 	return json.Unmarshal(out, dst)
+}
+
+// doctorReport is true when fx doctor exited 1 or 2. Those codes mean the
+// report itself contains failures; the JSON on stdout is still the result.
+func doctorReport(args []string, err error) bool {
+	if len(args) == 0 || args[0] != "doctor" {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	code := exitErr.ExitCode()
+	return code == 1 || code == 2
 }
 
 // query runs one inspection under its own deadline.

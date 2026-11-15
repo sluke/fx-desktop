@@ -33,3 +33,12 @@ func (s *ProjectWindow) scope(feature string) (context.Context, context.CancelFu
 	s.scopes.mu.Unlock()
 	return ctx, cancel
 }
+
+// cancelFeature stops the background work started by scope for that feature.
+func (s *ProjectWindow) cancelFeature(feature string) {
+	s.scopes.mu.Lock()
+	if cancel := s.scopes.cancel[feature]; cancel != nil {
+		cancel()
+	}
+	s.scopes.mu.Unlock()
+}

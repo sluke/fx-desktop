@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,9 @@ import (
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/app/presenter"
+	"fx-desktop/internal/fxhome"
+	"fx-desktop/internal/fxlive"
+	"fx-desktop/internal/fxprofile"
 	"fx-desktop/internal/management"
 )
 
@@ -170,6 +174,10 @@ func (c *Coordinator) runManagement(s *ProjectWindow, action string) {
 		c.runSkills(s)
 		return
 	}
+	if action == "profiles" {
+		c.readManagement(s, action, nil)
+		return
+	}
 	if action == "details" || action == "doctor" || action == "credits" || action == "slack-status" || action == "models" {
 		c.readManagement(s, action, nil)
 		return
@@ -181,7 +189,7 @@ func (c *Coordinator) runManagement(s *ProjectWindow, action string) {
 		return
 	}
 	switch action {
-	case "mcp-list", "mcp-show", "workspace-list", "session-inspect":
+	case "mcp-list", "mcp-show", "workspace-list", "session-inspect", "sessions-live", "session-tail":
 		c.readManagement(s, action, args)
 		return
 	}
@@ -408,6 +416,44 @@ func (b *managementOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+func liveAgents(in []fxlive.Agent) []chrome.LiveAgent {
+	var out []chrome.LiveAgent
+	var walk func(fxlive.Agent, int)
+	walk = func(agent fxlive.Agent, depth int) {
+		out = append(out, chrome.LiveAgent{
+			Ref: agent.Ref, Name: agent.Name, Title: agent.Title, State: agent.State,
+			Model: agent.Model, Profile: agent.Profile, Workspace: agent.Workspace, Depth: depth,
+		})
+		for _, child := range agent.Agents {
+			walk(child, depth+1)
+		}
+	}
+	for _, agent := range in {
+		walk(agent, 0)
+	}
+	return out
+}
+
+func decodeDoctor(text string, err error) (FxDoctor, bool) {
+	var doctor FxDoctor
+	if json.Unmarshal([]byte(text), &doctor) != nil {
+		return FxDoctor{}, false
+	}
+	if err != nil && !doctorExit(err) {
+		return FxDoctor{}, false
+	}
+	return doctor, true
+}
+
+func doctorExit(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	code := exitErr.ExitCode()
+	return code == 1 || code == 2
+}
+
 func managementRead(ctx context.Context, executable, dir string, args ...string) (string, error) {
 	return managementReadLimit(ctx, executable, dir, 64*1024, args...)
 }
@@ -415,27 +461,45 @@ func managementRead(ctx context.Context, executable, dir string, args ...string)
 // managementReadLimit is managementRead with an explicit cap. Quick Ask uses
 // a larger cap because a useful one-shot answer can exceed the management
 // panel's 64 KiB budget.
-func managementReadLimit(ctx context.Context, executable, dir string, limit int, args ...string) (string, error) {
+type fxStreams struct {
+	stdout, stderr string
+	err            error
+}
+
+func managementStreams(ctx context.Context, executable, dir string, limit int, args ...string) fxStreams {
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = 100 * time.Millisecond
-	var out managementOutput
-	out.limit = limit
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	var stdout, stderr managementOutput
+	stdout.limit = limit
+	stderr.limit = 32 * 1024
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Run()
-	text := strings.TrimSpace(out.buffer.String())
-	if out.truncated {
+	text := strings.TrimSpace(stdout.buffer.String())
+	errText := strings.TrimSpace(stderr.buffer.String())
+	if stdout.truncated {
 		text += fmt.Sprintf("\n[Output truncated at %d KiB]", limit/1024)
 	}
 	if err != nil {
-		return text, fmt.Errorf("fx %s: %w", strings.Join(args, " "), err)
+		if text == "" {
+			text = errText
+		}
+		err = fmt.Errorf("fx %s: %w", strings.Join(args, " "), err)
+	}
+	return fxStreams{stdout: text, stderr: errText, err: err}
+}
+
+func managementReadLimit(ctx context.Context, executable, dir string, limit int, args ...string) (string, error) {
+	streams := managementStreams(ctx, executable, dir, limit, args...)
+	if streams.err != nil {
+		return streams.stdout, streams.err
 	}
 	var formatted bytes.Buffer
-	if json.Indent(&formatted, []byte(text), "", "  ") == nil {
-		text = formatted.String()
+	if json.Indent(&formatted, []byte(streams.stdout), "", "  ") == nil {
+		return formatted.String(), nil
 	}
-	return text, nil
+	return streams.stdout, nil
 }
 
 type managementReadResult struct {
@@ -452,6 +516,9 @@ type managementReadResult struct {
 	mcpProblem     string
 	session        *chrome.SessionDetail
 	sessionProblem string
+	live           []chrome.LiveAgent
+	liveProblem    string
+	profiles       []chrome.ProfileInfo
 }
 
 // The management pages' models are the presenter's: it maps fx's JSON into
@@ -611,8 +678,8 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			result.details = detailsSections(statusPtr, permissionsPtr, usagePtr, failures)
 		case "doctor":
 			text, err := managementRead(ctx, executable, dir, "doctor", "--json")
-			var doctor FxDoctor
-			if err == nil && json.Unmarshal([]byte(text), &doctor) == nil {
+			doctor, ok := decodeDoctor(text, err)
+			if ok {
 				for _, check := range doctor.Checks {
 					result.doctor = append(result.doctor, chrome.DoctorCheck{Name: check.Name, Status: check.Status, Detail: check.Detail})
 				}
@@ -626,8 +693,44 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			} else {
 				result.output, result.problem = text, err
 			}
+		case "sessions-live":
+			text, err := managementRead(ctx, executable, dir, args...)
+			report, parseErr := fxlive.Parse([]byte(text))
+			if err == nil && parseErr == nil {
+				result.live = liveAgents(report.Agents)
+				if report.Count != nil {
+					result.output = fmt.Sprintf("%d live session(s)", *report.Count)
+				} else {
+					result.output = fmt.Sprintf("%d live session(s)", len(report.Agents))
+				}
+			} else {
+				result.output, result.problem = text, err
+				if parseErr != nil {
+					result.liveProblem = parseErr.Error()
+				} else if err != nil {
+					result.liveProblem = valueOr(text, err.Error())
+				}
+			}
+		case "profiles":
+			root, rootErr := fxhome.Root()
+			if rootErr != nil {
+				root = ""
+				result.problem = rootErr
+			}
+			for _, profile := range fxprofile.Scan(root, dir) {
+				result.profiles = append(result.profiles, chrome.ProfileInfo{
+					Name: profile.Name, Source: profile.Source, Path: profile.Path,
+					Description: profile.Description, Permission: profile.Permission,
+					Model: profile.Model, Effort: profile.Effort, PromptMode: profile.PromptMode,
+					Tools: profile.Tools, Ignored: profile.Ignored,
+					RepoPermissionIgnored: profile.RepoPermissionIgnored,
+					Problem:               profile.Problem, PromptPreview: profile.PromptPreview,
+				})
+			}
+			result.output = fmt.Sprintf("%d profile(s)", len(result.profiles))
 		case "credits":
-			result.credits, result.problem = managementRead(ctx, executable, dir, "credits", "--json")
+			text, err := managementRead(ctx, executable, dir, "credits", "--json")
+			result.credits, result.problem = presentCredits(text, err)
 		case "slack-status":
 			text, err := managementRead(ctx, executable, dir, "slack", "status", "--json")
 			var slack FxSlackStatus
@@ -690,6 +793,13 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			if action == "session-inspect" {
 				state.SessionView = result.session
 				state.SessionProblem = result.sessionProblem
+			}
+			if action == "sessions-live" {
+				state.Live = result.live
+				state.LiveProblem = result.liveProblem
+			}
+			if action == "profiles" {
+				state.Profiles = result.profiles
 			}
 			s.invalidate()
 		})

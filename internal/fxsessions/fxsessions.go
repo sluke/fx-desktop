@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"fx-desktop/internal/fxhome"
 )
 
 // maxIDLength bounds the path component. Real fx IDs are short base64url
@@ -50,11 +52,11 @@ func ValidID(id string) bool {
 // flat layout beside it; both must exist under one anchor for the store to
 // be recognized.
 func root() (string, error) {
-	home, err := os.UserHomeDir()
+	base, err := fxhome.Root()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".fx", "sessions"), nil
+	return filepath.Join(base, "sessions"), nil
 }
 
 // storeDirs names the directories that may hold one session directory each,
@@ -141,11 +143,11 @@ func DeleteMany(ids []string) (deleted []string, err error) {
 // fx validates it against the directories and rebuilds it, so it is left
 // untouched.
 func removeContinuePointers(ids []string) error {
-	home, err := os.UserHomeDir()
+	base, err := fxhome.Root()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(home, ".fx", "continue")
+	dir := filepath.Join(base, "continue")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {

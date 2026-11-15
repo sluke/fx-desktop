@@ -172,6 +172,7 @@ func (s *ProjectWindow) view(ctx *ui.Context) {
 					Project: filepath.Base(s.project), Model: snapshot.Model, Problem: snapshot.Problem, Messages: snapshot.Messages, Notices: snapshot.Notices,
 					Ready: snapshot.Ready, Busy: snapshot.Busy, Stopping: snapshot.Stopping, ConfigChanging: snapshot.ConfigChanging, Permission: snapshot.Permission,
 					CanSteer: snapshot.Steering, Queued: snapshot.Queued,
+					Recovery: snapshot.Recovery, Thought: snapshot.Thought,
 					Configs: snapshot.Configs, Modes: snapshot.Modes, Mode: snapshot.Mode,
 					Effort: snapshot.Effort, Fast: snapshot.Fast, Ultra: snapshot.Ultra, AdvancedProblem: snapshot.AdvancedProblem,
 					SetAdvanced:     s.chat.setAdvanced,

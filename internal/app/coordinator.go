@@ -15,6 +15,7 @@ import (
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/fxbin"
+	"fx-desktop/internal/fxhome"
 	"fx-desktop/internal/prefs"
 	"fx-desktop/internal/projects"
 	"fx-desktop/internal/sessionstats"
@@ -919,11 +920,11 @@ func drawPrefs(c *ui.Context, p *prefs.Prefs, onChooseFolder, onSave, onRevert f
 }
 
 func (c *Coordinator) openFxConfig() {
-	home, err := os.UserHomeDir()
+	dir, err := fxhome.Root()
 	if err != nil {
+		mygo.Dialog.Error("fx", err.Error())
 		return
 	}
-	dir := filepath.Join(home, ".fx")
 	_ = os.MkdirAll(dir, 0o755)
 	_ = mygo.Shell.OpenPath(dir)
 }

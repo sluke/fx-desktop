@@ -42,6 +42,12 @@ func TestChatACPProcess(t *testing.T) {
 	// set_config_option round trip is exercised end to end rather than
 	// against a stub that always says yes.
 	model, mode, provider := "test/model", "ask", "test"
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--provider" && i+1 < len(os.Args) {
+			provider = os.Args[i+1]
+			i++
+		}
+	}
 	// workspace is the project session/new opened, and embedded is whether
 	// this fx takes a file's content in the prompt. Both are read from what
 	// the client sent, so a block the GUI shaped wrongly fails here.
@@ -560,6 +566,9 @@ func TestChatRejectsForeignUpdatesAndPreservesPartialOutput(t *testing.T) {
 	if len(s.Messages) != 1 || s.Messages[0].Text != "你好" || s.Problem != "Connection lost" {
 		t.Fatalf("snapshot: %+v", s)
 	}
+	if s.Thought != "private thought" || strings.Contains(s.Messages[0].Text, "private thought") {
+		t.Fatalf("thought leaked into the transcript: %+v", s)
+	}
 	if text := truncateText(strings.Repeat("世", 100), 20); !strings.HasSuffix(text, "… Output truncated") {
 		t.Fatal(text)
 	}
@@ -568,6 +577,54 @@ func TestChatRejectsForeignUpdatesAndPreservesPartialOutput(t *testing.T) {
 // usage_update is fx reporting provider-confirmed context use. The strip
 // must show it, and a later update that omits the window size must not erase
 // the size fx already told us.
+func TestRecoveryStatusStaysOutOfTheTranscript(t *testing.T) {
+	c := newChatSession("", "", nil, nil)
+	defer c.Close()
+	c.sessionID = "s1"
+	c.turnGen = 2
+	send := func(meta any) {
+		raw, _ := json.Marshal(map[string]any{"sessionId": "s1", "update": map[string]any{
+			"sessionUpdate": "session_info_update",
+			"_meta":         map[string]any{"fx": map[string]any{"modelResponseRecovery": meta}},
+		}})
+		c.event(acp.Packet{Method: "session/update", Params: raw})
+	}
+	send(map[string]any{"state": "retrying", "attempt": 2, "message": "again", "generation": 1})
+	if c.snapshot().Recovery != "" {
+		t.Fatal("an older generation updated recovery")
+	}
+	send(map[string]any{"state": "retrying", "attempt": 2, "generation": 2})
+	if got := c.snapshot().Recovery; got != "Retrying model response · attempt 2" || len(c.snapshot().Messages) != 0 {
+		t.Fatalf("retry status = %q messages=%d", got, len(c.snapshot().Messages))
+	}
+	send(map[string]any{"state": "need_user", "message": "sign in"})
+	if got := c.snapshot().Recovery; got != "Needs attention · sign in" {
+		t.Fatalf("need_user status = %q", got)
+	}
+	send(map[string]any{"state": "recovered"})
+	if c.snapshot().Recovery != "Recovered" {
+		t.Fatalf("recovered status = %q", c.snapshot().Recovery)
+	}
+	send(nil)
+	if c.snapshot().Recovery != "" {
+		t.Fatal("null did not clear recovery")
+	}
+	raw, _ := json.Marshal(map[string]any{"sessionId": "s1", "update": map[string]any{"sessionUpdate": "session_info_update", "title": "kept"}})
+	c.event(acp.Packet{Method: "session/update", Params: raw})
+	send(map[string]any{"state": "recovered"})
+	if c.snapshot().Recovery != "Recovered" {
+		t.Fatal("a later report was lost")
+	}
+	c.mu.Lock()
+	c.ignoreRecovery = true
+	c.recovery = ""
+	c.mu.Unlock()
+	send(map[string]any{"state": "retrying", "attempt": 3})
+	if c.snapshot().Recovery != "" {
+		t.Fatal("a cancelled turn kept a recovery status")
+	}
+}
+
 func TestChatTracksContextUsage(t *testing.T) {
 	c := newChatSession("", "", nil, nil)
 	defer c.Close()

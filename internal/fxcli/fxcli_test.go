@@ -84,6 +84,35 @@ func TestReadAuthIsEmptyOnFailure(t *testing.T) {
 
 // A malformed answer is an error: decoding must not silently hand back a zero
 // value that reads as "fx reports nothing".
+func TestFX17DoctorFailureKeepsReport(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fx")
+	body := `{"ok_count":0,"warn_count":0,"fail_count":1,"checks":[{"name":"auth","status":"fail","detail":"missing"}]}`
+	script := "#!/bin/sh\necho 'doctor warning' >&2\nprintf '%s\\n' '" + body + "'\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report, err := ReadDoctor(context.Background(), path, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report == nil || report.FailCount != 1 || len(report.Checks) != 1 || report.Checks[0].Name != "auth" {
+		t.Fatalf("report = %+v", report)
+	}
+}
+
+func TestDoctorBrokenJSONStaysAnError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fx")
+	script := "#!/bin/sh\nprintf '%s\\n' 'not-json'\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadDoctor(context.Background(), path, dir); err == nil {
+		t.Fatal("broken doctor JSON was accepted")
+	}
+}
+
 func TestRunRejectsMalformedJSON(t *testing.T) {
 	path, _ := stubFx(t, `not json`)
 	var out Status

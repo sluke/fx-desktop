@@ -3,6 +3,7 @@ package app
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"fx-desktop/internal/app/chrome"
 )
@@ -67,5 +68,28 @@ func TestAskArgsPutGlobalContextAndDirectoryFlagsBeforeAsk(t *testing.T) {
 	}
 	if _, err := askArgs(chrome.AskRequest{Prompt: "hello", AddDirs: extra, NoAdditionalDirs: true}); err == nil {
 		t.Fatal("accepted add dirs together with no-additional-dirs")
+	}
+}
+
+func TestAskConfigLastOverrideWinsAndCannotReplaceDedicatedFields(t *testing.T) {
+	got, err := askArgs(chrome.AskRequest{
+		Prompt: "hello", Access: "auto", Provider: "codex", Timeout: "30",
+		Config: "theme=dark\ntheme=light\nfast_mode=true\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ask", "--auto", "--provider", "codex", "--timeout", "30", "--config", "theme=light", "--config", "fast_mode=true", "--json", "hello"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ask args=%v, want %v", got, want)
+	}
+	for _, config := range []string{"provider=grok", "permission.edit=allow", "model=x"} {
+		if _, err := askArgs(chrome.AskRequest{Prompt: "hello", Config: config}); err == nil {
+			t.Fatalf("accepted config override %s", config)
+		}
+	}
+	wait, err := askWait(chrome.AskRequest{Timeout: "700"})
+	if err != nil || wait < 700*time.Second {
+		t.Fatalf("wait=%v err=%v", wait, err)
 	}
 }

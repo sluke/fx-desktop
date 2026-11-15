@@ -201,6 +201,7 @@ func TestWorkspaceToolsRenderNativeMCPAndSessionViews(t *testing.T) {
 	}
 
 	sh.Tools.Page = "Sessions"
+	sh.Tools.BodyScroll.Y = 0
 	sh.Tools.SessionView = &SessionDetail{
 		ID: "thread-1", Created: "2026-10-31 10:00 CST", Language: "en",
 		HistoryLen: 2,

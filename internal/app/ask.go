@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,11 @@ func askArgs(req chrome.AskRequest) ([]string, error) {
 			return "", fmt.Errorf("Enter a valid %s", label)
 		}
 		return raw, nil
+	}
+	if provider, err := value(req.Provider, "provider"); err != nil {
+		return nil, err
+	} else if provider != "" {
+		args = append(args, "--provider", provider)
 	}
 	if model, err := value(req.Model, "model id"); err != nil {
 		return nil, err
@@ -109,6 +115,18 @@ func askArgs(req chrome.AskRequest) ([]string, error) {
 		}
 		args = append(args, "--image", path)
 	}
+	if timeout := strings.TrimSpace(req.Timeout); timeout != "" {
+		n, err := strconv.Atoi(timeout)
+		if err != nil || n < 1 || n > 86400 {
+			return nil, fmt.Errorf("Enter an fx timeout in seconds")
+		}
+		args = append(args, "--timeout", strconv.Itoa(n))
+	}
+	configs, err := askConfigFlags(req.Config)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, configs...)
 	if system := strings.TrimSpace(req.System); system != "" {
 		if strings.ContainsRune(system, 0) {
 			return nil, fmt.Errorf("System prompt cannot contain NUL")
@@ -123,11 +141,72 @@ func askArgs(req chrome.AskRequest) ([]string, error) {
 	return args, nil
 }
 
+func askConfigFlags(text string) ([]string, error) {
+	last := map[string]string{}
+	var order []string
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if !ok || key == "" || strings.HasPrefix(key, "-") || strings.ContainsAny(key, " \t") || strings.ContainsRune(value, 0) {
+			return nil, fmt.Errorf("Enter config overrides as key=value")
+		}
+		switch key {
+		case "permission", "permission_mode", "model", "provider", "providers", "models", "credential_source":
+			return nil, fmt.Errorf("Use the dedicated field for %s", key)
+		}
+		if strings.HasPrefix(key, "permission.") || strings.HasPrefix(key, "providers.") || strings.HasPrefix(key, "models.") {
+			return nil, fmt.Errorf("Use the dedicated field for %s", key)
+		}
+		if _, seen := last[key]; !seen {
+			order = append(order, key)
+		}
+		last[key] = value
+	}
+	var args []string
+	for _, key := range order {
+		args = append(args, "--config", key+"="+last[key])
+	}
+	return args, nil
+}
+
+func askWait(req chrome.AskRequest) (time.Duration, error) {
+	wait := 10 * time.Minute
+	if raw := strings.TrimSpace(req.WaitMinutes); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 180 {
+			return 0, fmt.Errorf("Enter a wait from 1 to 180 minutes")
+		}
+		wait = time.Duration(n) * time.Minute
+	}
+	if raw := strings.TrimSpace(req.Timeout); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return 0, fmt.Errorf("Enter an fx timeout in seconds")
+		}
+		floor := time.Duration(n)*time.Second + 15*time.Second
+		if floor > wait {
+			wait = floor
+		}
+	}
+	return wait, nil
+}
+
 type fxAskUsage struct {
 	InputTokens      *int64 `json:"input_tokens"`
 	OutputTokens     *int64 `json:"output_tokens"`
 	CacheReadTokens  *int64 `json:"cache_read_tokens"`
 	CacheWriteTokens *int64 `json:"cache_write_tokens"`
+}
+
+type fxAskRecovery struct {
+	State   string `json:"state"`
+	Attempt int    `json:"attempt"`
+	Message string `json:"message"`
 }
 
 type fxAskResult struct {
@@ -141,6 +220,8 @@ type fxAskResult struct {
 	ToolCalls        []json.RawMessage `json:"tool_calls"`
 	Usage            *fxAskUsage       `json:"usage"`
 	Error            string            `json:"error"`
+	AuthFailure      string            `json:"auth_failure"`
+	Recovery         *fxAskRecovery    `json:"recovery"`
 }
 
 // askResultMeta summarizes the machine-readable fields fx adds around the
@@ -181,11 +262,75 @@ func askResultMeta(result fxAskResult) string {
 	if result.SessionID != "" {
 		parts = append(parts, "session "+result.SessionID)
 	}
+	if result.FinalOutput == "" && strings.TrimSpace(result.Output) != "" && (result.Model != "" || result.Recovery != nil || result.Error != "" || result.AuthFailure != "") {
+		parts = append(parts, "partial output")
+	}
+	if result.Recovery != nil && result.Recovery.State != "" {
+		label := result.Recovery.State
+		if result.Recovery.Attempt > 0 {
+			label = fmt.Sprintf("%s attempt %d", label, result.Recovery.Attempt)
+		}
+		parts = append(parts, "recovery "+label)
+	}
 	return strings.Join(parts, " · ")
+}
+
+func askPresentation(result fxAskResult, parsed bool, text, stderr string, runErr error) (output, meta, problem string) {
+	switch {
+	case parsed:
+		output = strings.TrimSpace(result.FinalOutput)
+		if output == "" {
+			output = strings.TrimSpace(result.Output)
+		}
+		meta = askResultMeta(result)
+		switch {
+		case result.AuthFailure != "":
+			problem = "fx ask: " + result.AuthFailure
+		case result.Error != "":
+			problem = "fx ask: " + result.Error
+		case result.Recovery != nil && (result.Recovery.State == "need" || result.Recovery.State == "need_user"):
+			problem = "fx ask: " + recoveryLabel(result.Recovery.State, result.Recovery.Attempt, result.Recovery.Message)
+		case strings.TrimSpace(output) == "":
+			problem = "fx returned no assistant output"
+		}
+	case strings.TrimSpace(text) != "":
+		output = text
+	default:
+		problem = "fx returned no output"
+	}
+	if note := strings.TrimSpace(stderr); note != "" {
+		if parsed {
+			if meta != "" {
+				meta += " · "
+			}
+			meta += note
+		} else if problem == "" {
+			problem = note
+		}
+	}
+	if runErr != nil && problem == "" {
+		problem = runErr.Error()
+	}
+	return output, meta, problem
+}
+
+func (c *Coordinator) cancelAsk(s *ProjectWindow) {
+	s.shell.AskGeneration++
+	s.cancelFeature("ask")
+	s.shell.AskBusy = false
+	s.shell.AskProblem = "Cancelled"
+	s.invalidate()
 }
 
 func (c *Coordinator) runAsk(s *ProjectWindow, req chrome.AskRequest) {
 	args, err := askArgs(req)
+	if err != nil {
+		s.shell.AskBusy = false
+		s.shell.AskProblem = err.Error()
+		s.invalidate()
+		return
+	}
+	wait, err := askWait(req)
 	if err != nil {
 		s.shell.AskBusy = false
 		s.shell.AskProblem = err.Error()
@@ -203,38 +348,17 @@ func (c *Coordinator) runAsk(s *ProjectWindow, req chrome.AskRequest) {
 	scope, stop := s.scope("ask")
 	go func() {
 		defer stop()
-		ctx, cancel := context.WithTimeout(scope, 10*time.Minute)
+		ctx, cancel := context.WithTimeout(scope, wait)
 		defer cancel()
-		text, runErr := managementReadLimit(ctx, executable, dir, 2*1024*1024, args...)
+		streams := managementStreams(ctx, executable, dir, 2*1024*1024, args...)
 		var result fxAskResult
-		parsed := json.Unmarshal([]byte(text), &result) == nil
+		parsed := json.Unmarshal([]byte(streams.stdout), &result) == nil
 		s.dispatch(func() {
 			if s.shell.AskGeneration != generation {
 				return
 			}
 			s.shell.AskBusy = false
-			s.shell.AskProblem = ""
-			switch {
-			case parsed:
-				answer := strings.TrimSpace(result.FinalOutput)
-				if answer == "" {
-					answer = result.Output
-				}
-				s.shell.AskOutput = answer
-				s.shell.AskMeta = askResultMeta(result)
-				if result.Error != "" {
-					s.shell.AskProblem = "fx ask: " + result.Error
-				} else if strings.TrimSpace(answer) == "" {
-					s.shell.AskProblem = "fx returned no assistant output"
-				}
-			case strings.TrimSpace(text) != "":
-				s.shell.AskOutput = text
-			default:
-				s.shell.AskProblem = "fx returned no output"
-			}
-			if runErr != nil && s.shell.AskProblem == "" {
-				s.shell.AskProblem = runErr.Error()
-			}
+			s.shell.AskOutput, s.shell.AskMeta, s.shell.AskProblem = askPresentation(result, parsed, streams.stdout, streams.stderr, streams.err)
 			s.invalidate()
 		})
 	}()

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"fx-desktop/internal/app/chrome"
+	"fx-desktop/internal/fxhome"
 )
 
 type skillRoot struct{ path, source string }
@@ -14,25 +15,28 @@ type skillRoot struct{ path, source string }
 // skillRoots follows the discovery roots fx documents in its TUI. The order
 // is workspace first, then user-wide compatibility roots, so a project skill
 // is the one a user sees first.
-func skillRoots(workspace, home string) []skillRoot {
+func skillRoots(workspace, stateRoot, home string) []skillRoot {
 	var roots []skillRoot
 	if workspace != "" {
 		for _, name := range []string{filepath.Join(".fx", "skills"), "skills", filepath.Join(".opencode", "skills"), filepath.Join(".codex", "skills"), filepath.Join(".claude", "skills"), filepath.Join(".agents", "skills"), filepath.Join(".claw", "skills")} {
 			roots = append(roots, skillRoot{filepath.Join(workspace, name), "workspace " + name})
 		}
 	}
+	if stateRoot != "" {
+		roots = append(roots, skillRoot{filepath.Join(stateRoot, "skills"), "global .fx/skills"})
+	}
 	if home != "" {
-		for _, name := range []string{filepath.Join(".fx", "skills"), filepath.Join(".config", "opencode", "skills"), filepath.Join(".codex", "skills"), filepath.Join(".claude", "skills"), filepath.Join(".agents", "skills"), filepath.Join(".claw", "skills")} {
+		for _, name := range []string{filepath.Join(".config", "opencode", "skills"), filepath.Join(".codex", "skills"), filepath.Join(".claude", "skills"), filepath.Join(".agents", "skills"), filepath.Join(".claw", "skills")} {
 			roots = append(roots, skillRoot{filepath.Join(home, name), "global " + name})
 		}
 	}
 	return roots
 }
 
-func scanSkills(workspace, home string) []chrome.SkillInfo {
+func scanSkills(workspace, stateRoot, home string) []chrome.SkillInfo {
 	var out []chrome.SkillInfo
 	seen := make(map[string]bool)
-	for _, root := range skillRoots(workspace, home) {
+	for _, root := range skillRoots(workspace, stateRoot, home) {
 		entries, err := os.ReadDir(root.path)
 		if err != nil {
 			continue
@@ -144,7 +148,11 @@ func (c *Coordinator) runSkills(s *ProjectWindow) {
 		if err != nil {
 			home = ""
 		}
-		skills := scanSkills(workspace, home)
+		stateRoot, err := fxhome.Root()
+		if err != nil {
+			stateRoot = ""
+		}
+		skills := scanSkills(workspace, stateRoot, home)
 		s.dispatch(func() {
 			if state.Generation != generation || !state.Open {
 				return

@@ -119,4 +119,10 @@ type Status struct {
 	InputTokens, OutputTokens               int
 	Problem, Model, Mode, SessionID         string
 	SessionTitle                            string
+	// Recovery is the latest model-response recovery status. It is empty
+	// when fx has not reported one, or after a null report clears it.
+	Recovery string
+	// Thought is the latest agent_thought_chunk. It stays out of the
+	// transcript; the status line is the only place it is shown.
+	Thought string
 }

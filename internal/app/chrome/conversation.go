@@ -146,6 +146,10 @@ type ConversationHost struct {
 	// SetConfig changes one option by its fx config id. Everything routes
 	// through here, mode included.
 	SetConfig func(configID, value string)
+	// Recovery and Thought are status. They are never written into the
+	// transcript: a retry stays visible while the turn is still running,
+	// and a thought chunk stays out of the assistant text.
+	Recovery, Thought string
 	// Effort/Fast/Ultra are model-dependent settings accepted by fx through
 	// set_config_option without appearing in session/new. AdvancedProblem is
 	// the last rejection (for example, a model without reasoning effort).
@@ -552,6 +556,10 @@ func composerStatus(h ConversationHost, state *ConversationState) string {
 	switch {
 	case h.Stopping:
 		return "Stopping…"
+	case h.Recovery != "":
+		return h.Recovery
+	case h.Busy && h.Thought != "":
+		return "Thinking…"
 	case h.Preparing:
 		return "Preparing… · reading mentioned files"
 	case h.Permission != nil:
