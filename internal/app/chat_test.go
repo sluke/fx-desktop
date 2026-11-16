@@ -205,6 +205,10 @@ func TestChatACPProcess(t *testing.T) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "chat fixture stdin:", err)
+		os.Exit(2)
+	}
 	os.Exit(0)
 }
 

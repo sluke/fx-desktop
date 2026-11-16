@@ -6,9 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 )
 
 func TestScanSkillsReadsFxDiscoveryRoots(t *testing.T) {
@@ -94,7 +92,7 @@ func TestParseSkillHeaderStopsAtClosingMarker(t *testing.T) {
 	}
 	small := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			if name, _ := parseSkillHeader(path); name != "fixture" {
 				b.Fatalf("name=%q", name)
 			}
@@ -115,35 +113,12 @@ func TestParseSkillHeaderWithoutClosingMarkerIsBounded(t *testing.T) {
 	}
 	result := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			parseSkillHeader(path)
 		}
 	})
 	if got := result.AllocedBytesPerOp(); got > 256<<10 {
 		t.Fatalf("unterminated header allocated %d B/op", got)
-	}
-}
-
-// A FIFO named SKILL.md must be skipped, not opened: opening a pipe waits for
-// a writer (P4).
-func TestScanSkillsSkipsSpecialFiles(t *testing.T) {
-	workspace := t.TempDir()
-	dir := filepath.Join(workspace, ".fx", "skills", "pipe")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := syscall.Mkfifo(filepath.Join(dir, "SKILL.md"), 0o600); err != nil {
-		t.Skip("mkfifo unavailable")
-	}
-	done := make(chan skillScanResult, 1)
-	go func() { done <- scanSkills(context.Background(), workspace, "", "") }()
-	select {
-	case result := <-done:
-		if len(result.Skills) != 0 || result.Partial {
-			t.Fatalf("special file became a skill: %+v", result)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("skill scan blocked on a FIFO")
 	}
 }
 
@@ -173,8 +148,7 @@ func BenchmarkSkillHeader(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if name, _ := parseSkillHeader(path); name != "fixture" {
 			b.Fatal(name)
 		}

@@ -567,16 +567,6 @@ func (s *ProjectWindow) startSavedRefresh() {
 	}()
 }
 
-// refreshSavedList is the synchronous form.
-func (s *ProjectWindow) refreshSavedList() {
-	if s.project == "" {
-		return
-	}
-	ctx, stop := s.scope("fx-saved")
-	defer stop()
-	s.readSavedList(ctx, s.beginSavedRead())
-}
-
 func (s *ProjectWindow) beginSavedRead() uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()

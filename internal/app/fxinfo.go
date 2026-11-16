@@ -57,22 +57,6 @@ func fxPermissions(ctx context.Context, fxPath, dir string) (*FxPermissions, err
 	return fxcli.ReadPermissions(ctx, fxPath, dir)
 }
 
-func fxModels(ctx context.Context, fxPath, dir string) (*FxModels, error) {
-	return fxcli.ReadModels(ctx, fxPath, dir)
-}
-
-func fxDoctor(ctx context.Context, fxPath, dir string) (*FxDoctor, error) {
-	return fxcli.ReadDoctor(ctx, fxPath, dir)
-}
-
-func fxSlackStatus(ctx context.Context, fxPath, dir string) (*FxSlackStatus, error) {
-	return fxcli.ReadSlackStatus(ctx, fxPath, dir)
-}
-
-func fxSessionsConvert(ctx context.Context, fxPath, dir string) (*FxSessionsConvert, error) {
-	return fxcli.ReadSessionsConvert(ctx, fxPath, dir)
-}
-
 func fxSessions(ctx context.Context, fxPath, dir string) ([]FxSession, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()

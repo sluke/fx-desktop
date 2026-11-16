@@ -1530,7 +1530,7 @@ func (c *chatSession) send(text string, images []promptImage, mentions []promptM
 		c.mu.Unlock()
 		return false
 	}
-	client, sid := c.beginTurnLocked(text, images, mentions, appending)
+	client, sid := c.beginTurnLocked(text, images, appending)
 	c.mu.Unlock()
 	c.invalidate()
 	go c.runTurn(client, sid, text, images, mentions)
@@ -1541,7 +1541,7 @@ func (c *chatSession) send(text string, images []promptImage, mentions []promptM
 // and a newly typed message cannot both believe the session is idle. It also
 // forgets the reply and tool bindings of the last turn: a new prompt is a new
 // reply even if fx reuses a message or tool-call ID across prompts.
-func (c *chatSession) beginTurnLocked(text string, images []promptImage, mentions []promptMention, appending bool) (*acp.Client, string) {
+func (c *chatSession) beginTurnLocked(text string, images []promptImage, appending bool) (*acp.Client, string) {
 	c.busy = true
 	c.problem = ""
 	c.turnGen++
@@ -1637,7 +1637,7 @@ func (c *chatSession) nextQueuedLocked() (activeTurn, bool) {
 	if len(c.queued) == 0 {
 		c.queued = nil
 	}
-	client, sid := c.beginTurnLocked(prompt.text, nil, prompt.mentions, false)
+	client, sid := c.beginTurnLocked(prompt.text, nil, false)
 	return activeTurn{client: client, sid: sid, prompt: prompt}, true
 }
 

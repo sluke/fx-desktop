@@ -173,8 +173,7 @@ func BenchmarkSkillScanEntries(b *testing.B) {
 		makeSkillDirs(b, workspace, n)
 		b.Run(fmt.Sprintf("%d-entries", n), func(b *testing.B) {
 			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				_ = scanSkills(context.Background(), workspace, "", "")
 			}
 		})
@@ -187,8 +186,7 @@ func BenchmarkSkillScanPreCanceled(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = scanSkills(ctx, workspace, "", "")
 	}
 }

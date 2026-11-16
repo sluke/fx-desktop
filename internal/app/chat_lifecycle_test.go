@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -61,6 +63,10 @@ func TestChatLifecycleProcess(t *testing.T) {
 			out.Encode(map[string]any{"jsonrpc": "2.0", "id": p.ID, "result": map[string]any{"sessionId": "lifecycle-session"}})
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "lifecycle fixture stdin:", err)
+		os.Exit(2)
+	}
 	// stdin reached EOF: this is fx's cue to cancel its own tools and leave.
 	// The marker is written first so a test can tell "cleaned up" from
 	// "killed", and the delay sits inside the grace period on purpose.
@@ -76,6 +82,28 @@ func TestChatLifecycleProcess(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	mark("cleanup-complete")
 	os.Exit(0)
+}
+
+func TestChatLifecycleProcessReportsScanFailure(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cmd := exec.Command(binary, "-test.run=^TestChatLifecycleProcess$")
+	cmd.Env = append(os.Environ(), "FX_DESKTOP_ACP_LIFECYCLE=1", "FX_DESKTOP_ACP_LIFECYCLE_DIR="+dir)
+	cmd.Stdin = strings.NewReader(strings.Repeat("x", 128<<10))
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("fixture error = %v, output = %s", err, output)
+	}
+	if !strings.Contains(string(output), "lifecycle fixture stdin:") {
+		t.Fatalf("missing scan error: %s", output)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cleanup")); !os.IsNotExist(err) {
+		t.Fatalf("scan failure was treated as EOF: stat error = %v", err)
+	}
 }
 
 // lifecycleSession builds a chat session backed by that child. stall names the
