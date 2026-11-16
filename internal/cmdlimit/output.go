@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -68,16 +69,19 @@ func (w *limitedWriter) data() []byte {
 // cannot fill the pipe. Extra stdout stops the process and returns
 // ErrTooLarge with no stdout.
 //
-// Stdout and stderr are attached as writers (not pipes we read ourselves) so
-// exec owns the copying goroutines: WaitDelay then bounds a grandchild that
-// keeps a pipe open after the direct child exits. Without that, Wait would
-// close our read end and the copied bytes would be lost as a closed-pipe
-// error instead of exec.ErrWaitDelay.
-//
-// A non-zero exit still returns the captured stdout with its error: doctor's
-// exit-2 reports live in stdout and must remain decodable. WaitDelay is not a
-// partial result and returns no bytes.
+// A complete non-zero exit retains stdout for callers such as doctor. An
+// incomplete stream returns no document, regardless of the exit status.
 func Output(cmd *exec.Cmd, stdoutLimit, stderrLimit int) ([]byte, error) {
+	data, truncated, err := Capture(cmd, stdoutLimit, stderrLimit)
+	if truncated {
+		return nil, ErrTooLarge
+	}
+	return data, err
+}
+
+// Capture also returns the bounded prefix when stdout exceeds its budget.
+// Callers may use that prefix only when they explicitly support truncation.
+func Capture(cmd *exec.Cmd, stdoutLimit, stderrLimit int) ([]byte, bool, error) {
 	if stdoutLimit < 1 {
 		stdoutLimit = 1
 	}
@@ -93,20 +97,41 @@ func Output(cmd *exec.Cmd, stdoutLimit, stderrLimit int) ([]byte, error) {
 			_ = cmd.Process.Kill()
 		}
 	}
-	errWriter := &limitedWriter{limit: stderrLimit}
-	cmd.Stdout = out
-	cmd.Stderr = errWriter
-	runErr := cmd.Run()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, false, err
+	}
+	defer reader.Close()
+	cmd.Stdout = writer
+	cmd.Stderr = &limitedWriter{limit: stderrLimit}
+	if err := cmd.Start(); err != nil {
+		writer.Close()
+		return nil, false, err
+	}
+	writer.Close()
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(out, reader)
+		readDone <- err
+	}()
+	runErr := cmd.Wait()
+	timer := time.NewTimer(cmd.WaitDelay)
+	defer timer.Stop()
+	var readErr error
+	select {
+	case readErr = <-readDone:
+	case <-timer.C:
+		reader.Close()
+		<-readDone
+		readErr = exec.ErrWaitDelay
+	}
 	if out.exceeded() {
-		return nil, ErrTooLarge
+		return out.data()[:stdoutLimit], true, nil
 	}
-	if runErr != nil {
-		if errors.Is(runErr, exec.ErrWaitDelay) {
-			return nil, runErr
-		}
-		return out.data(), runErr
+	if readErr != nil || errors.Is(runErr, exec.ErrWaitDelay) {
+		return nil, false, errors.Join(runErr, readErr)
 	}
-	return out.data(), nil
+	return out.data(), false, runErr
 }
 
 var _ io.Writer = (*limitedWriter)(nil)

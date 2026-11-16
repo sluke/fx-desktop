@@ -28,7 +28,7 @@ const mentionLimit = 8
 func MentionPaths(text string) []string { return workspace.MentionPaths(text) }
 
 // mentionAt reads the @ mention the caret is in: the query typed after the @,
-// and the rune range the mention occupies (start at the @, end at the caret).
+// and the rune range the entire mention occupies.
 // ok is false when the caret is not in one, so the picker appears only where a
 // mention could be written, and replaces only what was written.
 func mentionAt(text string, caret int) (query string, start, end int, ok bool) {
@@ -65,7 +65,7 @@ func rankMentionFiles(files []MentionFile, query string, limit int) []MentionFil
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
-		return files[:min(limit, len(files))]
+		return append([]MentionFile(nil), files[:min(limit, len(files))]...)
 	}
 	letters := []rune(q)
 	var buckets [6][]MentionFile
@@ -134,10 +134,6 @@ type mentionRankKey struct {
 // A repeated query against the same snapshot returns the previous rows and
 // does not walk the file list again.
 func rankedMentions(state *ConversationState, h ConversationHost) []MentionFile {
-	if h.MentionLoading || h.MentionProblem != "" {
-		state.mentionRankOK = false
-		return rankMentionFiles(h.MentionFiles, state.MentionQuery, mentionLimit)
-	}
 	key := mentionRankKey{
 		epoch: h.MentionEpoch,
 		root:  h.MentionRoot,
@@ -168,6 +164,8 @@ func dismissMention(state *ConversationState) {
 	state.MentionOpen = false
 	state.MentionActive = 0
 	state.mentionRankOK = false
+	state.mentionRankRows = nil
+	state.mentionRankKey = mentionRankKey{}
 }
 
 // acceptMention writes the chosen file into the draft where the mention was.

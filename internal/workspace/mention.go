@@ -120,8 +120,8 @@ func MentionPaths(text string) []string {
 }
 
 // MentionAt reads the mention the caret is inside, using rune offsets. The
-// returned end is the caret, so replacing [start, end) rewrites exactly what
-// has been typed. A quoted mention decodes escapes into the query.
+// returned range covers the whole token, while the query ends at the caret.
+// A quoted mention decodes escapes into the query.
 func MentionAt(text string, caret int) (query string, start, end int, ok bool) {
 	runes := []rune(text)
 	if caret < 0 {
@@ -141,7 +141,11 @@ func MentionAt(text string, caret int) (query string, start, end int, ok bool) {
 			if closed {
 				spanEnd = closeAt
 			}
-			if caret > i && caret <= spanEnd {
+			replaceEnd := spanEnd
+			if closed {
+				replaceEnd++
+			}
+			if caret > i && caret <= replaceEnd {
 				contentEnd := caret
 				if contentEnd < i+2 {
 					contentEnd = i + 2
@@ -149,7 +153,7 @@ func MentionAt(text string, caret int) (query string, start, end int, ok bool) {
 				if contentEnd > spanEnd {
 					contentEnd = spanEnd
 				}
-				return unescapeMention(runes[i+2 : contentEnd]), i, caret, true
+				return unescapeMention(runes[i+2 : contentEnd]), i, replaceEnd, true
 			}
 			if closed {
 				i = closeAt + 1
@@ -166,7 +170,7 @@ func MentionAt(text string, caret int) (query string, start, end int, ok bool) {
 		// path is everything before that rune, and the delimiter stays in
 		// the draft. A caret past the delimiter is the next word.
 		if caret > i && caret <= contentEnd {
-			return string(runes[i+1 : caret]), i, caret, true
+			return string(runes[i+1 : caret]), i, contentEnd, true
 		}
 		if contentEnd < len(runes) {
 			i = contentEnd

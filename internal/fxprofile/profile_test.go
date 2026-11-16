@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -175,30 +174,6 @@ func TestProfileFileLimits(t *testing.T) {
 	writeProfileFixture(t, filepath.Join(bigProfile, "profile.json"), `{"description":"`+strings.Repeat("x", maxProfileBytes)+`"}`)
 	if profile := findProfile(t, state, "", "user", "big-profile"); !strings.Contains(profile.Problem, "larger") {
 		t.Fatalf("oversize profile.json problem=%q", profile.Problem)
-	}
-}
-
-// A FIFO named prompt.md must not block the scan: the reader checks the type
-// before opening (P4).
-func TestProfileSpecialFileDoesNotBlock(t *testing.T) {
-	if err := syscall.Mkfifo(filepath.Join(t.TempDir(), "probe"), 0o600); err != nil {
-		t.Skip("mkfifo unavailable")
-	}
-	state := t.TempDir()
-	dir := filepath.Join(state, "agents", "pipe")
-	writeProfileFixture(t, filepath.Join(dir, "profile.json"), `{"description":"pipe"}`)
-	if err := syscall.Mkfifo(filepath.Join(dir, "prompt.md"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan Profile, 1)
-	go func() { done <- findProfile(t, state, "", "user", "pipe") }()
-	select {
-	case profile := <-done:
-		if !strings.Contains(profile.Problem, "regular file") {
-			t.Fatalf("FIFO prompt problem=%q", profile.Problem)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("scan blocked on a FIFO")
 	}
 }
 

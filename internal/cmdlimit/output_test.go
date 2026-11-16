@@ -42,8 +42,7 @@ func TestOutputBudgetBoundary(t *testing.T) {
 }
 
 func TestOutputKeepsStdoutOnNonzeroExit(t *testing.T) {
-	// doctor's exit-2 report lives in stdout; the bytes must survive the
-	// error so the caller can decode the report instead of guessing.
+	// Nonzero exit preserves complete stdout for the caller to interpret.
 	cmd := exec.Command("/bin/sh", "-c", "printf report; exit 2")
 	got, err := Output(cmd, 1024, 1024)
 	var exit *exec.ExitError

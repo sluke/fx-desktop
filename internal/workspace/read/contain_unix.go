@@ -57,7 +57,7 @@ func walkFrom(root, current string, dirfd int, ownFD bool, parts []string, token
 			return nil, false, errNotMention
 		}
 		last := i == len(parts)-1
-		fd, openErr := unix.Openat(dirfd, part, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, openErr := unix.Openat(dirfd, part, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if openErr != nil {
 			if errors.Is(openErr, syscall.ELOOP) || errors.Is(openErr, unix.ELOOP) || errors.Is(openErr, syscall.EMLINK) {
 				return followLink(root, current, dirfd, part, parts[i+1:], token, limit)
@@ -110,7 +110,7 @@ func followLink(root, current string, dirfd int, name string, rest []string, tok
 		return nil, false, &Refusal{fmt.Sprintf("@%s is outside this project", token)}
 	}
 	if len(rest) == 0 {
-		file, err := os.OpenFile(real, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		file, err := os.OpenFile(real, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 		if err != nil {
 			return nil, false, &Refusal{fmt.Sprintf("@%s is outside this project", token)}
 		}

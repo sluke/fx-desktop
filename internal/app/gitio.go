@@ -1,11 +1,11 @@
 package app
 
 import (
-	"bytes"
 	"context"
-	"io"
 	"os/exec"
 	"time"
+
+	"fx-desktop/internal/cmdlimit"
 )
 
 // maxGitDiffBytes bounds raw unified-diff bytes read from git before
@@ -26,72 +26,9 @@ func gitCommandOutput(ctx context.Context, dir string, maxBytes int, args ...str
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = 100 * time.Millisecond
-	// Discard stderr instead of inheriting it, and do not buffer it: a chatty
-	// git must not fill an unread pipe or grow without a bound.
-	cmd.Stderr = io.Discard
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return gitCommandResult{err: err}
-	}
-	if err := cmd.Start(); err != nil {
-		return gitCommandResult{err: err}
-	}
-
-	limit := int64(maxBytes) + 1
-	readDone := make(chan struct {
-		data []byte
-		err  error
-	}, 1)
-	go func() {
-		var buf bytes.Buffer
-		_, err := io.Copy(&buf, io.LimitReader(stdout, limit))
-		readDone <- struct {
-			data []byte
-			err  error
-		}{buf.Bytes(), err}
-	}()
-
-	var raw struct {
-		data []byte
-		err  error
-	}
-	select {
-	case <-ctx.Done():
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		// Closing the read end unblocks the copy. WaitDelay then stops Wait
-		// from sitting on a grandchild that still holds the write end.
-		_ = stdout.Close()
-		<-readDone
-		_ = cmd.Wait()
+	data, truncated, err := cmdlimit.Capture(cmd, maxBytes, 0)
+	if ctx.Err() != nil {
 		return gitCommandResult{err: ctx.Err()}
-	case raw = <-readDone:
 	}
-	if raw.err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return gitCommandResult{err: raw.err}
-	}
-
-	truncated := len(raw.data) > maxBytes
-	data := raw.data
-	if truncated {
-		data = data[:maxBytes]
-		// Stop the child instead of draining the rest of a huge stream.
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	}
-	waitErr := cmd.Wait()
-	if truncated {
-		return gitCommandResult{data: data, truncated: true}
-	}
-	if waitErr != nil {
-		if len(data) == 0 {
-			return gitCommandResult{err: waitErr}
-		}
-		return gitCommandResult{data: data, err: waitErr}
-	}
-	return gitCommandResult{data: data}
+	return gitCommandResult{data: data, truncated: truncated, err: err}
 }
