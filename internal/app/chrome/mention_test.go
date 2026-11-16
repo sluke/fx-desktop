@@ -434,3 +434,54 @@ func TestRankMentionFilesDoesNotAllocatePerFile(t *testing.T) {
 		t.Fatalf("ranking 100k files allocated %d bytes over 5 passes; want at most 1 MiB", used)
 	}
 }
+
+func TestMentionRankCacheReusesRowsUntilTheSnapshotChanges(t *testing.T) {
+	file := func(path string) MentionFile {
+		name := path
+		return MentionFile{Path: path, Name: name, LowerName: name, LowerPath: path}
+	}
+	h := ConversationHost{
+		MentionFiles: []MentionFile{file("a.go"), file("b.go")},
+		MentionEpoch: 1,
+		MentionRoot:  "/proj",
+	}
+	state := &ConversationState{MentionQuery: "a"}
+	first := rankedMentions(state, h)
+	second := rankedMentions(state, h)
+	if len(first) != 1 || len(second) != 1 || &first[0] != &second[0] {
+		t.Fatalf("warm rank = %+v / %+v", first, second)
+	}
+	h.MentionEpoch = 2
+	h.MentionFiles = []MentionFile{file("a.go"), file("c.go")}
+	third := rankedMentions(state, h)
+	if len(third) != 1 || &third[0] == &first[0] {
+		t.Fatalf("a replaced snapshot reused the previous rows: %+v", third)
+	}
+	state.MentionQuery = "c"
+	if got := rankedMentions(state, h); len(got) != 1 || got[0].Path != "c.go" {
+		t.Fatalf("query change = %+v", got)
+	}
+}
+
+func TestMentionRankWarmDoesNotScaleWithProjectSize(t *testing.T) {
+	for _, n := range []int{1_000, 100_000} {
+		files := make([]MentionFile, n)
+		for i := range files {
+			path := fmt.Sprintf("dir/file-%d.go", i)
+			files[i] = MentionFile{Path: path, Name: path, LowerName: path, LowerPath: path}
+		}
+		h := ConversationHost{MentionFiles: files, MentionEpoch: 1, MentionRoot: "/proj"}
+		state := &ConversationState{MentionQuery: "file-1"}
+		_ = rankedMentions(state, h)
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := 0; i < 30; i++ {
+			_ = rankedMentions(state, h)
+		}
+		runtime.ReadMemStats(&after)
+		if used := after.TotalAlloc - before.TotalAlloc; used > 4096 {
+			t.Fatalf("%d files: warm ranking allocated %d bytes", n, used)
+		}
+	}
+}

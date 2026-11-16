@@ -32,29 +32,13 @@ func MentionPaths(text string) []string { return workspace.MentionPaths(text) }
 // ok is false when the caret is not in one, so the picker appears only where a
 // mention could be written, and replaces only what was written.
 func mentionAt(text string, caret int) (query string, start, end int, ok bool) {
-	runes := []rune(text)
-	caret = min(max(caret, 0), len(runes))
-	start = caret
-	for start > 0 && !workspace.MentionBreak(runes[start-1]) {
-		start--
-	}
-	// The caret must be past the @ — sitting on it is not yet a mention — and
-	// the path must run to the caret: punctuation after a name ends the
-	// mention rather than becoming part of what is being typed.
-	if start >= caret || runes[start] != '@' {
-		return "", 0, 0, false
-	}
-	for _, r := range runes[start+1 : caret] {
-		if workspace.MentionEnd(r) {
-			return "", 0, 0, false
-		}
-	}
-	return string(runes[start+1 : caret]), start, caret, true
+	return workspace.MentionAt(text, caret)
 }
 
-// mentionText is what a mention writes: the path, marked with @ and followed
-// by a space, so the word ends and the message can go on.
-func mentionText(path string) string { return "@" + path + " " }
+// mentionText is what a mention writes. FormatMention is the same spelling
+// MentionPaths reads back, including a quoted form for names that a space or
+// punctuation would otherwise cut short.
+func mentionText(path string) string { return workspace.FormatMention(path) }
 
 // mentionInsertion replaces the mention at [start, end) with path, leaving the
 // rest of the draft alone.
@@ -139,8 +123,39 @@ func scattered(text string, letters []rune) bool {
 }
 
 // activeMention is the file the picker would take now.
-func activeMention(state *ConversationState, h ConversationHost) (MentionFile, bool) {
+type mentionRankKey struct {
+	epoch uint64
+	root  string
+	query string
+	limit int
+}
+
+// rankedMentions is the shared ranking for the keyboard path and the picker.
+// A repeated query against the same snapshot returns the previous rows and
+// does not walk the file list again.
+func rankedMentions(state *ConversationState, h ConversationHost) []MentionFile {
+	if h.MentionLoading || h.MentionProblem != "" {
+		state.mentionRankOK = false
+		return rankMentionFiles(h.MentionFiles, state.MentionQuery, mentionLimit)
+	}
+	key := mentionRankKey{
+		epoch: h.MentionEpoch,
+		root:  h.MentionRoot,
+		query: strings.ToLower(strings.TrimSpace(state.MentionQuery)),
+		limit: mentionLimit,
+	}
+	if state.mentionRankOK && state.mentionRankKey == key {
+		return state.mentionRankRows
+	}
 	rows := rankMentionFiles(h.MentionFiles, state.MentionQuery, mentionLimit)
+	state.mentionRankKey = key
+	state.mentionRankRows = rows
+	state.mentionRankOK = true
+	return rows
+}
+
+func activeMention(state *ConversationState, h ConversationHost) (MentionFile, bool) {
+	rows := rankedMentions(state, h)
 	if len(rows) == 0 {
 		return MentionFile{}, false
 	}
@@ -152,6 +167,7 @@ func activeMention(state *ConversationState, h ConversationHost) (MentionFile, b
 func dismissMention(state *ConversationState) {
 	state.MentionOpen = false
 	state.MentionActive = 0
+	state.mentionRankOK = false
 }
 
 // acceptMention writes the chosen file into the draft where the mention was.
@@ -257,7 +273,7 @@ func mentionPicker(c *ui.Context, state *ConversationState, h ConversationHost, 
 	if !state.MentionOpen {
 		return
 	}
-	rows := rankMentionFiles(h.MentionFiles, state.MentionQuery, mentionLimit)
+	rows := rankedMentions(state, h)
 	active := 0
 	if len(rows) > 0 {
 		active = min(max(state.MentionActive, 0), len(rows)-1)

@@ -166,7 +166,7 @@ func (s *ProjectWindow) view(ctx *ui.Context) {
 		Main: func(c *ui.Context) {
 			if s.chat != nil {
 				snapshot := s.chat.snapshotForView()
-				mentionFiles, mentionLoading, mentionProblem := s.coord.sessionMentionFiles(s)
+				mentionFiles, mentionLoading, mentionProblem, mentionEpoch := s.coord.sessionMentionFiles(s)
 				c.Key(s.conversationKey)
 				chrome.Conversation(c, &s.chatUI, chrome.ConversationHost{
 					Project: filepath.Base(s.project), Model: snapshot.Model, Problem: snapshot.Problem, Messages: snapshot.Messages, Notices: snapshot.Notices,
@@ -187,6 +187,7 @@ func (s *ProjectWindow) view(ctx *ui.Context) {
 					// The @ picker reads the project's own files, so the app
 					// holds them; the picker asks for them when it opens.
 					MentionFiles: mentionFiles, MentionLoading: mentionLoading, MentionProblem: mentionProblem,
+					MentionEpoch: mentionEpoch, MentionRoot: s.project,
 					CanMention:   snapshot.Files,
 					OpenMentions: func() { s.coord.openMentions(s) },
 					// Submitting never does file I/O on this thread: the draft

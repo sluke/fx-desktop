@@ -113,6 +113,20 @@ func TestDoctorBrokenJSONStaysAnError(t *testing.T) {
 	}
 }
 
+func TestRunRefusesAnOversizedStream(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fx")
+	script := "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=3 2>/dev/null\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out Status
+	err := Run(context.Background(), path, dir, &out, "status")
+	if err == nil || out.Model != "" {
+		t.Fatalf("oversized status err=%v model=%q", err, out.Model)
+	}
+}
+
 func TestRunRejectsMalformedJSON(t *testing.T) {
 	path, _ := stubFx(t, `not json`)
 	var out Status

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -416,7 +417,15 @@ func runGitCommand(ctx context.Context, dir string, args ...string) ([]byte, err
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	return cmd.CombinedOutput()
+	cmd.WaitDelay = 100 * time.Millisecond
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil, err
+	}
+	return out, err
 }
 
 // stageAll stages the working tree without committing.

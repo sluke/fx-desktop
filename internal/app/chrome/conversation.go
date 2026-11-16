@@ -81,6 +81,12 @@ type ConversationState struct {
 	// picker is recomputed from the field every pass, so a dismissal has to
 	// outlive the pass that made it. Leaving the mention forgets it.
 	MentionClosed string
+	// mentionRank caches the last picker ranking. The picker and the keyboard
+	// path share it, so a frame does not walk the project twice. A new query,
+	// snapshot, project or limit misses. Closing the picker drops it.
+	mentionRankOK   bool
+	mentionRankKey  mentionRankKey
+	mentionRankRows []MentionFile
 	// MentionCaretAt is where taking a mention leaves the caret, which the
 	// next pass to build the field puts there: a caret can only be moved
 	// while that pass runs, and the accept happens outside it.
@@ -141,8 +147,13 @@ type ConversationHost struct {
 	MentionFiles   []MentionFile
 	MentionLoading bool
 	MentionProblem string
-	CanMention     bool
-	OpenMentions   func()
+	// MentionEpoch changes whenever the file snapshot is replaced, including
+	// a replacement of the same length. MentionRoot is the project the list
+	// belongs to. Together they are the picker's cache key.
+	MentionEpoch uint64
+	MentionRoot  string
+	CanMention   bool
+	OpenMentions func()
 	// SetConfig changes one option by its fx config id. Everything routes
 	// through here, mode included.
 	SetConfig func(configID, value string)

@@ -59,28 +59,170 @@ func MentionEnd(r rune) bool {
 // it keeps them.
 func TrimMention(path string) string { return strings.TrimRight(path, ".,;:!?") }
 
+// FormatMention writes a path the way MentionPaths reads it back. A name made
+// of ordinary path characters stays `@main.go`. A name that contains a space,
+// punctuation, a quote or a backslash is quoted, with `\\` and `\"` as the
+// only escapes. The trailing space ends the mention so the sentence can go on.
+// This is the GUI's own contract for round-tripping a path through a draft; it
+// does not claim the fx TUI accepts the same spelling.
+func FormatMention(path string) string {
+	if path != "" && !mentionNeedsQuotes(path) {
+		return "@" + path + " "
+	}
+	var b strings.Builder
+	b.WriteString(`@"`)
+	for _, r := range path {
+		if r == '\\' || r == '"' {
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteString(`" `)
+	return b.String()
+}
+
+func mentionNeedsQuotes(path string) bool {
+	if TrimMention(path) != path {
+		return true
+	}
+	for _, r := range path {
+		if r == '"' || r == '\\' || r == '@' || MentionEnd(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // MentionPaths lists the paths a message names with @path, in the order they
 // appear and without repeats. The picker and the sender must read a message the
-// same way, so the rule lives here, once.
+// same way, so the rule lives here, once. A simple mention ends at whitespace
+// or punctuation. A quoted mention is `@"..."`, and only a closed quote is a
+// path: an unclosed quote is still being typed and must not fall back to the
+// file named by its prefix. The same path named twice is read once.
 func MentionPaths(text string) []string {
-	var paths []string
-	seen := make(map[string]bool)
 	runes := []rune(text)
-	for i := 0; i < len(runes); i++ {
-		if runes[i] != '@' || (i > 0 && !MentionBreak(runes[i-1])) {
+	var paths []string
+	seen := map[string]bool{}
+	for i := 0; i < len(runes); {
+		path, next, ok := mentionSpan(runes, i)
+		if next <= i {
+			i++
 			continue
 		}
-		end := i + 1
-		for end < len(runes) && !MentionEnd(runes[end]) {
-			end++
+		i = next
+		if !ok || path == "" || seen[path] {
+			continue
 		}
-		if path := TrimMention(string(runes[i+1 : end])); path != "" && !seen[path] {
-			seen[path] = true
-			paths = append(paths, path)
-		}
-		i = end - 1
+		seen[path] = true
+		paths = append(paths, path)
 	}
 	return paths
+}
+
+// MentionAt reads the mention the caret is inside, using rune offsets. The
+// returned end is the caret, so replacing [start, end) rewrites exactly what
+// has been typed. A quoted mention decodes escapes into the query.
+func MentionAt(text string, caret int) (query string, start, end int, ok bool) {
+	runes := []rune(text)
+	if caret < 0 {
+		caret = 0
+	}
+	if caret > len(runes) {
+		caret = len(runes)
+	}
+	for i := 0; i < len(runes); {
+		if runes[i] != '@' || (i > 0 && !MentionBreak(runes[i-1])) {
+			i++
+			continue
+		}
+		if i+1 < len(runes) && runes[i+1] == '"' {
+			closeAt, closed := quotedEnd(runes, i+2)
+			spanEnd := len(runes)
+			if closed {
+				spanEnd = closeAt
+			}
+			if caret > i && caret <= spanEnd {
+				contentEnd := caret
+				if contentEnd < i+2 {
+					contentEnd = i + 2
+				}
+				if contentEnd > spanEnd {
+					contentEnd = spanEnd
+				}
+				return unescapeMention(runes[i+2 : contentEnd]), i, caret, true
+			}
+			if closed {
+				i = closeAt + 1
+			} else {
+				i = len(runes)
+			}
+			continue
+		}
+		contentEnd := i + 1
+		for contentEnd < len(runes) && !MentionEnd(runes[contentEnd]) {
+			contentEnd++
+		}
+		// A caret sitting on the delimiter still belongs to the mention: the
+		// path is everything before that rune, and the delimiter stays in
+		// the draft. A caret past the delimiter is the next word.
+		if caret > i && caret <= contentEnd {
+			return string(runes[i+1 : caret]), i, caret, true
+		}
+		if contentEnd < len(runes) {
+			i = contentEnd
+		} else {
+			i = len(runes)
+		}
+	}
+	return "", 0, 0, false
+}
+
+// mentionSpan parses the mention that starts at i, when one does. next is the
+// rune index to resume from. ok is false for an unclosed quote.
+func mentionSpan(runes []rune, i int) (path string, next int, ok bool) {
+	if i >= len(runes) || runes[i] != '@' || (i > 0 && !MentionBreak(runes[i-1])) {
+		return "", i + 1, false
+	}
+	if i+1 < len(runes) && runes[i+1] == '"' {
+		closeAt, closed := quotedEnd(runes, i+2)
+		if !closed {
+			return "", len(runes), false
+		}
+		return unescapeMention(runes[i+2 : closeAt]), closeAt + 1, true
+	}
+	end := i + 1
+	for end < len(runes) && !MentionEnd(runes[end]) {
+		end++
+	}
+	return TrimMention(string(runes[i+1 : end])), end, true
+}
+
+// quotedEnd scans the body of a quoted mention starting at the first content
+// rune. closeAt is the index of the closing quote when closed is true.
+func quotedEnd(runes []rune, start int) (closeAt int, closed bool) {
+	for j := start; j < len(runes); j++ {
+		if runes[j] == '\\' && j+1 < len(runes) {
+			j++
+			continue
+		}
+		if runes[j] == '"' {
+			return j, true
+		}
+	}
+	return len(runes), false
+}
+
+func unescapeMention(runes []rune) string {
+	var b strings.Builder
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '\\' && i+1 < len(runes) {
+			i++
+			b.WriteRune(runes[i])
+			continue
+		}
+		b.WriteRune(runes[i])
+	}
+	return b.String()
 }
 
 // ResolvePath resolves a mention to a file in the project. An absolute path,

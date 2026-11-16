@@ -85,6 +85,7 @@ func (c *Coordinator) openMentions(s *ProjectWindow) {
 			s.workspace.mentionLoading, s.workspace.mentionErr = false, err
 			if err == nil {
 				s.workspace.mentionFiles = files
+				s.workspace.mentionEpoch++
 			}
 			s.workspace.mu.Unlock()
 			s.invalidate()
@@ -94,14 +95,14 @@ func (c *Coordinator) openMentions(s *ProjectWindow) {
 
 // sessionMentionFiles projects the file list into the picker. It reads only:
 // the render pass must not start a git call of its own.
-func (c *Coordinator) sessionMentionFiles(s *ProjectWindow) ([]chrome.MentionFile, bool, string) {
+func (c *Coordinator) sessionMentionFiles(s *ProjectWindow) ([]chrome.MentionFile, bool, string, uint64) {
 	s.workspace.mu.Lock()
 	defer s.workspace.mu.Unlock()
 	problem := ""
 	if s.workspace.mentionErr != nil {
 		problem = "This project's files could not be listed"
 	}
-	return s.workspace.mentionFiles, s.workspace.mentionLoading, problem
+	return s.workspace.mentionFiles, s.workspace.mentionLoading, problem, s.workspace.mentionEpoch
 }
 
 // mentionTimeout bounds one submit's file preparation so a hung filesystem

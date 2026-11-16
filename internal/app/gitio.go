@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"time"
 )
 
 // maxGitDiffBytes bounds raw unified-diff bytes read from git before
@@ -24,6 +25,7 @@ func gitCommandOutput(ctx context.Context, dir string, maxBytes int, args ...str
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	cmd.WaitDelay = 100 * time.Millisecond
 	// Discard stderr instead of inheriting it, and do not buffer it: a chatty
 	// git must not fill an unread pipe or grow without a bound.
 	cmd.Stderr = io.Discard
@@ -55,7 +57,12 @@ func gitCommandOutput(ctx context.Context, dir string, maxBytes int, args ...str
 	}
 	select {
 	case <-ctx.Done():
-		_ = cmd.Process.Kill()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		// Closing the read end unblocks the copy. WaitDelay then stops Wait
+		// from sitting on a grandchild that still holds the write end.
+		_ = stdout.Close()
 		<-readDone
 		_ = cmd.Wait()
 		return gitCommandResult{err: ctx.Err()}

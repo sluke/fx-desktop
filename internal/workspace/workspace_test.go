@@ -19,6 +19,9 @@ func TestMentionPathsReadsWhatAMessageNames(t *testing.T) {
 		{"(@internal/app/console.go)", []string{"internal/app/console.go"}},
 		{"@main.go, then @main.go again", []string{"main.go"}},
 		{"@main.go. @main.go!", []string{"main.go"}},
+		{`see @"my file.go"`, []string{"my file.go"}},
+		{`@"my file.go`, nil},
+		{`@"say \"hi\".go"`, []string{`say "hi".go`}},
 	}
 	for _, test := range tests {
 		got := MentionPaths(test.text)
@@ -81,6 +84,31 @@ func TestCompareTexts(t *testing.T) {
 	if len(lines) != 3 || lines[1].Kind != DiffDel || lines[2].Kind != DiffAdd {
 		t.Fatalf("lines = %+v", lines)
 	}
+	// What the picker writes is what the sender reads, including names a space
+	// or a quote would otherwise cut in half. An unclosed quote is not a path.
+	for _, path := range []string{
+		"main.go",
+		"my file.go",
+		"目录/说明.go",
+		"name(1).go",
+		"a,b.go",
+		`say "hi".go`,
+		`dir\file.go`,
+		"trail.go.",
+	} {
+		got := MentionPaths(FormatMention(path))
+		if len(got) != 1 || got[0] != path {
+			t.Fatalf("FormatMention(%q) round trip = %v", path, got)
+		}
+	}
+	if got := MentionPaths(`@"my file.go`); got != nil {
+		t.Fatalf("unclosed quote = %v", got)
+	}
+	query, start, _, ok := MentionAt(`see @"my file`, len([]rune(`see @"my file`)))
+	if !ok || query != "my file" || start != 4 {
+		t.Fatalf("MentionAt = %q at %d ok=%v", query, start, ok)
+	}
+
 	huge := strings.Repeat("x\n", MaxDiffLines+1)
 	if lines := CompareTexts("", huge).Lines; len(lines) != MaxDiffLines || lines[0].Kind != DiffAdd {
 		t.Fatalf("degradation = %d lines", len(lines))

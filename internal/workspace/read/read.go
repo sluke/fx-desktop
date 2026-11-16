@@ -6,6 +6,7 @@ package read
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,23 +52,17 @@ func Resolve(ctx context.Context, project, text string) ([]workspace.Mention, er
 		if !ok {
 			continue
 		}
-		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		if info.Size() > workspace.MaxMentionBytes {
-			return nil, &Refusal{fmt.Sprintf("@%s is larger than the %s fx reads from one file",
-				token, workspace.HumanSize(workspace.MaxMentionBytes))}
-		}
-		data, tooBig, err := readBounded(path, workspace.MaxMentionBytes)
-		if err != nil {
-			continue
-		}
+		data, tooBig, err := openContained(project, token, workspace.MaxMentionBytes)
 		if tooBig {
-			// The file grew after the check above: refuse it rather than send
-			// a silent truncation.
 			return nil, &Refusal{fmt.Sprintf("@%s is larger than the %s fx reads from one file",
 				token, workspace.HumanSize(workspace.MaxMentionBytes))}
+		}
+		if err != nil {
+			var refused *Refusal
+			if errors.As(err, &refused) {
+				return nil, err
+			}
+			continue
 		}
 		if !utf8.Valid(data) {
 			return nil, &Refusal{fmt.Sprintf("@%s is not a text file, so it cannot go in a message", token)}
@@ -115,7 +110,18 @@ func ListFiles(ctx context.Context, dir string) ([]workspace.File, error) {
 	defer cancel()
 	list := exec.CommandContext(ctx, "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard")
 	list.Dir = dir
+	// A child that exits while a grandchild still holds stdout used to make
+	// Wait return success after the helper was killed, and the partial listing
+	// was published. WaitDelay bounds that inherited pipe. A cancelled context
+	// is never a successful file list, even when some bytes were already read.
+	list.WaitDelay = 100 * time.Millisecond
 	out, err := list.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, err
 	}

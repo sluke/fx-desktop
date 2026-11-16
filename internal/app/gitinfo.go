@@ -61,7 +61,7 @@ var errNoRepo = errors.New("not a git repository")
 func gitRepoRoot(ctx context.Context, dir string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
 	cmd.Dir = dir
-	out, err := cmd.Output()
+	out, err := finishGit(ctx, cmd)
 	if err != nil {
 		return "", err
 	}
@@ -69,6 +69,22 @@ func gitRepoRoot(ctx context.Context, dir string) (string, error) {
 	line = strings.TrimSuffix(line, "\n")
 	line = strings.TrimSuffix(line, "\r")
 	return filepath.Clean(line), nil
+}
+
+// finishGit bounds an inherited stdout pipe. Cancelling the context kills the
+// git process, but a grandchild can keep the pipe open; WaitDelay stops that
+// from turning into a successful result. A cancelled context is returned as
+// ctx.Err() and the bytes are not a result.
+func finishGit(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	cmd.WaitDelay = 100 * time.Millisecond
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return nil, err
+	}
+	return out, err
 }
 
 // gitLiteralPathspec tells git to match one pathname literally, not as a glob.
@@ -97,11 +113,8 @@ func gitDiffBase(ctx context.Context, root string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", "hash-object", "-t", "tree", "--stdin")
 	cmd.Dir = root
 	cmd.Stdin = strings.NewReader("")
-	out, err := cmd.Output()
+	out, err := finishGit(ctx, cmd)
 	if err != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
 		return "", err
 	}
 	line := strings.TrimSuffix(strings.TrimSuffix(string(out), "\n"), "\r")

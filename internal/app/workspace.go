@@ -67,6 +67,7 @@ type workspaceController struct {
 	// mentionFiles are the project's files the @ picker offers, mentionErr
 	// is why they could not be listed.
 	mentionFiles   []chrome.MentionFile
+	mentionEpoch   uint64
 	mentionLoading bool
 	mentionErr     error
 	// gen retires an older listing: the picker may be opened twice, and the

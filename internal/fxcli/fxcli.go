@@ -11,7 +11,26 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"fx-desktop/internal/cmdlimit"
 )
+
+// Capture budgets. A version string is small. A session document can be a
+// transcript, so it gets a larger cap than a status or model list. Neither
+// cap is a product promise about how large fx's documents may be; both exist
+// so a runaway stream cannot be decoded as a partial JSON value.
+const (
+	maxQueryBytes   = 2 << 20
+	maxSessionBytes = 8 << 20
+	maxStderrBytes  = 32 << 10
+)
+
+func queryBudget(args []string) int {
+	if len(args) > 0 && args[0] == "session" {
+		return maxSessionBytes
+	}
+	return maxQueryBytes
+}
 
 // Timeout bounds every read-only fx query the app makes. Interactive sessions
 // are unaffected: these are the short --json inspections.
@@ -231,9 +250,17 @@ func Run(ctx context.Context, fxPath, dir string, dst any, args ...string) error
 	cmd := exec.CommandContext(ctx, fxPath, append(args, "--json")...)
 	cmd.Dir = dir
 	// Bound inherited output pipes on shutdown: a cancelled query must not
-	// wait for a grandchild that still holds stdout.
+	// wait for a grandchild that still holds stdout. The byte budget is
+	// applied before decode, so an oversized stream is not a truncated JSON
+	// document and is not an empty model or session list.
 	cmd.WaitDelay = 100 * time.Millisecond
-	out, err := cmd.Output()
+	out, err := cmdlimit.Output(cmd, queryBudget(args), maxStderrBytes)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, cmdlimit.ErrTooLarge) || errors.Is(err, exec.ErrWaitDelay) {
+		return err
+	}
 	if isDoctor(args) {
 		// A doctor exit code alone is not proof of a report: exit 2 is a
 		// usage error whose stdout is an error object, and decoding that

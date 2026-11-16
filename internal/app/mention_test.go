@@ -173,7 +173,7 @@ func awaitMentionFiles(t *testing.T, c *Coordinator, s *ProjectWindow) ([]chrome
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		files, loading, problem := c.sessionMentionFiles(s)
+		files, loading, problem, _ := c.sessionMentionFiles(s)
 		if !loading {
 			return files, problem
 		}
@@ -205,7 +205,7 @@ func TestOpenMentionsReadsTheProjectForThePicker(t *testing.T) {
 	}
 	// A session with no project at all is not asked for anything.
 	coord.openMentions(&ProjectWindow{coord: coord})
-	if _, loading, _ := coord.sessionMentionFiles(&ProjectWindow{coord: coord}); loading {
+	if _, loading, _, _ := coord.sessionMentionFiles(&ProjectWindow{coord: coord}); loading {
 		t.Fatal("a session with no project was left reading")
 	}
 }

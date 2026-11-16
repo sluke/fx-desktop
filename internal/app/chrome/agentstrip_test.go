@@ -112,7 +112,7 @@ func TestAgentStripShortensTheModelBeforeDroppingIt(t *testing.T) {
 
 	// The room the strip got, and the widths of the blocks the rule weighs,
 	// all measured in the frame the strip itself drew.
-	var room, base, fullWidth, tailWidth float32
+	var room, base, fullWidth, tailWidth, valueWidth float32
 	agentStripRoom = func(r float32) { room = r }
 	t.Cleanup(func() { agentStripRoom = nil })
 	first := true
@@ -122,6 +122,9 @@ func TestAgentStripShortensTheModelBeforeDroppingIt(t *testing.T) {
 			base = statWidth(c, "", a.Status) + statWidth(c, "Elapsed", a.Elapsed)
 			fullWidth = statWidth(c, "Model", a.Model)
 			tailWidth = statWidth(c, "Model", tail)
+			// The node Find returns is the value text, not the label+gap+padding
+			// block statWidth measures. Compare the text to the same text.
+			valueWidth, _ = c.MeasureText(0, ui.Span{Text: a.Model, Size: statValueSize})
 			first = false
 		}
 		Frame(c, h)
@@ -142,8 +145,8 @@ func TestAgentStripShortensTheModelBeforeDroppingIt(t *testing.T) {
 		// fixed-width assertion asserted the opposite of.
 		mustHave(t, ts, "Model", a.Model, "Elapsed")
 		if shown, ok := ts.Find(a.Model); ok {
-			if shown.W+0.01 < fullWidth {
-				t.Fatalf("%s: the full name was drawn squeezed (%v < %v)", measurement, shown.W, fullWidth)
+			if shown.W+0.01 < valueWidth {
+				t.Fatalf("%s: the full name was drawn squeezed (%v < %v)", measurement, shown.W, valueWidth)
 			}
 		}
 	case room >= base+tailWidth:

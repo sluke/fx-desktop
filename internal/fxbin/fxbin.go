@@ -17,7 +17,14 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"fx-desktop/internal/cmdlimit"
 )
+
+// maxVersionBytes is the capture budget for `fx --version` and the help
+// fallback. It is intentionally small: a version line that does not fit is
+// an error, not a prompt to read the rest of the stream.
+const maxVersionBytes = 8 << 10
 
 const (
 	githubLatestAPI = "https://api.github.com/repos/vercel-labs/fx/releases/latest"
@@ -69,7 +76,10 @@ func VersionContext(parent context.Context, fxPath string) (string, error) {
 	query := func(arg string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, fxPath, arg)
 		cmd.WaitDelay = 100 * time.Millisecond
-		out, err := cmd.Output()
+		// A version line is short. Overflow is not a reason to fall through
+		// to an unbounded help dump, and it does not mean the binary is
+		// permanently unusable.
+		out, err := cmdlimit.Output(cmd, maxVersionBytes, 32<<10)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -77,7 +87,7 @@ func VersionContext(parent context.Context, fxPath string) (string, error) {
 	}
 	out, err := query("--version")
 	if err != nil {
-		if ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) {
+		if ctx.Err() != nil || errors.Is(err, exec.ErrWaitDelay) || errors.Is(err, cmdlimit.ErrTooLarge) {
 			return "", err
 		}
 		// Some builds only expose version via help.
@@ -115,6 +125,10 @@ func Unrunnable(err error) bool {
 	// WaitDelay fires when a killed process left a child holding the
 	// output pipe. The binary's own state is still unknown.
 	if errors.Is(err, exec.ErrWaitDelay) {
+		return false
+	}
+	// An oversized version stream says nothing about whether the binary runs.
+	if errors.Is(err, cmdlimit.ErrTooLarge) {
 		return false
 	}
 	return true
