@@ -104,9 +104,3 @@ func stateSurface(e ui.Element, p Palette, active, hovered bool) ui.Element {
 	}
 	return e
 }
-
-// typeSize applies a named type step. New views should pass a Type* constant
-// rather than a literal; the audit ratchet rejects new literal font sizes.
-func typeSize(e ui.Element, step float32) ui.Element {
-	return e.FontSize(step)
-}

@@ -8,8 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -81,25 +79,6 @@ func Resolve(ctx context.Context, project, text string) ([]workspace.Mention, er
 		return nil, err
 	}
 	return mentions, nil
-}
-
-// readBounded reads at most limit bytes and reports whether the file had more.
-// The bounded read is what keeps a file that grows between Stat and Read from
-// arriving truncated without anyone noticing.
-func readBounded(path string, limit int) ([]byte, bool, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, false, err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, int64(limit)+1))
-	if err != nil {
-		return nil, false, err
-	}
-	if len(data) > limit {
-		return nil, true, nil
-	}
-	return data, false, nil
 }
 
 // ListFiles lists the files the @ picker offers: what git tracks, plus what it

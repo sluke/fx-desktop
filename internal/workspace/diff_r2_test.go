@@ -15,8 +15,7 @@ func BenchmarkCompareTextsMillionShortLines(b *testing.B) {
 	}
 	in := text.String()
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		out := CompareTexts("", in)
 		if len(out.Lines) > MaxDiffLines {
 			b.Fatalf("len=%d", len(out.Lines))
@@ -55,7 +54,8 @@ func TestReviewR2CompareUTF8(t *testing.T) {
 	unit := "中"
 	var b strings.Builder
 	for i := 0; i < maxCompareTextBytes/2/len(unit)+10; i++ {
-		b.WriteString(unit + "\n")
+		b.WriteString(unit)
+		b.WriteByte('\n')
 	}
 	out := CompareTexts("", b.String()).Lines
 	for _, line := range out {

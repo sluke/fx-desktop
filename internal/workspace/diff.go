@@ -97,10 +97,7 @@ func scanLinesBudget(s string, maxBytes, maxLines int) ([]string, bool) {
 	if maxBytes <= 0 || maxLines <= 0 {
 		return nil, true
 	}
-	body := s
-	if strings.HasSuffix(body, "\n") {
-		body = body[:len(body)-1]
-	}
+	body := strings.TrimSuffix(s, "\n")
 	var lines []string
 	used := 0
 	i := 0

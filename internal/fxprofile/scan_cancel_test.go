@@ -197,8 +197,7 @@ func BenchmarkProfileScanEntries(b *testing.B) {
 		makeAgentDirs(b, state, n) // fixture outside the timer
 		b.Run(fmt.Sprintf("%d-entries", n), func(b *testing.B) {
 			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				_ = ScanContext(context.Background(), state, "")
 			}
 		})
@@ -213,8 +212,7 @@ func BenchmarkProfileScanPreCanceled(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = ScanContext(ctx, state, "")
 	}
 }
@@ -234,8 +232,7 @@ func BenchmarkProfilePromptPreview(b *testing.B) {
 		}
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
 			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				_ = ScanContext(context.Background(), state, "")
 			}
 		})
