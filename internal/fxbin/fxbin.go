@@ -61,6 +61,52 @@ func ResolvePath() (string, error) {
 	return "", errors.New("fx not found; install it from https://fx.sh or use Install")
 }
 
+// Overridden reports whether FX_DESKTOP_FX_PATH names the executable. An
+// explicit override is the user's choice of binary and is never replaced by
+// another candidate.
+func Overridden() bool { return strings.TrimSpace(os.Getenv("FX_DESKTOP_FX_PATH")) != "" }
+
+// ManagedPath is the fx that Install writes, when one is on disk. It does
+// not create the directory.
+func ManagedPath() (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false
+	}
+	path := filepath.Join(home, installDirName, "fx")
+	if st, err := os.Stat(path); err == nil && !st.IsDir() {
+		return path, true
+	}
+	return "", false
+}
+
+// ResolvePathAvoiding is ResolvePath for a caller that already found some
+// candidates unrunnable. ResolvePath prefers PATH to the managed install, so
+// a damaged fx on PATH was resolved again after a successful Install: the
+// repair wrote a working binary the app never used. When the resolved path
+// is one to avoid and the managed binary is a different file that is not
+// itself to be avoided, that one is returned. With no such alternative the
+// resolved path is returned unchanged, and an explicit override always is.
+func ResolvePathAvoiding(unrunnable ...string) (string, error) {
+	path, err := ResolvePath()
+	if err != nil || Overridden() || !contains(unrunnable, path) {
+		return path, err
+	}
+	if managed, ok := ManagedPath(); ok && managed != path && !contains(unrunnable, managed) {
+		return managed, nil
+	}
+	return path, nil
+}
+
+func contains(list []string, value string) bool {
+	for _, item := range list {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
 // Version runs a bounded, read-only version query. It must still be called
 // off the UI thread: even a healthy CLI can take time to start.
 func Version(fxPath string) (string, error) {
@@ -295,9 +341,16 @@ func verifyChecksum(ctx context.Context, downloadURL, assetName, archivePath str
 		return fmt.Errorf("checksum: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusGone:
 		// No published digest: nothing to compare against.
 		return nil
+	default:
+		// A digest that could not be fetched is not a release without one.
+		// A transport error already stops the install; a refused or failed
+		// request must not be the one case that installs unverified.
+		return fmt.Errorf("checksum: %s", resp.Status)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/app/presenter"
+	"fx-desktop/internal/cmdlimit"
 	"fx-desktop/internal/fxcli"
 	"fx-desktop/internal/fxhome"
 	"fx-desktop/internal/fxlive"
@@ -43,13 +44,20 @@ func globalArgsFromForm(contextLimits, addDirs, project string) ([]string, error
 }
 
 func (c *Coordinator) openManagement(s *ProjectWindow) {
-	if s.shell.Tools.Busy {
-		s.shell.Tools.Output = ""
-	}
 	s.shell.Tools.Open = true
-	s.shell.Tools.Busy = false
-	s.shell.Tools.Generation++
 	s.shell.Tools.Project = s.project
+	// A mutation that is still running keeps the sheet busy across a close
+	// and reopen. Clearing Busy here let a second job start, and starting it
+	// cancelled the first one's scope: a running `fx upgrade` was killed
+	// part-way. A read is different: closing the sheet cancels it, so its
+	// stale Busy and progress text are dropped.
+	if !s.toolsJob {
+		if s.shell.Tools.Busy {
+			s.shell.Tools.Output = ""
+		}
+		s.shell.Tools.Busy = false
+		s.shell.Tools.Generation++
+	}
 	if s.shell.Tools.Page == "" {
 		s.shell.Tools.Page = "Account"
 	}
@@ -387,6 +395,7 @@ func (c *Coordinator) runManagementJob(s *ProjectWindow, action string, args []s
 	state.Generation++
 	generation := state.Generation
 	state.Busy = true
+	s.toolsJob = true
 	state.Output = "Running fx " + strings.Join(args, " ") + "…"
 	s.invalidate()
 	executable, dir := c.fxPathSnapshot(), s.project
@@ -399,9 +408,13 @@ func (c *Coordinator) runManagementJob(s *ProjectWindow, action string, args []s
 		text, runErr := managementRead(ctx, executable, dir, args...)
 		s.dispatch(func() {
 			state := &s.shell.Tools
-			if state.Generation != generation || !state.Open {
+			s.toolsJob = false
+			if state.Generation != generation {
 				return
 			}
+			// The result is kept even when the sheet was closed meanwhile:
+			// a mutation that failed out of sight must be there to read when
+			// the user comes back, not dropped as if nothing had happened.
 			state.Busy = false
 			state.Output = managementJobSummary(action, text, runErr)
 			s.invalidate()
@@ -757,6 +770,44 @@ func managementRead(ctx context.Context, executable, dir string, args ...string)
 	return managementReadLimit(ctx, executable, dir, 64*1024, args...)
 }
 
+// managementJSONBytes is the capture budget for a --json document a native
+// page decodes. It matches fxcli's query budget. The 64 KiB text budget is
+// sized for output shown as text; applied to documents it refused an
+// ordinary `mcp show` of a server with many tools and a 100-session history
+// page. The cap is not a promise about how large fx's documents may be.
+const managementJSONBytes = 2 << 20
+
+// errOutputTooLarge marks a capture that hit its budget.
+var errOutputTooLarge = errors.New("output exceeded")
+
+// managementReadJSON reads one --json document. A document that did not fit
+// is not returned at all: its prefix is neither an answer nor a message, and
+// the pages used to print that raw prefix as the problem.
+func managementReadJSON(ctx context.Context, executable, dir string, args ...string) (string, error) {
+	text, err := managementReadLimit(ctx, executable, dir, managementJSONBytes, args...)
+	if errors.Is(err, errOutputTooLarge) || errors.Is(err, exec.ErrWaitDelay) {
+		return "", err
+	}
+	return text, err
+}
+
+// maxProblemTextBytes bounds fx's own text when a page shows it as the
+// reason a read failed.
+const maxProblemTextBytes = 2 << 10
+
+// readProblem picks the sentence a page shows for a failed read: fx's own
+// short text when it sent one, otherwise the error, otherwise fallback. A
+// long stdout is a document that did not decode, not a message.
+func readProblem(text string, err error, fallback string) string {
+	if text = strings.TrimSpace(text); text != "" && len(text) <= maxProblemTextBytes {
+		return text
+	}
+	if err != nil {
+		return err.Error()
+	}
+	return fallback
+}
+
 // fxStreams is one finished fx invocation. The two streams stay separate,
 // each with its own truncation flag, and the exit/cancel/timeout outcome is
 // explicit rather than inferred from an empty string (A4).
@@ -764,10 +815,13 @@ type fxStreams struct {
 	stdout, stderr  string
 	stdoutTruncated bool
 	stderrTruncated bool
-	exitCode        int
-	canceled        bool
-	timedOut        bool
-	err             error
+	// incomplete means a stream never reached EOF: the process exited while
+	// something else still held the pipe. The captured bytes are a prefix.
+	incomplete bool
+	exitCode   int
+	canceled   bool
+	timedOut   bool
+	err        error
 }
 
 func managementStreams(ctx context.Context, executable, dir string, limit int, args ...string) fxStreams {
@@ -792,9 +846,14 @@ func runManagementStreams(ctx context.Context, executable, dir string, limit int
 	}
 	stderr.limit = 32 * 1024
 	stderr.emit = progress
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
+	// Completeness is observed directly. cmd.Run reports an unfinished
+	// stream only when the process had no other error, so a non-zero exit
+	// hid it: an exit-1 doctor whose stdout was still held open was decoded
+	// as a whole report.
+	complete, err := cmdlimit.Run(cmd, &stdout, &stderr)
+	if !complete {
+		err = errors.Join(err, fmt.Errorf("the output did not finish: %w", exec.ErrWaitDelay))
+	}
 	// The process is done, so a status line that was held back by the
 	// throttle is now final. Publish it once, then never again (O5).
 	stderr.flushPending()
@@ -803,6 +862,7 @@ func runManagementStreams(ctx context.Context, executable, dir string, limit int
 		stderr:          strings.TrimSpace(stderr.buffer.String()),
 		stdoutTruncated: stdout.truncated,
 		stderrTruncated: stderr.truncated,
+		incomplete:      !complete,
 	}
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -833,7 +893,7 @@ func managementReadLimit(ctx context.Context, executable, dir string, limit int,
 		// A cut-off JSON document is not a smaller result. Report the cap
 		// here, where the caller cannot mistake the prefix for the whole
 		// answer (A4).
-		return streams.stdout, fmt.Errorf("fx %s: output exceeded %d KiB", strings.Join(args, " "), limit/1024)
+		return streams.stdout, fmt.Errorf("fx %s: %w %d KiB", strings.Join(args, " "), errOutputTooLarge, limit/1024)
 	}
 	var formatted bytes.Buffer
 	if json.Indent(&formatted, []byte(streams.stdout), "", "  ") == nil {
@@ -910,7 +970,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 		result := managementReadResult{}
 		switch action {
 		case "models":
-			text, err := managementRead(ctx, executable, dir, "models", "--json")
+			text, err := managementReadJSON(ctx, executable, dir, "models", "--json")
 			var models FxModels
 			if err == nil && json.Unmarshal([]byte(text), &models) == nil {
 				for _, model := range models.Models {
@@ -931,13 +991,13 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			} else {
 				result.output, result.problem = text, err
 				if err != nil {
-					result.modelsProblem = valueOr(text, err.Error())
+					result.modelsProblem = readProblem(text, err, "fx returned unreadable model JSON")
 				} else {
-					result.modelsProblem = valueOr(text, "fx returned unreadable model JSON")
+					result.modelsProblem = readProblem("", nil, "fx returned unreadable model JSON")
 				}
 			}
 		case "mcp-list":
-			text, err := managementRead(ctx, executable, dir, args...)
+			text, err := managementReadJSON(ctx, executable, dir, args...)
 			var list FxMCPList
 			if err == nil && json.Unmarshal([]byte(text), &list) == nil {
 				for _, server := range list.Servers {
@@ -949,10 +1009,10 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				result.output = fmt.Sprintf("%d MCP server(s)", len(result.mcps))
 			} else {
 				result.output, result.problem = text, err
-				result.mcpProblem = valueOr(text, "fx returned unreadable MCP JSON")
+				result.mcpProblem = readProblem(text, err, "fx returned unreadable MCP JSON")
 			}
 		case "mcp-show":
-			text, err := managementRead(ctx, executable, dir, args...)
+			text, err := managementReadJSON(ctx, executable, dir, args...)
 			var show FxMCPShow
 			if err == nil && json.Unmarshal([]byte(text), &show) == nil {
 				detail := &chrome.MCPServerDetail{
@@ -969,7 +1029,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				result.output = fmt.Sprintf("%s · %s", valueOr(show.Name, "MCP server"), valueOr(show.Status, "unknown status"))
 			} else {
 				result.output, result.problem = text, err
-				result.mcpProblem = valueOr(text, "fx returned unreadable MCP JSON")
+				result.mcpProblem = readProblem(text, err, "fx returned unreadable MCP JSON")
 			}
 		case "session-inspect":
 			// A saved conversation can be large; the native view only keeps
@@ -981,24 +1041,24 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				result.output = fmt.Sprintf("Session %s · %d turn(s)", detail.ID, len(detail.History))
 			} else {
 				result.output, result.problem = text, err
-				result.sessionProblem = valueOr(text, "fx returned unreadable session JSON")
+				result.sessionProblem = readProblem(text, err, "fx returned unreadable session JSON")
 			}
 		case "details":
 			var failures []string
 			var status FxStatus
 			var permissions FxPermissions
 			var usage FxUsage
-			if text, err := managementRead(ctx, executable, dir, "status", "--json"); err != nil {
+			if text, err := managementReadJSON(ctx, executable, dir, "status", "--json"); err != nil {
 				failures = append(failures, "Status: "+valueOr(text, err.Error()))
 			} else if json.Unmarshal([]byte(text), &status) != nil {
 				failures = append(failures, "Status: fx returned unreadable JSON")
 			}
-			if text, err := managementRead(ctx, executable, dir, "permissions", "--json"); err != nil {
+			if text, err := managementReadJSON(ctx, executable, dir, "permissions", "--json"); err != nil {
 				failures = append(failures, "Permissions: "+valueOr(text, err.Error()))
 			} else if json.Unmarshal([]byte(text), &permissions) != nil {
 				failures = append(failures, "Permissions: fx returned unreadable JSON")
 			}
-			if text, err := managementRead(ctx, executable, dir, "usage", "--period", period, "--json"); err != nil {
+			if text, err := managementReadJSON(ctx, executable, dir, "usage", "--period", period, "--json"); err != nil {
 				failures = append(failures, "Usage: "+valueOr(text, err.Error()))
 			} else if json.Unmarshal([]byte(text), &usage) != nil {
 				failures = append(failures, "Usage: fx returned unreadable JSON")
@@ -1017,7 +1077,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			}
 			result.details = detailsSections(statusPtr, permissionsPtr, usagePtr, failures)
 		case "doctor":
-			text, err := managementRead(ctx, executable, dir, "doctor", "--json")
+			text, err := managementReadJSON(ctx, executable, dir, "doctor", "--json")
 			doctor, ok := decodeDoctor(text, err)
 			if ok {
 				for _, check := range doctor.Checks {
@@ -1031,10 +1091,12 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				}
 				result.output = fmt.Sprintf("%d ok · %d warning · %d failed", doctor.OKCount, doctor.WarnCount, doctor.FailCount)
 			} else {
-				result.output, result.problem = text, err
+				// The doctor page has no separate problem line, so the reason
+				// has to be the output: without it the page kept "Reading fx…".
+				result.output, result.problem = readProblem(text, err, "fx doctor did not return a report"), err
 			}
 		case "sessions-live":
-			text, err := managementRead(ctx, executable, dir, args...)
+			text, err := managementReadJSON(ctx, executable, dir, args...)
 			report, parseErr := fxlive.Parse([]byte(text))
 			if err == nil && parseErr == nil {
 				result.live = liveAgents(report.Agents)
@@ -1044,7 +1106,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				if parseErr != nil {
 					result.liveProblem = parseErr.Error()
 				} else if err != nil {
-					result.liveProblem = valueOr(text, err.Error())
+					result.liveProblem = readProblem(text, err, "fx returned unreadable live-session JSON")
 				}
 			}
 		case "profiles":
@@ -1077,10 +1139,10 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			}
 			result.output = fmt.Sprintf("%d profile(s)", len(result.profiles))
 		case "credits":
-			text, err := managementRead(ctx, executable, dir, "credits", "--json")
+			text, err := managementReadJSON(ctx, executable, dir, "credits", "--json")
 			result.credits, result.problem = presentCredits(text, err)
 		case "slack-status":
-			text, err := managementRead(ctx, executable, dir, "slack", "status", "--json")
+			text, err := managementReadJSON(ctx, executable, dir, "slack", "status", "--json")
 			var slack FxSlackStatus
 			if err == nil && json.Unmarshal([]byte(text), &slack) == nil {
 				result.slack = slackStatusView(&slack)

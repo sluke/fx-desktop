@@ -48,6 +48,10 @@ type Coordinator struct {
 	// setup screen then offers a fresh download instead of letting every
 	// session fail against the broken binary.
 	fxBroken bool
+	// fxUnrunnable lists the paths a version query found unrunnable in this
+	// run, newest last. Resolution avoids them when the managed install
+	// offers another binary, and the setup screen names the newest.
+	fxUnrunnable []string
 
 	sessions []*ProjectWindow
 	// sessionUse is which saved conversations this app may still write,
@@ -107,8 +111,7 @@ const (
 const quitFlushBudget = 2 * time.Second
 
 type pickerModel struct {
-	status string
-	shell  chrome.ShellState
+	shell chrome.ShellState
 }
 
 type welcomeModel struct {
@@ -279,6 +282,15 @@ func (c *Coordinator) quitting() bool {
 	return c.quitPhase != quitIdle
 }
 
+// closeHidesWindow reports whether closing a project window hides it to the
+// tray instead of closing it. That is the "Close window to menu bar" choice,
+// and it stops applying once the app is quitting: MyGo's quit closes every
+// window first and gives up when one refuses. A listener that always refused
+// made Quit impossible while the option was on, and because the drain had
+// already closed the conversations and the stats store, the app that stayed
+// open could neither work nor quit.
+func (c *Coordinator) closeHidesWindow() bool { return !c.quitting() }
+
 // Setup registers menus, tray, and deep-link handlers.
 func (c *Coordinator) Setup() {
 	// Before-quit, not will-quit: MyGo destroys the windows before it fires
@@ -373,7 +385,7 @@ func (c *Coordinator) refreshFx() {
 	// Resolving the executable only inspects files. Never start the CLI
 	// here: Launch, OpenProject, installation and updates call this on the
 	// app loop, and a stalled --version used to freeze every window.
-	path, err := fxbin.ResolvePath()
+	path, err := fxbin.ResolvePathAvoiding(c.fxUnrunnableList()...)
 	c.mu.Lock()
 	c.fxGeneration++
 	generation := c.fxGeneration
@@ -413,14 +425,30 @@ func (c *Coordinator) refreshFxVersion(path string, generation uint64) bool {
 		if !fxbin.Unrunnable(err) {
 			return false
 		}
+		// A damaged fx found first (on PATH) must not hide a working
+		// managed install: resolve once more, avoiding what has failed.
+		// A candidate that already failed is not offered again, so two
+		// damaged binaries cannot hand the retry back and forth. The
+		// lookup touches the filesystem, so it runs before the lock.
+		next, nextErr := fxbin.ResolvePathAvoiding(appendUnique(c.fxUnrunnableList(), path)...)
 		c.mu.Lock()
 		stale := c.fxGeneration != generation || c.fxPath != path
+		retry := false
 		if !stale {
-			c.fxPath = ""
-			c.fxVersion = ""
-			c.fxBroken = true
+			c.fxUnrunnable = appendUnique(c.fxUnrunnable, path)
+			if nextErr == nil && next != path {
+				retry = true
+			} else {
+				c.fxPath = ""
+				c.fxVersion = ""
+				c.fxBroken = true
+			}
 		}
 		c.mu.Unlock()
+		if retry {
+			mygo.App.WhenReady(c.refreshFx)
+			return false
+		}
 		if !stale {
 			// The setup screen is the only place that offers a working
 			// CLI, so a broken one has to bring it up. The picker is
@@ -475,6 +503,76 @@ func (c *Coordinator) fxBrokenSnapshot() bool {
 	return c.fxBroken
 }
 
+// fxUnrunnableSnapshot is the path that could not be started, for the setup
+// screen to name.
+func (c *Coordinator) fxUnrunnableSnapshot() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.fxUnrunnable) == 0 {
+		return ""
+	}
+	return c.fxUnrunnable[len(c.fxUnrunnable)-1]
+}
+
+// fxUnrunnableList is a copy of every path found unrunnable in this run.
+func (c *Coordinator) fxUnrunnableList() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.fxUnrunnable...)
+}
+
+// forgetUnrunnable drops path from the unrunnable list: Install has just
+// replaced that file, so what was learned about the old one no longer holds.
+func (c *Coordinator) forgetUnrunnable(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	kept := c.fxUnrunnable[:0:0]
+	for _, item := range c.fxUnrunnable {
+		if item != path {
+			kept = append(kept, item)
+		}
+	}
+	c.fxUnrunnable = kept
+}
+
+func appendUnique(list []string, value string) []string {
+	for _, item := range list {
+		if item == value {
+			return list
+		}
+	}
+	return append(list, value)
+}
+
+// brokenFxBody is what the setup screen says about a fx that cannot run. It
+// names the file that failed: the text used to say ~/.local/bin/fx whatever
+// was resolved. With an override set, the download is not what the app will
+// use, and the user has to be told so before pressing it.
+func brokenFxBody(path string, overridden bool) string {
+	if path == "" {
+		path = "~/.local/bin/fx"
+	}
+	if overridden {
+		return "FX_DESKTOP_FX_PATH names " + path + ", which could not be started. Point it at a working fx or unset it — a download installs ~/.local/bin/fx, which is not used while the variable is set."
+	}
+	return "The fx CLI at " + path + " could not be started. It may be damaged or incomplete — download it again to repair the install."
+}
+
+// installOutcome is what setup reports after a download: whether the app
+// now has a fx to run, and the sentence to show. A successful download is
+// not that by itself — resolution can still fail (an override naming a
+// missing file), and saying "Installed." then sent the user round the setup
+// screen again.
+func installOutcome(target, resolved string, resolveErr error) (usable bool, status string) {
+	if resolved != "" && resolveErr == nil {
+		return true, "Installed."
+	}
+	if resolveErr != nil {
+		return false, "fx was installed to " + target + ", but it cannot be used: " + resolveErr.Error()
+	}
+	return false, "fx was installed to " + target + ", but it cannot be used."
+}
+
 // fxVersionSnapshot is the goroutine-safe read of the display version.
 func (c *Coordinator) fxVersionSnapshot() string {
 	c.mu.Lock()
@@ -492,10 +590,23 @@ func (c *Coordinator) fxAuthNotice() chrome.AuthNotice {
 
 // sessionFor finds the session that owns a project path, if any.
 func (c *Coordinator) sessionFor(path string) *ProjectWindow {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, s := range c.sessions {
+	sessions := c.sessionsSnapshot()
+	for _, s := range sessions {
 		if s.project == path {
+			return s
+		}
+	}
+	// The same folder can arrive under another spelling: through a symbolic
+	// link, or in another letter case on a case-insensitive volume. Compared
+	// as strings it opened a second window, and with it a second fx writing
+	// the same workspace — what the one-window rule exists to prevent. The
+	// filesystem is asked outside the lock.
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	for _, s := range sessions {
+		if other, err := os.Stat(s.project); err == nil && os.SameFile(info, other) {
 			return s
 		}
 	}
@@ -834,7 +945,7 @@ func (c *Coordinator) welcomeView(ctx *ui.Context) {
 		subtitle = "Repair fx to continue"
 		statusLeft = "fx cannot run"
 		headline = "Repair the fx CLI"
-		body = "The fx CLI at ~/.local/bin/fx could not be started. It may be damaged or incomplete — download it again to repair the install."
+		body = brokenFxBody(c.fxUnrunnableSnapshot(), fxbin.Overridden())
 	}
 	chrome.Frame(ctx, chrome.Host{
 		Appearance:  string(c.prefs.Appearance),
@@ -877,7 +988,7 @@ func (c *Coordinator) welcomeView(ctx *ui.Context) {
 func (c *Coordinator) runInstall() {
 	ctx, cancel := context.WithTimeout(context.Background(), fxbin.DefaultHTTPTimeout)
 	defer cancel()
-	_, err := fxbin.Install(ctx)
+	target, err := fxbin.Install(ctx)
 	mygo.App.WhenReady(func() {
 		c.welcomeState.busy = false
 		if err != nil {
@@ -889,8 +1000,17 @@ func (c *Coordinator) runInstall() {
 		}
 		// Publish the installed path and query its version in the background.
 		// Direct field writes here would bypass the generation/race guards.
+		c.forgetUnrunnable(target)
 		c.refreshFx()
-		c.welcomeState.status = "Installed."
+		_, resolveErr := fxbin.ResolvePathAvoiding(c.fxUnrunnableList()...)
+		usable, status := installOutcome(target, c.fxPathSnapshot(), resolveErr)
+		c.welcomeState.status = status
+		if !usable {
+			if c.welcomeWin != nil {
+				c.welcomeWin.Invalidate()
+			}
+			return
+		}
 		// Keep a window alive throughout setup → picker, for the same reason
 		// OpenProject opens its session before closing the startup windows.
 		c.showPicker()
@@ -938,7 +1058,7 @@ func (c *Coordinator) prefsView(ctx *ui.Context) {
 		Shell:   &c.prefsShell,
 		Main: func(inner *ui.Context) {
 			drawPrefs(inner, p, func() { c.chooseDefaultProjectDir() }, func() {
-				c.prefs = *p
+				c.prefs = mergePrefsDraft(c.prefs, *p)
 				_ = c.prefs.Save()
 				c.invalidateFxWindows()
 				if c.prefsWin != nil {
@@ -949,6 +1069,15 @@ func (c *Coordinator) prefsView(ctx *ui.Context) {
 			})
 		},
 	})
+}
+
+// mergePrefsDraft applies the Preferences draft to the saved preferences. The
+// draft is a copy taken when the window opened, and LastProject is not one of
+// the fields the window edits: a project opened meanwhile must not be
+// replaced by the one that was current when the window opened.
+func mergePrefsDraft(saved, draft prefs.Prefs) prefs.Prefs {
+	draft.LastProject = saved.LastProject
+	return draft
 }
 
 // drawPrefs shares the shell's flat surfaces, compact type and control sizes.

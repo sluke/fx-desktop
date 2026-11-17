@@ -35,6 +35,32 @@ func mentionAt(text string, caret int) (query string, start, end int, ok bool) {
 	return workspace.MentionAt(text, caret)
 }
 
+// mentionLookup is one answer of mentionAt, kept with the question it
+// answers.
+type mentionLookup struct {
+	valid      bool
+	draft      string
+	caret      int
+	query      string
+	start, end int
+	ok         bool
+}
+
+// mentionAtCaret is mentionAt for the frame loop. A frame in which neither
+// the draft nor the caret moved reuses the last answer; comparing the draft
+// is a pointer check when it is the same string, and a byte comparison
+// without allocation otherwise. Any edit or caret move asks again, so the
+// answer is never older than the text it describes.
+func mentionAtCaret(state *ConversationState, caret int) (query string, start, end int, ok bool) {
+	seen := &state.mentionSeen
+	if seen.valid && seen.caret == caret && seen.draft == state.Draft {
+		return seen.query, seen.start, seen.end, seen.ok
+	}
+	query, start, end, ok = mentionAt(state.Draft, caret)
+	*seen = mentionLookup{valid: true, draft: state.Draft, caret: caret, query: query, start: start, end: end, ok: ok}
+	return query, start, end, ok
+}
+
 // mentionText is what a mention writes. FormatMention is the same spelling
 // MentionPaths reads back, including a quoted form for names that a space or
 // punctuation would otherwise cut short.
@@ -229,7 +255,7 @@ func mentionKey(state *ConversationState, h ConversationHost, k ui.TextKey) bool
 // caret can only be read while its own pass builds the field, so this runs
 // there, right after the field is built and its text published.
 func followMention(state *ConversationState, h ConversationHost, field ui.Element) {
-	query, start, end, ok := mentionAt(state.Draft, textCaret(field))
+	query, start, end, ok := mentionAtCaret(state, textCaret(field))
 	if !ok || !h.CanMention {
 		// Leaving the mention forgets a dismissal: it was about that token.
 		state.MentionClosed = ""

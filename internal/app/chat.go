@@ -249,7 +249,13 @@ type chatSession struct {
 	title                string
 	problem, model, mode string
 	permission           *conversation.Permission
-	changed              func()
+	// permissionQueue holds approvals that arrived while another one was on
+	// screen. fx can ask for several tool calls before the first is answered,
+	// and every request is a JSON-RPC call the agent waits on: replacing the
+	// shown request dropped the earlier one unanswered and the turn never
+	// ended. They are shown one at a time, in arrival order.
+	permissionQueue []*conversation.Permission
+	changed         func()
 }
 
 // configOptionWire is one entry of fx's configOptions. The shell re-renders
@@ -627,6 +633,7 @@ func (c *chatSession) fail(err error) {
 	c.configuring = false
 	c.stopping = false
 	c.permission = nil
+	c.permissionQueue = nil
 	c.finishMessagesLocked()
 	c.mu.Unlock()
 	c.invalidate()
@@ -1219,7 +1226,20 @@ func (c *chatSession) event(p acp.Packet) {
 			}
 			return
 		}
-		c.permission = &conversation.Permission{ID: string(p.ID), Title: params.ToolCall.Title, Detail: truncateText(string(params.ToolCall.RawInput), 8000), Options: params.Options}
+		request := &conversation.Permission{ID: string(p.ID), Title: params.ToolCall.Title, Detail: truncateText(string(params.ToolCall.RawInput), 8000), Options: params.Options}
+		if c.stopping || len(c.permissionQueue) >= maxPendingPermissions {
+			// A turn that is being cancelled answers every approval with the
+			// cancelled outcome (ACP session/cancel), including one that
+			// arrives after Stop. A flood past the queue bound is refused the
+			// same way rather than held without limit.
+			client := c.client
+			c.mu.Unlock()
+			if client != nil {
+				go client.Respond(p.ID, permissionCancelled())
+			}
+			return
+		}
+		c.enqueuePermissionLocked(request)
 		c.mu.Unlock()
 		c.invalidate()
 		return
@@ -1587,7 +1607,9 @@ func (c *chatSession) runTurn(client *acp.Client, sid, text string, images []pro
 		c.recovery = ""
 	}
 	c.thought = ""
+	// The turn is over: fx is no longer waiting on any approval it asked for.
 	c.permission = nil
+	c.permissionQueue = nil
 	c.finishMessagesLocked()
 	if err != nil && !c.closed {
 		c.problem = err.Error()
@@ -1784,13 +1806,70 @@ func (c *chatSession) stopTurn() {
 	c.recovery = ""
 	c.thought = ""
 	client, sid := c.client, c.sessionID
+	// ACP: after session/cancel the client answers every pending
+	// session/request_permission with the cancelled outcome. An agent that
+	// waits for those answers before it resolves the prompt would otherwise
+	// never end the turn, and Stop is disabled while stopping.
+	pending := c.takePermissionsLocked()
 	c.mu.Unlock()
 	c.invalidate()
 	go func() {
 		if err := client.Notify("session/cancel", map[string]string{"sessionId": sid}); err != nil {
 			c.fail(err)
+			return
+		}
+		for _, id := range pending {
+			if err := client.Respond(json.RawMessage(id), permissionCancelled()); err != nil {
+				c.fail(err)
+				return
+			}
 		}
 	}()
+}
+
+// maxPendingPermissions bounds the approvals held behind the one on screen.
+const maxPendingPermissions = 64
+
+// permissionCancelled is the ACP outcome for an approval the user did not
+// get to answer because the turn was cancelled.
+func permissionCancelled() map[string]any {
+	return map[string]any{"outcome": map[string]string{"outcome": "cancelled"}}
+}
+
+// enqueuePermissionLocked shows request, or holds it behind the approval that
+// is already on screen. A request that repeats a pending id replaces that
+// entry: one id is answered once.
+func (c *chatSession) enqueuePermissionLocked(request *conversation.Permission) {
+	if c.permission == nil {
+		c.permission = request
+		return
+	}
+	if c.permission.ID == request.ID {
+		c.permission = request
+		return
+	}
+	for i, queued := range c.permissionQueue {
+		if queued.ID == request.ID {
+			c.permissionQueue[i] = request
+			return
+		}
+	}
+	c.permissionQueue = append(c.permissionQueue, request)
+}
+
+// takePermissionsLocked removes every pending approval and returns their
+// request ids, the shown one first.
+func (c *chatSession) takePermissionsLocked() []string {
+	var ids []string
+	if c.permission != nil {
+		ids = append(ids, c.permission.ID)
+	}
+	for _, queued := range c.permissionQueue {
+		ids = append(ids, queued.ID)
+	}
+	c.permission = nil
+	c.permissionQueue = nil
+	return ids
 }
 func (c *chatSession) choosePermission(requestID, option string) {
 	c.mu.Lock()
@@ -1811,6 +1890,10 @@ func (c *chatSession) choosePermission(requestID, option string) {
 	}
 	client := c.client
 	c.permission = nil
+	if len(c.permissionQueue) > 0 {
+		c.permission = c.permissionQueue[0]
+		c.permissionQueue = c.permissionQueue[1:]
+	}
 	c.mu.Unlock()
 	c.invalidate()
 	go func() {

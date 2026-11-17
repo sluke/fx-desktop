@@ -243,3 +243,43 @@ func TestSessionsSnapshotIsACopy(t *testing.T) {
 		t.Fatalf("sessionCount = %d, want 1", c.sessionCount())
 	}
 }
+
+// One folder reached under two spellings is one project window. Compared as
+// strings, the second spelling opened a second window and a second fx on the
+// same workspace.
+func TestRegressionR9_SessionForMatchesTheSameFolderUnderAnotherSpelling(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "Proj")
+	other := filepath.Join(base, "other")
+	for _, dir := range []string{real, other} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	window := &ProjectWindow{project: real}
+	c := &Coordinator{sessions: []*ProjectWindow{window, {project: other}}}
+	if got := c.sessionFor(real); got != window {
+		t.Fatal("the exact path no longer finds its window")
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skip("symbolic links are not available:", err)
+	}
+	if got := c.sessionFor(alias); got != window {
+		t.Errorf("a symbolic link to an open project did not find its window: %v", got)
+	}
+	if got := c.sessionFor(filepath.Join(base, "missing")); got != nil {
+		t.Errorf("a folder that does not exist matched a window: %v", got.project)
+	}
+	if got := c.sessionFor(filepath.Join(base, "other")); got == nil || got.project != other {
+		t.Errorf("a different folder matched the wrong window: %v", got)
+	}
+	lower := filepath.Join(base, "proj")
+	if a, errA := os.Stat(real); errA == nil {
+		if b, errB := os.Stat(lower); errB == nil && os.SameFile(a, b) {
+			if got := c.sessionFor(lower); got != window {
+				t.Errorf("another letter case of an open project did not find its window")
+			}
+		}
+	}
+}

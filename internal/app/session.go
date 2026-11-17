@@ -23,6 +23,12 @@ import (
 // generation, so a late result from an older workspace, conversation or
 // history query can never be published as if it were current (§4.4).
 type ProjectWindow struct {
+	// toolsJob is true while a Workspace tools mutation (an fx command that
+	// changes something) is running. It is read and written on the app loop.
+	// The sheet's Busy flag alone is not enough: it is also set by reads,
+	// which closing the sheet cancels.
+	toolsJob bool
+
 	// windowID names this window for the lifetime of the app. It is assigned
 	// on the app loop and never reused, so a queued closure that names a
 	// window cannot reach a different one.
@@ -674,6 +680,9 @@ func (c *Coordinator) openSessionWithFlags(project string, args ...string) *Proj
 		})
 		if p.CloseToTray {
 			w.OnClose(func(e *mygo.CloseEvent) {
+				if !c.closeHidesWindow() {
+					return
+				}
 				e.PreventDefault()
 				w.Hide()
 			})

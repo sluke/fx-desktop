@@ -95,6 +95,20 @@ func storeDirs(base string) []string {
 
 var reservedStoreNames = map[string]bool{"v2": true, "trash+v1": true}
 
+// isStoreItself reports whether info is one of the store's own directories
+// rather than a conversation inside one. The reserved names are compared by
+// spelling, and that is not enough: on a case-insensitive volume the valid
+// id "V2" names the v2 substore, and removing it removes every conversation.
+// Identity is compared instead, so any spelling of the store is refused.
+func isStoreItself(base string, info os.FileInfo) bool {
+	for _, dir := range []string{base, filepath.Join(base, "v2"), filepath.Join(base, "trash+v1")} {
+		if st, err := os.Lstat(dir); err == nil && os.SameFile(st, info) {
+			return true
+		}
+	}
+	return false
+}
+
 // DeleteMany removes each saved conversation and returns the IDs whose
 // directory was removed. A session is looked up in every store: the v2
 // substore first, then the flat layout. A missing session counts as removed:
@@ -135,11 +149,17 @@ func DeleteMany(ids []string) (deleted []string, err error) {
 				continue
 			}
 			target := filepath.Join(dir, id)
-			if _, err := os.Lstat(target); err != nil {
+			info, err := os.Lstat(target)
+			if err != nil {
 				if os.IsNotExist(err) {
 					continue
 				}
 				problems = append(problems, fmt.Errorf("delete session %s: %w", id, err))
+				failed = true
+				continue
+			}
+			if isStoreItself(base, info) {
+				problems = append(problems, fmt.Errorf("refusing to delete session %s: the id names the session store itself", id))
 				failed = true
 				continue
 			}

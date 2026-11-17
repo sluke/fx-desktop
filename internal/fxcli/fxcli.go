@@ -296,6 +296,11 @@ func ParseDoctor(out []byte, runErr error) (Doctor, bool) {
 		return Doctor{}, false
 	}
 	if runErr != nil {
+		// A stream that never reached EOF is not a report, whatever the
+		// exit status: the bytes are a prefix that happened to decode.
+		if errors.Is(runErr, exec.ErrWaitDelay) {
+			return Doctor{}, false
+		}
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 {
 			return Doctor{}, false

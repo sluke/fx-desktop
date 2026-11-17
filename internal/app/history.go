@@ -38,7 +38,7 @@ func readSessionPage(ctx context.Context, executable, dir string, all bool, limi
 		args = append(args, "--cursor", cursor)
 	}
 	args = append(args, "--json")
-	text, err := managementRead(ctx, executable, dir, args...)
+	text, err := managementReadJSON(ctx, executable, dir, args...)
 	if err != nil {
 		return page, err
 	}

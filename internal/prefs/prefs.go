@@ -18,15 +18,18 @@ const (
 
 // Prefs are user settings persisted on disk.
 type Prefs struct {
-	DefaultProjectDir   string     `json:"defaultProjectDir,omitempty"`
-	FontFamily          string     `json:"fontFamily,omitempty"`
-	FontSize            float64    `json:"fontSize,omitempty"`
-	Appearance          Appearance `json:"appearance,omitempty"`
-	RestoreLastProject  bool       `json:"restoreLastProject,omitempty"`
-	TrackRecentProjects bool       `json:"trackRecentProjects,omitempty"`
-	CloseToTray         bool       `json:"closeToTray,omitempty"`
-	CheckUpdatesOnStart bool       `json:"checkUpdatesOnStart,omitempty"`
-	LastProject         string     `json:"lastProject,omitempty"`
+	DefaultProjectDir string     `json:"defaultProjectDir,omitempty"`
+	FontFamily        string     `json:"fontFamily,omitempty"`
+	FontSize          float64    `json:"fontSize,omitempty"`
+	Appearance        Appearance `json:"appearance,omitempty"`
+	// The switches are always written. Load starts from Defaults, so a switch
+	// whose default is on and that was omitted when off came back on at the
+	// next launch. A key missing from an older file still means the default.
+	RestoreLastProject  bool   `json:"restoreLastProject"`
+	TrackRecentProjects bool   `json:"trackRecentProjects"`
+	CloseToTray         bool   `json:"closeToTray"`
+	CheckUpdatesOnStart bool   `json:"checkUpdatesOnStart"`
+	LastProject         string `json:"lastProject,omitempty"`
 }
 
 // Defaults returns factory defaults.

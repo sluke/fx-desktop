@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -415,30 +414,7 @@ func saveSnapshot(path string, data map[string]Stats) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".session-stats-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	cleanup := func() {
-		tmp.Close()
-		os.Remove(name)
-	}
-	if _, err := tmp.Write(b); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		cleanup()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		os.Remove(name)
-		return err
-	}
-	return nil
+	// One atomic writer for every app data file: same-directory temporary
+	// file, sync, rename.
+	return configdir.WriteFile(path, b, 0o644)
 }

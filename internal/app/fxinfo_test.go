@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -263,5 +264,40 @@ func TestFxStatusFromBinary(t *testing.T) {
 		t.Fatalf("fx sessions: %v", err)
 	} else if sessions == nil {
 		t.Fatal("nil sessions slice should not happen")
+	}
+}
+
+// A download is not the same as having a fx to run: resolution can still
+// fail, and "Installed." then sent the user round the setup screen again.
+func TestRegressionR9_InstallOutcomeAndBrokenBody(t *testing.T) {
+	if usable, status := installOutcome("/home/u/.local/bin/fx", "/home/u/.local/bin/fx", nil); !usable || status != "Installed." {
+		t.Errorf("resolved install = %v, %q", usable, status)
+	}
+	usable, status := installOutcome("/home/u/.local/bin/fx", "", errors.New("FX_DESKTOP_FX_PATH is not a file: /gone/fx"))
+	if usable || !strings.Contains(status, "/home/u/.local/bin/fx") || !strings.Contains(status, "FX_DESKTOP_FX_PATH is not a file") {
+		t.Errorf("unresolved install = %v, %q", usable, status)
+	}
+	if usable, status := installOutcome("/t/fx", "", nil); usable || status == "Installed." {
+		t.Errorf("no path and no error = %v, %q", usable, status)
+	}
+
+	if body := brokenFxBody("/usr/local/bin/fx", false); !strings.Contains(body, "/usr/local/bin/fx") || strings.Contains(body, "~/.local/bin/fx") {
+		t.Errorf("the body does not name the file that failed: %q", body)
+	}
+	if body := brokenFxBody("/opt/fx", true); !strings.Contains(body, "FX_DESKTOP_FX_PATH") || !strings.Contains(body, "/opt/fx") {
+		t.Errorf("the override body = %q", body)
+	}
+	if body := brokenFxBody("", false); !strings.Contains(body, "~/.local/bin/fx") {
+		t.Errorf("the default body = %q", body)
+	}
+
+	c := &Coordinator{}
+	c.fxUnrunnable = appendUnique(appendUnique(appendUnique(nil, "/a/fx"), "/b/fx"), "/a/fx")
+	if got := c.fxUnrunnableList(); len(got) != 2 || c.fxUnrunnableSnapshot() != "/b/fx" {
+		t.Errorf("unrunnable list = %v, newest %q", got, c.fxUnrunnableSnapshot())
+	}
+	c.forgetUnrunnable("/b/fx")
+	if got := c.fxUnrunnableList(); len(got) != 1 || got[0] != "/a/fx" {
+		t.Errorf("after forgetting /b/fx = %v", got)
 	}
 }

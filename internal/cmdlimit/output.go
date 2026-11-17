@@ -134,4 +134,63 @@ func Capture(cmd *exec.Cmd, stdoutLimit, stderrLimit int) ([]byte, bool, error) 
 	return out.data(), false, runErr
 }
 
+// Run runs cmd, copying stdout and stderr into the writers, and reports
+// whether both streams reached EOF. The writers are expected to bound what
+// they keep and to accept every byte, so the pipes always drain.
+//
+// complete is false when the process exited while something else still held
+// a stream open and cmd.WaitDelay passed: what was copied is then a prefix.
+// That fact is reported on its own and never folded into err, because
+// exec's own ErrWaitDelay is hidden by any other process error, and a
+// non-zero exit is exactly when a caller such as doctor still reads stdout.
+func Run(cmd *exec.Cmd, stdout, stderr io.Writer) (complete bool, err error) {
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 100 * time.Millisecond
+	}
+	outReader, outWriter, err := os.Pipe()
+	if err != nil {
+		return true, err
+	}
+	errReader, errWriter, err := os.Pipe()
+	if err != nil {
+		outReader.Close()
+		outWriter.Close()
+		return true, err
+	}
+	defer outReader.Close()
+	defer errReader.Close()
+	cmd.Stdout, cmd.Stderr = outWriter, errWriter
+	if err := cmd.Start(); err != nil {
+		outWriter.Close()
+		errWriter.Close()
+		return true, err
+	}
+	outWriter.Close()
+	errWriter.Close()
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(stdout, outReader); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(stderr, errReader); done <- struct{}{} }()
+	runErr := cmd.Wait()
+	timer := time.NewTimer(cmd.WaitDelay)
+	defer timer.Stop()
+	complete = true
+	remaining := 2
+	for remaining > 0 && complete {
+		select {
+		case <-done:
+			remaining--
+		case <-timer.C:
+			complete = false
+		}
+	}
+	// Closing the read ends releases a copier that is still blocked on a
+	// pipe someone else holds; both are joined before returning.
+	outReader.Close()
+	errReader.Close()
+	for ; remaining > 0; remaining-- {
+		<-done
+	}
+	return complete, runErr
+}
+
 var _ io.Writer = (*limitedWriter)(nil)

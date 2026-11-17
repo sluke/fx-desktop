@@ -103,14 +103,29 @@ func (s *Store) List() []Entry {
 }
 
 // Touch records path as recently opened.
+//
+// An entry that names the same directory under another spelling — through a
+// symbolic link, or in another letter case on a case-insensitive volume — is
+// replaced, not kept beside the new one: one folder is one recent project.
+// The filesystem is asked before the lock is taken, so a slow volume does not
+// hold up a frame that only reads the list. An entry whose folder is gone
+// cannot be compared and is matched by its cleaned path alone.
 func (s *Store) Touch(path string) {
 	path = filepath.Clean(path)
 	now := time.Now().UTC()
+	same := map[string]bool{}
+	if info, err := os.Stat(path); err == nil {
+		for _, e := range s.List() {
+			if other, err := os.Stat(e.Path); err == nil && os.SameFile(info, other) {
+				same[e.Path] = true
+			}
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var rest []Entry
 	for _, e := range s.entries {
-		if filepath.Clean(e.Path) != path {
+		if filepath.Clean(e.Path) != path && !same[e.Path] {
 			rest = append(rest, e)
 		}
 	}

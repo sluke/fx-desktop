@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -192,42 +193,74 @@ func StartWithGlobals(ctx context.Context, executable, dir string, globals, args
 	argv = append(argv, args...)
 	cmd := exec.CommandContext(ctx, executable, argv...)
 	cmd.Dir = dir
-	cmd.WaitDelay = 100 * time.Millisecond // bound inherited output pipes on process shutdown
 	input, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	output, err := cmd.StdoutPipe()
+	// The client owns the read end of stdout. With cmd.StdoutPipe the reader
+	// had to reach EOF before cmd.Wait could be called, so a direct child
+	// that exited while one of its own children still held the pipe was
+	// never noticed: Done stayed open and the conversation kept waiting on a
+	// process that was gone. Owning the pipe lets the exit be observed on its
+	// own, with a bounded drain for frames written just before it.
+	output, writer, err := os.Pipe()
 	if err != nil {
 		input.Close()
 		cancel()
 		return nil, err
 	}
-	// Protocol errors arrive on stdout. Do not mix diagnostic lines into frames.
-	cmd.Stderr = io.Discard
+	cmd.Stdout = writer
+	// Protocol errors arrive on stdout. Diagnostic lines are not frames: a nil
+	// Stderr is the null device, with no copying goroutine for Wait to join.
+	cmd.Stderr = nil
+	cmd.WaitDelay = outputDrain
 	if err = cmd.Start(); err != nil {
 		input.Close()
 		output.Close()
+		writer.Close()
 		cancel()
 		return nil, err
 	}
+	// The child holds its own copy; ours would keep the reader from ever
+	// seeing EOF.
+	writer.Close()
 	c := &Client{input: input, done: make(chan struct{}), exited: make(chan struct{}), pending: make(map[string]chan Packet), cancel: cancel, onEvent: onEvent}
 	c.startWritePump()
+	readDone := make(chan struct{})
 	go func() {
 		// The protocol side ends first: a scanner error, EOF or an unparsable
-		// frame means no reply can arrive, so waiters are released now. The
-		// process itself is reaped afterwards and only then is Exited closed.
+		// frame means no reply can arrive, so waiters are released now.
+		defer close(readDone)
 		readErr := c.read(output)
 		if readErr == nil {
 			readErr = ErrClosed
 		}
 		c.finish(readErr)
+	}()
+	go func() {
+		// The process is reaped on its own goroutine. Once it is gone the
+		// reader gets outputDrain to reach EOF; a pipe still held by a
+		// descendant is then closed from this side, so Done is closed before
+		// Exited in every case.
 		waitErr := cmd.Wait()
+		drain := time.NewTimer(outputDrain)
+		select {
+		case <-readDone:
+			drain.Stop()
+		case <-drain.C:
+			output.Close()
+			<-readDone
+		}
+		output.Close()
 		c.markExited(waitErr)
 	}()
 	return c, nil
 }
+
+// outputDrain bounds how long frames already written by an exited fx are
+// still read. It is the inherited-pipe bound WaitDelay used to promise.
+const outputDrain = 100 * time.Millisecond
 
 // read decodes frames until the stream ends. It reports why it stopped; the
 // caller decides what that means for the connection.

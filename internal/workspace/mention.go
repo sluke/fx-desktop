@@ -46,12 +46,23 @@ const (
 // MentionBreak reports whether a rune leaves an @ opening a word: the space
 // between words, or the punctuation a sentence wraps a name in.
 func MentionBreak(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune("([{\"'", r)
+	return unicode.IsSpace(r) || strings.ContainsRune("([{\"'"+wideOpeners+widePunctuation, r)
 }
+
+// Full-width punctuation ends and opens a mention the way its ASCII form
+// does. CJK prose puts no space around it, so "@main.go，谢谢" used to name a
+// file called "main.go，谢谢": nothing was attached and nothing was refused.
+// A file whose name really contains one of these is written quoted by
+// FormatMention, like any other name with punctuation in it.
+const (
+	wideOpeners     = "（【「『《〈“‘"
+	wideClosers     = "）】」』》〉”’"
+	widePunctuation = "，。、；：！？"
+)
 
 // MentionEnd reports whether a rune ends the path a mention names.
 func MentionEnd(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(",;:)]}\"'", r)
+	return unicode.IsSpace(r) || strings.ContainsRune(",;:)]}\"'"+wideClosers+widePunctuation, r)
 }
 
 // TrimMention drops the punctuation a sentence leaves on the end of a name:

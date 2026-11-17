@@ -87,6 +87,11 @@ type ConversationState struct {
 	mentionRankOK   bool
 	mentionRankKey  mentionRankKey
 	mentionRankRows []MentionFile
+	// mentionSeen is the last answer to "which mention is the caret in". The
+	// composer asks on every frame, and the answer only depends on the draft
+	// and the caret: reading it again decoded the whole draft into runes each
+	// frame, which for a pasted log is megabytes of allocation per frame.
+	mentionSeen mentionLookup
 	// MentionCaretAt is where taking a mention leaves the caret, which the
 	// next pass to build the field puts there: a caret can only be moved
 	// while that pass runs, and the accept happens outside it.
