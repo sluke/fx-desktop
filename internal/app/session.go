@@ -28,6 +28,12 @@ type ProjectWindow struct {
 	// The sheet's Busy flag alone is not enough: it is also set by reads,
 	// which closing the sheet cancels.
 	toolsJob bool
+	// projectInfo identifies the project folder as it was when the window
+	// opened. It is set once, before the window is registered, and lets
+	// sessionFor recognise the folder under another spelling without reading
+	// this window's volume again. Nil means the identity is unknown and the
+	// window is matched by its path alone.
+	projectInfo os.FileInfo
 
 	// windowID names this window for the lifetime of the app. It is assigned
 	// on the app loop and never reused, so a queued closure that names a
@@ -461,6 +467,8 @@ func (s *ProjectWindow) readGit(ctx context.Context, gen uint64) {
 	}
 	if s.workspace.publishGit(gen, info, err) {
 		s.invalidate()
+		// The drawer's file follows the tree it was read from.
+		s.dispatch(s.reconcileReview)
 	}
 }
 
@@ -642,6 +650,11 @@ func (c *Coordinator) openSessionWithFlags(project string, args ...string) *Proj
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &ProjectWindow{coord: c, project: project, ctx: ctx, cancel: cancel, shell: chrome.DefaultShell(), started: time.Now(), model: modelFlag, stop: make(chan struct{})}
+	// The caller has just checked that the folder exists, so this reads a
+	// path that is known to answer.
+	if info, err := os.Stat(project); err == nil {
+		s.projectInfo = info
+	}
 	s.console.window = s
 	s.windowID = c.nextWindowID()
 	p := c.prefs

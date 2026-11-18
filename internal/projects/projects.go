@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fx-desktop/internal/configdir"
@@ -27,7 +28,17 @@ type Store struct {
 	mu      sync.RWMutex
 	writeMu sync.Mutex // serializes disk writes so an older Save cannot land last
 	entries []Entry
+	// probing is set while an identity lookup is waiting on the filesystem.
+	probing atomic.Bool
 }
+
+// statPath is os.Stat unless a test replaces it.
+var statPath = os.Stat
+
+// identityBudget bounds how long Touch waits to learn which entries name the
+// same folder. Touch runs on the app loop when a project is opened, and an
+// entry can live on a volume that no longer answers.
+const identityBudget = 250 * time.Millisecond
 
 // Load reads recent projects from disk.
 func Load() (*Store, error) {
@@ -107,20 +118,13 @@ func (s *Store) List() []Entry {
 // An entry that names the same directory under another spelling — through a
 // symbolic link, or in another letter case on a case-insensitive volume — is
 // replaced, not kept beside the new one: one folder is one recent project.
-// The filesystem is asked before the lock is taken, so a slow volume does not
-// hold up a frame that only reads the list. An entry whose folder is gone
-// cannot be compared and is matched by its cleaned path alone.
+// The filesystem is asked before the lock is taken and within identityBudget:
+// when it does not answer in time the entries are matched by their cleaned
+// path alone, which is also how an entry whose folder is gone is matched.
 func (s *Store) Touch(path string) {
 	path = filepath.Clean(path)
 	now := time.Now().UTC()
-	same := map[string]bool{}
-	if info, err := os.Stat(path); err == nil {
-		for _, e := range s.List() {
-			if other, err := os.Stat(e.Path); err == nil && os.SameFile(info, other) {
-				same[e.Path] = true
-			}
-		}
-	}
+	same := s.sameFolder(path)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var rest []Entry
@@ -131,6 +135,40 @@ func (s *Store) Touch(path string) {
 	}
 	s.entries = append([]Entry{{Path: path, LastOpened: now}}, rest...)
 	s.normalize()
+}
+
+// sameFolder names the entries that are the same directory as path. The
+// lookup runs on its own goroutine so a volume that has stopped answering
+// costs the caller at most identityBudget; while one lookup is still waiting,
+// another is not started behind it.
+func (s *Store) sameFolder(path string) map[string]bool {
+	if !s.probing.CompareAndSwap(false, true) {
+		return nil
+	}
+	entries := s.List()
+	found := make(chan map[string]bool, 1)
+	go func() {
+		same := map[string]bool{}
+		if info, err := statPath(path); err == nil {
+			for _, e := range entries {
+				if other, err := statPath(e.Path); err == nil && os.SameFile(info, other) {
+					same[e.Path] = true
+				}
+			}
+		}
+		// Cleared before the answer is handed over, so the caller's next
+		// lookup is never refused by this one.
+		s.probing.Store(false)
+		found <- same
+	}()
+	timer := time.NewTimer(identityBudget)
+	defer timer.Stop()
+	select {
+	case same := <-found:
+		return same
+	case <-timer.C:
+		return nil
+	}
 }
 
 // Clear removes all recent entries.

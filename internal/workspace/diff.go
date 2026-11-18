@@ -301,7 +301,9 @@ func hunkLineCounts(header string) (oldLines, newLines int) {
 			return 0, false
 		}
 		for _, c := range lines {
-			if c < '0' || c > '9' || n > MaxUnifiedDiffLines {
+			// The bound only keeps the sum from overflowing. A hunk longer
+			// than the display cap is still a hunk.
+			if c < '0' || c > '9' || n > 1<<28 {
 				return 0, false
 			}
 			n = n*10 + int(c-'0')

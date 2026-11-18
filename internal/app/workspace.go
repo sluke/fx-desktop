@@ -45,6 +45,10 @@ type workspaceController struct {
 	// late result through a path comparison; only the selection that is
 	// still the newest may publish (N4).
 	reviewGen uint64
+	// reviewSeen is what the working tree said about the selected file when
+	// its diff was asked for. A later read that says something else means
+	// the diff on screen is no longer the file.
+	reviewSeen changeStamp
 	// files is the right rail's Files tab: the listings it has read and the
 	// folders the user opened.
 	files *fileBrowser
@@ -173,6 +177,28 @@ func (w *workspaceController) publishGit(gen uint64, info *GitInfo, err error) b
 	return true
 }
 
+// changeStamp is what one working-tree read says about one changed file: the
+// facts that move when the file's diff would. It is compared, never shown.
+type changeStamp struct {
+	listed     bool
+	kind       string
+	adds, dels int
+	modified   time.Time
+}
+
+// stampFor reads path's stamp from a working-tree read.
+func stampFor(git *GitInfo, path string) changeStamp {
+	if git == nil {
+		return changeStamp{}
+	}
+	for _, change := range git.Changes {
+		if change.Path == path {
+			return changeStamp{listed: true, kind: change.Kind, adds: change.Adds, dels: change.Dels, modified: git.Modified[path]}
+		}
+	}
+	return changeStamp{}
+}
+
 // beginReviewRead starts one diff selection: it becomes the path on screen
 // immediately, and its generation is what a late reply must still match.
 func (w *workspaceController) beginReviewRead(path string) uint64 {
@@ -182,7 +208,29 @@ func (w *workspaceController) beginReviewRead(path string) uint64 {
 	w.reviewPath = path
 	w.reviewBusy = true
 	w.reviewNote = ""
+	w.reviewSeen = stampFor(w.git, path)
 	return w.reviewGen
+}
+
+// reviewLoading reports whether path's diff is being read right now.
+func (w *workspaceController) reviewLoading(path string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.reviewBusy && w.reviewPath == path
+}
+
+// reviewVerdict compares the selected file with the newest working-tree read.
+// known is false while there is no read to compare with. listed is whether
+// the file is still a change; stale is whether what the read says about it
+// differs from what was true when its diff was asked for.
+func (w *workspaceController) reviewVerdict(path string) (known, listed, stale bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.git == nil {
+		return false, false, false
+	}
+	now := stampFor(w.git, path)
+	return true, now.listed, w.reviewPath == path && now != w.reviewSeen
 }
 
 // clearReview forgets the drawer's diff and retires a read still in flight.

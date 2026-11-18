@@ -1227,11 +1227,11 @@ func (c *chatSession) event(p acp.Packet) {
 			return
 		}
 		request := &conversation.Permission{ID: string(p.ID), Title: params.ToolCall.Title, Detail: truncateText(string(params.ToolCall.RawInput), 8000), Options: params.Options}
-		if c.stopping || len(c.permissionQueue) >= maxPendingPermissions {
-			// A turn that is being cancelled answers every approval with the
-			// cancelled outcome (ACP session/cancel), including one that
-			// arrives after Stop. A flood past the queue bound is refused the
-			// same way rather than held without limit.
+		// A turn that is being cancelled answers every approval with the
+		// cancelled outcome (ACP session/cancel), including one that arrives
+		// after Stop. A flood past the queue bound is refused the same way
+		// rather than held without limit.
+		if c.stopping || !c.enqueuePermissionLocked(request) {
 			client := c.client
 			c.mu.Unlock()
 			if client != nil {
@@ -1239,7 +1239,6 @@ func (c *chatSession) event(p acp.Packet) {
 			}
 			return
 		}
-		c.enqueuePermissionLocked(request)
 		c.mu.Unlock()
 		c.invalidate()
 		return
@@ -1838,23 +1837,28 @@ func permissionCancelled() map[string]any {
 
 // enqueuePermissionLocked shows request, or holds it behind the approval that
 // is already on screen. A request that repeats a pending id replaces that
-// entry: one id is answered once.
-func (c *chatSession) enqueuePermissionLocked(request *conversation.Permission) {
+// entry: one id is answered once. It reports false when the queue is full
+// and the request is a new one, which the caller then has to answer itself.
+func (c *chatSession) enqueuePermissionLocked(request *conversation.Permission) bool {
 	if c.permission == nil {
 		c.permission = request
-		return
+		return true
 	}
 	if c.permission.ID == request.ID {
 		c.permission = request
-		return
+		return true
 	}
 	for i, queued := range c.permissionQueue {
 		if queued.ID == request.ID {
 			c.permissionQueue[i] = request
-			return
+			return true
 		}
 	}
+	if len(c.permissionQueue) >= maxPendingPermissions {
+		return false
+	}
 	c.permissionQueue = append(c.permissionQueue, request)
+	return true
 }
 
 // takePermissionsLocked removes every pending approval and returns their

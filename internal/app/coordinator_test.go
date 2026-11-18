@@ -256,8 +256,16 @@ func TestRegressionR9_SessionForMatchesTheSameFolderUnderAnotherSpelling(t *test
 			t.Fatal(err)
 		}
 	}
-	window := &ProjectWindow{project: real}
-	c := &Coordinator{sessions: []*ProjectWindow{window, {project: other}}}
+	// A window records its folder's identity when it opens.
+	opened := func(project string) *ProjectWindow {
+		info, err := os.Stat(project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &ProjectWindow{project: project, projectInfo: info}
+	}
+	window := opened(real)
+	c := &Coordinator{sessions: []*ProjectWindow{window, opened(other)}}
 	if got := c.sessionFor(real); got != window {
 		t.Fatal("the exact path no longer finds its window")
 	}
@@ -281,5 +289,115 @@ func TestRegressionR9_SessionForMatchesTheSameFolderUnderAnotherSpelling(t *test
 				t.Errorf("another letter case of an open project did not find its window")
 			}
 		}
+	}
+
+	// A window whose identity is unknown is matched by its path alone, and
+	// its folder is not read again: the lookup must not depend on a volume
+	// that may have stopped answering since the window opened.
+	plain := &ProjectWindow{project: real}
+	c = &Coordinator{sessions: []*ProjectWindow{plain}}
+	if got := c.sessionFor(real); got != plain {
+		t.Error("a window without a recorded identity is no longer found by its path")
+	}
+	if got := c.sessionFor(alias); got != nil {
+		t.Error("a window without a recorded identity was matched through the filesystem")
+	}
+}
+
+// A damaged fx found first on PATH used to hide a working managed install:
+// the app declared fx broken, and a successful repair changed nothing. The
+// version query now records the path and resolution goes on to the managed
+// binary.
+func TestRegressionR9_DamagedFxOnPathFallsBackToManagedInstall(t *testing.T) {
+	home := testutil.IsolateHome(t)
+	pathDir := filepath.Join(t.TempDir(), "pathbin")
+	if err := os.MkdirAll(pathDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	onPath := filepath.Join(pathDir, "fx")
+	if err := os.WriteFile(onPath, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	managed := filepath.Join(home, ".local", "bin", "fx")
+	if err := os.MkdirAll(filepath.Dir(managed), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managed, []byte("#!/bin/sh\necho 0.0.17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewCoordinator()
+	c.refreshFx()
+	if got := c.fxPathSnapshot(); got != onPath {
+		t.Fatalf("first resolution = %q, want the PATH binary %q", got, onPath)
+	}
+	waitForFx(t, func() bool { return c.fxUnrunnableSnapshot() == onPath })
+	if c.fxBrokenSnapshot() {
+		t.Fatal("a working managed install exists; fx must not be reported broken")
+	}
+	// The retry is posted to the app loop. A test has no loop, so the step
+	// it would take is taken here.
+	c.refreshFx()
+	if got := c.fxPathSnapshot(); got != managed {
+		t.Fatalf("after the retry fxPath = %q, want the managed install %q", got, managed)
+	}
+	waitForFx(t, func() bool { return c.fxVersionSnapshot() == "fx v0.0.17" })
+	if c.fxBrokenSnapshot() {
+		t.Error("the managed install answered, but fx is reported broken")
+	}
+	if got := c.fxUnrunnableList(); len(got) != 1 || got[0] != onPath {
+		t.Errorf("unrunnable paths = %v, want only the PATH binary", got)
+	}
+}
+
+// With every candidate damaged the app ends in the broken state, names the
+// last binary it tried, and does not hand the retry back and forth.
+func TestRegressionR9_TwoDamagedFxBinariesEndBroken(t *testing.T) {
+	home := testutil.IsolateHome(t)
+	pathDir := filepath.Join(t.TempDir(), "pathbin")
+	managed := filepath.Join(home, ".local", "bin", "fx")
+	onPath := filepath.Join(pathDir, "fx")
+	for _, file := range []string{onPath, managed} {
+		if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", pathDir)
+
+	c := NewCoordinator()
+	c.refreshFx()
+	waitForFx(t, func() bool { return c.fxUnrunnableSnapshot() == onPath })
+	c.refreshFx() // the posted retry
+	if got := c.fxPathSnapshot(); got != managed {
+		t.Fatalf("the retry resolved %q, want the managed install %q", got, managed)
+	}
+	waitForFx(t, func() bool { return c.fxBrokenSnapshot() })
+	if got := c.fxPathSnapshot(); got != "" {
+		t.Errorf("fxPath = %q after every candidate failed", got)
+	}
+	if got := c.fxUnrunnableSnapshot(); got != managed {
+		t.Errorf("the setup screen would name %q, want the last binary tried %q", got, managed)
+	}
+	if got := c.fxUnrunnableList(); len(got) != 2 {
+		t.Errorf("unrunnable paths = %v, want both", got)
+	}
+
+	// A repair replaces the managed binary; what was learned about the old
+	// file no longer holds, and the app resolves it again.
+	if err := os.WriteFile(managed, []byte("#!/bin/sh\necho 0.0.17\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c.forgetUnrunnable(managed)
+	c.refreshFx()
+	if got := c.fxPathSnapshot(); got != managed {
+		t.Fatalf("after the repair fxPath = %q, want %q", got, managed)
+	}
+	waitForFx(t, func() bool { return c.fxVersionSnapshot() == "fx v0.0.17" })
+	if c.fxBrokenSnapshot() {
+		t.Error("the repaired install answered, but fx is still reported broken")
 	}
 }

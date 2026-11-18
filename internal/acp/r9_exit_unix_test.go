@@ -6,6 +6,8 @@ package acp
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -59,6 +61,11 @@ func TestRegressionR9_ExitedChildWithInheritedStdoutIsNoticed(t *testing.T) {
 	case <-c.Done():
 	case <-time.After(2 * time.Second):
 		problems = append(problems, "Done() not closed 2s after the fx process exited: the conversation never learns fx is gone")
+	}
+	// The reason is the ordinary one, not the read error that closing the
+	// held pipe produces: a conversation shows this text.
+	if err := c.Err(); len(problems) == 0 && !errors.Is(err, ErrClosed) {
+		problems = append(problems, "Err() = "+fmt.Sprint(err)+", want ErrClosed")
 	}
 	c.Close()
 	select {

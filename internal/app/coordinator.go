@@ -87,6 +87,13 @@ type Coordinator struct {
 	// quitBudget overrides quitFlushBudget for a test that must not wait the
 	// production two seconds. Zero means the default.
 	quitBudget time.Duration
+
+	// confirmLink asks whether a folder named by a link may be opened. Nil
+	// means the native dialog; a test supplies its own answer.
+	confirmLink func(path string) bool
+	// openProject opens a project. Nil means openProjectWithFlags; a test
+	// records the request instead of creating a window.
+	openProject func(path string)
 }
 
 // quitPhase names how far the app's single quit owner has got. A quit may be
@@ -336,16 +343,17 @@ func (c *Coordinator) Launch() {
 			_ = fxbin.Upgrade(ctx, fxPath)
 		}()
 	}
-	var pending string
 	for _, arg := range os.Args[1:] {
-		if path, ok := ProjectFromArg(arg, ""); ok {
-			pending = path
-			break
+		request, ok := ProjectRequestFromArg(arg, "")
+		if !ok {
+			continue
 		}
-	}
-	if pending != "" {
-		c.OpenProject(pending)
-		return
+		// A link the user turns down is not a reason to start with no
+		// window: the launch goes on to the last project or the picker.
+		if c.openRequest(request) {
+			return
+		}
+		break
 	}
 	if c.prefs.RestoreLastProject && c.prefs.LastProject != "" {
 		if st, err := os.Stat(c.prefs.LastProject); err == nil && st.IsDir() {
@@ -363,8 +371,8 @@ func (c *Coordinator) HandleSecondInstance(args []string, wd string) {
 		return
 	}
 	for _, arg := range args {
-		if path, ok := ProjectFromArg(arg, wd); ok {
-			c.OpenProject(path)
+		if request, ok := ProjectRequestFromArg(arg, wd); ok {
+			c.openRequest(request)
 			return
 		}
 	}
@@ -430,13 +438,14 @@ func (c *Coordinator) refreshFxVersion(path string, generation uint64) bool {
 		// A candidate that already failed is not offered again, so two
 		// damaged binaries cannot hand the retry back and forth. The
 		// lookup touches the filesystem, so it runs before the lock.
-		next, nextErr := fxbin.ResolvePathAvoiding(appendUnique(c.fxUnrunnableList(), path)...)
+		avoid := appendUnique(c.fxUnrunnableList(), path)
+		next, nextErr := fxbin.ResolvePathAvoiding(avoid...)
 		c.mu.Lock()
 		stale := c.fxGeneration != generation || c.fxPath != path
 		retry := false
 		if !stale {
 			c.fxUnrunnable = appendUnique(c.fxUnrunnable, path)
-			if nextErr == nil && next != path {
+			if nextErr == nil && !containsString(avoid, next) {
 				retry = true
 			} else {
 				c.fxPath = ""
@@ -474,6 +483,9 @@ func (c *Coordinator) refreshFxVersion(path string, generation uint64) bool {
 	c.fxVersion = fxVersionLabel(raw)
 	c.fxAuth = auth
 	c.fxBroken = false
+	// A path that answered is not unrunnable, whatever an earlier query in
+	// this run found (it may have been repaired or replaced in place).
+	c.fxUnrunnable = withoutString(c.fxUnrunnable, path)
 	return true
 }
 
@@ -526,22 +538,34 @@ func (c *Coordinator) fxUnrunnableList() []string {
 func (c *Coordinator) forgetUnrunnable(path string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	kept := c.fxUnrunnable[:0:0]
-	for _, item := range c.fxUnrunnable {
-		if item != path {
-			kept = append(kept, item)
+	c.fxUnrunnable = withoutString(c.fxUnrunnable, path)
+}
+
+func containsString(list []string, value string) bool {
+	for _, item := range list {
+		if item == value {
+			return true
 		}
 	}
-	c.fxUnrunnable = kept
+	return false
 }
 
 func appendUnique(list []string, value string) []string {
-	for _, item := range list {
-		if item == value {
-			return list
-		}
+	if containsString(list, value) {
+		return list
 	}
 	return append(list, value)
+}
+
+// withoutString returns list without value, in a slice of its own.
+func withoutString(list []string, value string) []string {
+	kept := list[:0:0]
+	for _, item := range list {
+		if item != value {
+			kept = append(kept, item)
+		}
+	}
+	return kept
 }
 
 // brokenFxBody is what the setup screen says about a fx that cannot run. It
@@ -599,14 +623,18 @@ func (c *Coordinator) sessionFor(path string) *ProjectWindow {
 	// The same folder can arrive under another spelling: through a symbolic
 	// link, or in another letter case on a case-insensitive volume. Compared
 	// as strings it opened a second window, and with it a second fx writing
-	// the same workspace — what the one-window rule exists to prevent. The
-	// filesystem is asked outside the lock.
+	// the same workspace — what the one-window rule exists to prevent.
+	//
+	// Only the path being asked about is read here, outside the lock; every
+	// caller has just read it anyway. Each window's identity was recorded
+	// when it opened, so a window whose volume has stopped answering cannot
+	// hold up opening another project.
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil
 	}
 	for _, s := range sessions {
-		if other, err := os.Stat(s.project); err == nil && os.SameFile(info, other) {
+		if s.projectInfo != nil && os.SameFile(info, s.projectInfo) {
 			return s
 		}
 	}
@@ -689,7 +717,86 @@ func fxVersionLabel(v string) string {
 
 // OpenProject opens or focuses a project in a new session window.
 func (c *Coordinator) OpenProject(path string) {
+	if c.openProject != nil {
+		c.openProject(path)
+		return
+	}
 	c.openProjectWithFlags(path)
+}
+
+// openRequest opens what a launch argument asked for and reports whether a
+// project was opened.
+func (c *Coordinator) openRequest(request ProjectRequest) bool {
+	if request.FromLink {
+		return c.OpenProjectFromLink(request.Path)
+	}
+	c.OpenProject(request.Path)
+	return true
+}
+
+// OpenProjectFromLink opens a folder an fx-desktop:// link names, and reports
+// whether it did.
+//
+// Opening a project is not a passive act: fx is started in the folder and
+// its Git state is read, and Git runs commands the folder's own configuration
+// names (core.fsmonitor on status, diff.external and filters on diff). A link
+// can be followed from a web page, so a folder the user has never opened here
+// is opened only after they have seen its path and agreed. A folder that is
+// already open, or is among the recent projects, was opened by the user
+// before and needs no question.
+func (c *Coordinator) OpenProjectFromLink(path string) bool {
+	if c.quitting() {
+		return false
+	}
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return false
+	}
+	if !linkedProjectKnown(path, c.sessionFor(path) != nil, c.prefs.LastProject, c.recentPaths()) {
+		confirm := c.confirmLink
+		if confirm == nil {
+			confirm = confirmLinkedProject
+		}
+		if !confirm(path) {
+			return false
+		}
+	}
+	c.OpenProject(path)
+	return true
+}
+
+// linkedProjectKnown reports whether a folder named by a link is one the user
+// has already opened in this app: it has a window, it is the last project, or
+// it is in the recent list. Paths are compared as written; the filesystem is
+// not asked, so a list entry on a volume that has gone away costs nothing.
+func linkedProjectKnown(path string, open bool, last string, recents []string) bool {
+	if open {
+		return true
+	}
+	if last != "" && filepath.Clean(last) == path {
+		return true
+	}
+	for _, recent := range recents {
+		if filepath.Clean(recent) == path {
+			return true
+		}
+	}
+	return false
+}
+
+// confirmLinkedProject shows the folder a link wants opened and asks. Cancel
+// is the default and the answer to Escape.
+func confirmLinkedProject(path string) bool {
+	result, err := mygo.Dialog.Message(mygo.MessageOptions{
+		Type:          mygo.MessageWarning,
+		Title:         "Open folder from link",
+		Message:       "A link asked fx to open this folder:\n\n" + path,
+		Detail:        "Opening a folder starts fx in it and reads its Git status, which can run commands that the folder's own Git configuration names. Open it only if you trust where it came from.",
+		Buttons:       []string{"Cancel", "Open Folder"},
+		DefaultButton: 0,
+		CancelButton:  0,
+	})
+	return err == nil && result.Button == 1
 }
 
 func (c *Coordinator) openProjectWithFlags(path string, args ...string) {

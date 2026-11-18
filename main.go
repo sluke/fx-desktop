@@ -17,7 +17,7 @@ func main() {
 
 	mygo.App.OnOpenURL(func(raw string) {
 		if path, ok := app.ProjectFromURL(raw); ok {
-			coord.OpenProject(path)
+			coord.OpenProjectFromLink(path)
 		}
 	})
 	mygo.App.OnSecondInstance(func(args []string, wd string) {

@@ -240,17 +240,19 @@ func StartWithGlobals(ctx context.Context, executable, dir string, globals, args
 	}()
 	go func() {
 		// The process is reaped on its own goroutine. Once it is gone the
-		// reader gets outputDrain to reach EOF; a pipe still held by a
-		// descendant is then closed from this side, so Done is closed before
-		// Exited in every case.
+		// reader gets outputDrain to reach EOF. A pipe still held by a
+		// descendant is then given up: the connection is marked closed here,
+		// with the ordinary reason rather than the read error that closing
+		// the pipe produces, and the read end is closed to release the
+		// reader. Done is closed before Exited in every case, and Exited
+		// does not wait for a reader the platform cannot interrupt.
 		waitErr := cmd.Wait()
 		drain := time.NewTimer(outputDrain)
 		select {
 		case <-readDone:
 			drain.Stop()
 		case <-drain.C:
-			output.Close()
-			<-readDone
+			c.finish(ErrClosed)
 		}
 		output.Close()
 		c.markExited(waitErr)
@@ -276,6 +278,14 @@ func (c *Client) read(r io.Reader) error {
 			return errors.New("fx sent an invalid ACP frame")
 		}
 		if p.Method != "" {
+			// Nothing is delivered once the connection is closed. The pipe can
+			// outlive fx when a descendant holds it, and frames still in the
+			// buffer must not reach a conversation that was told fx is gone.
+			select {
+			case <-c.done:
+				return ErrClosed
+			default:
+			}
 			if c.onEvent != nil {
 				c.onEvent(p)
 			}

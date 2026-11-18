@@ -58,7 +58,22 @@ type ManagementState struct {
 type SkillInfo struct{ Name, Description, Source, Path string }
 
 // AllowlistRule is one raw persistent rule from ~/.fx/settings.json.
-type AllowlistRule struct{ Scope, Kind, Key, Label, Pattern, Decision string }
+// Category and Key are the rule exactly as fx stores it: the category name
+// under "permission" and the pattern key inside it. Kind, Label and Pattern
+// are how the row reads.
+type AllowlistRule struct{ Scope, Kind, Category, Key, Label, Pattern, Decision string }
+
+// AllowlistRemoveRule is the action a row's Remove button sends. It names the
+// rule by its stored category and key, so any listed rule can be removed —
+// the form's "remove" rebuilds a key from the kind and the typed pattern,
+// which cannot name a tool rule for a path or a category this page does not
+// offer.
+const AllowlistRemoveRule = "remove-rule"
+
+// RemoveRequest is the Allowlist call that removes exactly this rule.
+func (r AllowlistRule) RemoveRequest() (action, scope, category, key, pattern string) {
+	return AllowlistRemoveRule, r.Scope, r.Category, r.Key, ""
+}
 
 // ModelInfo is one row of the native `fx models` list.
 type ModelInfo struct{ ID, Source string }
@@ -733,7 +748,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 											ui.Text(c, rule.Pattern).Font(MonoFont).FontSize(TypeLabel).TextColor(p.Ink).Wrap().Grow(1).MinWidth(0)
 											ui.Button(c, "Remove").FontSize(TypeControl).Padding(InlinePadY, InlinePadX).Disabled(state.Busy || h.Allowlist == nil).OnClick(func() {
 												if h.Allowlist != nil {
-													h.Allowlist("remove", rule.Scope, rule.Kind, rule.Key, rule.Pattern)
+													h.Allowlist(rule.RemoveRequest())
 												}
 											})
 										})

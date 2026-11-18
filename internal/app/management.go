@@ -808,6 +808,22 @@ func readProblem(text string, err error, fallback string) string {
 	return fallback
 }
 
+// incompleteOutput is the error for a stream that never reached EOF. It
+// answers errors.Is(err, exec.ErrWaitDelay), which is how the rest of the
+// code asks, and reads as a sentence where a page shows it.
+type incompleteOutput struct{}
+
+func (incompleteOutput) Error() string {
+	return "fx exited while another process still held its output open, so the result is incomplete"
+}
+
+func (incompleteOutput) Is(target error) bool { return target == exec.ErrWaitDelay }
+
+// maxToolsTextBytes bounds raw fx text a page shows. The document budget is
+// for decoding; a document that could not be used must not reach the sheet
+// at that size.
+const maxToolsTextBytes = 64 << 10
+
 // fxStreams is one finished fx invocation. The two streams stay separate,
 // each with its own truncation flag, and the exit/cancel/timeout outcome is
 // explicit rather than inferred from an empty string (A4).
@@ -852,7 +868,7 @@ func runManagementStreams(ctx context.Context, executable, dir string, limit int
 	// as a whole report.
 	complete, err := cmdlimit.Run(cmd, &stdout, &stderr)
 	if !complete {
-		err = errors.Join(err, fmt.Errorf("the output did not finish: %w", exec.ErrWaitDelay))
+		err = errors.Join(err, incompleteOutput{})
 	}
 	// The process is done, so a status line that was held back by the
 	// throttle is now final. Publish it once, then never again (O5).
@@ -1049,17 +1065,17 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			var permissions FxPermissions
 			var usage FxUsage
 			if text, err := managementReadJSON(ctx, executable, dir, "status", "--json"); err != nil {
-				failures = append(failures, "Status: "+valueOr(text, err.Error()))
+				failures = append(failures, "Status: "+readProblem(text, err, "fx status failed"))
 			} else if json.Unmarshal([]byte(text), &status) != nil {
 				failures = append(failures, "Status: fx returned unreadable JSON")
 			}
 			if text, err := managementReadJSON(ctx, executable, dir, "permissions", "--json"); err != nil {
-				failures = append(failures, "Permissions: "+valueOr(text, err.Error()))
+				failures = append(failures, "Permissions: "+readProblem(text, err, "fx permissions failed"))
 			} else if json.Unmarshal([]byte(text), &permissions) != nil {
 				failures = append(failures, "Permissions: fx returned unreadable JSON")
 			}
 			if text, err := managementReadJSON(ctx, executable, dir, "usage", "--period", period, "--json"); err != nil {
-				failures = append(failures, "Usage: "+valueOr(text, err.Error()))
+				failures = append(failures, "Usage: "+readProblem(text, err, "fx usage failed"))
 			} else if json.Unmarshal([]byte(text), &usage) != nil {
 				failures = append(failures, "Usage: fx returned unreadable JSON")
 			}
@@ -1167,7 +1183,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 			}
 			state.Busy = false
 			if result.output != "" {
-				state.Output = result.output
+				state.Output = truncateText(result.output, maxToolsTextBytes)
 			}
 			if action == "details" {
 				state.Details = result.details
@@ -1179,7 +1195,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				state.Doctor = result.doctor
 			}
 			if action == "credits" {
-				state.Credits = result.credits
+				state.Credits = truncateText(result.credits, maxToolsTextBytes)
 			}
 			if action == "slack-status" {
 				state.Slack = result.slack

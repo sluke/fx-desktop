@@ -8,8 +8,10 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -244,5 +246,77 @@ func TestRegressionR9_ManagementDoctorRefusesIncompleteExitOne(t *testing.T) {
 	}
 	if state.Busy || state.Output == "" || state.Output == "Reading fx…" {
 		t.Errorf("the refused report left no reason on the page: busy=%v output=%q", state.Busy, state.Output)
+	}
+	// The reason is a sentence, not the runtime's wording for it.
+	if !strings.Contains(state.Output, "incomplete") || strings.Contains(state.Output, "WaitDelay") {
+		t.Errorf("the reason shown = %q", state.Output)
+	}
+}
+
+// The document budget is for decoding. A document that decodes as JSON but is
+// not what the page expects used to be printed raw, and with the larger
+// budget that would be megabytes in the sheet: what a page shows stays
+// bounded, and the problem line is a sentence.
+func TestRegressionR9_FailedReadDoesNotPublishTheWholeDocument(t *testing.T) {
+	testutil.IsolateHome(t)
+	dir := t.TempDir()
+	fx := filepath.Join(dir, "fx")
+	// Valid JSON, wrong shape: "models" should be a list.
+	payload, _ := json.Marshal(map[string]any{"models": strings.Repeat("not a list ", 30000)})
+	if len(payload) < 4*maxToolsTextBytes || len(payload) > managementJSONBytes {
+		t.Fatalf("fixture is %d bytes; it must exceed the text bound and fit the document budget", len(payload))
+	}
+	if err := os.WriteFile(fx+".json", payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fx, []byte("#!/bin/sh\nexec /bin/cat \"$0.json\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c, s, loop := r9Window(t, fx)
+	c.openManagement(s)
+	c.readManagement(s, "models", nil)
+	loop.await(t)
+	loop.drain()
+	state := &s.shell.Tools
+	if len(state.Models) != 0 {
+		t.Fatalf("a document of the wrong shape produced %d models", len(state.Models))
+	}
+	if limit := maxToolsTextBytes + 64; len(state.Output) > limit {
+		t.Errorf("the sheet shows %d bytes of raw document, want at most %d", len(state.Output), limit)
+	}
+	if state.ModelsProblem != "fx returned unreadable model JSON" {
+		t.Errorf("the problem line = %.120q (%d bytes)", state.ModelsProblem, len(state.ModelsProblem))
+	}
+	if state.Busy {
+		t.Error("the sheet is still busy")
+	}
+}
+
+func TestRegressionR9_ReadProblemAndIncompleteOutput(t *testing.T) {
+	short := "fx: not signed in"
+	if got := readProblem("  "+short+"\n", errors.New("exit status 1"), "fallback"); got != short {
+		t.Errorf("fx's own short text = %q", got)
+	}
+	long := strings.Repeat("x", maxProblemTextBytes+1)
+	if got := readProblem(long, errors.New("exit status 1"), "fallback"); got != "exit status 1" {
+		t.Errorf("a long stdout was shown as the problem: %.40q", got)
+	}
+	if got := readProblem(long, nil, "fallback"); got != "fallback" {
+		t.Errorf("no text and no error = %q", got)
+	}
+	if got := readProblem("", nil, "fallback"); got != "fallback" {
+		t.Errorf("empty = %q", got)
+	}
+
+	var err error = incompleteOutput{}
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Error("incompleteOutput does not answer errors.Is(err, exec.ErrWaitDelay)")
+	}
+	joined := errors.Join(&exec.ExitError{}, incompleteOutput{})
+	if !errors.Is(joined, exec.ErrWaitDelay) {
+		t.Error("the joined run error lost the incomplete mark")
+	}
+	if _, ok := decodeDoctor(`{"checks":[{"name":"auth","status":"ok"}]}`, joined); ok {
+		t.Error("a doctor document from an incomplete stream was accepted")
 	}
 }

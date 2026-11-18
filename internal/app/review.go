@@ -24,12 +24,50 @@ func (c *Coordinator) toggleReview(s *ProjectWindow) {
 		first = git.Changes[0].Path
 	}
 	// The drawer keeps whatever file was open, so reopening it resumes the
-	// review instead of jumping back to the top of the list.
+	// review instead of jumping back to the top of the list — as long as
+	// that file is still a change. One that was committed or reverted while
+	// the drawer was closed is not resumed: the drawer would open on a file
+	// that is not in its own list.
+	if path := s.shell.ReviewPath; path != "" {
+		if known, listed, _ := s.workspace.reviewVerdict(path); known && !listed {
+			s.shell.ReviewPath = ""
+		}
+	}
 	if s.shell.ReviewPath == "" {
 		s.shell.ReviewPath = first
 	}
 	s.invalidate()
 	s.loadReviewDiff(s.shell.ReviewPath)
+}
+
+// reconcileReview brings the drawer's file in line with a working-tree read
+// that has just been published. The list and the diff are separate reads, and
+// nothing used to connect them: after an edit the list said +2 while the pane
+// still showed the old diff, and after a commit the pane kept showing a diff
+// for a clean tree. The drawer is where a change is read before "Stage
+// everything and commit", so what it shows has to be the file.
+//
+// It runs on the app loop. A file that is no longer a change loses its diff.
+// One that is still a change is read again only when the read says something
+// new about it, so a quiet tree costs no git call per refresh.
+func (s *ProjectWindow) reconcileReview() {
+	path := s.shell.ReviewPath
+	if path == "" {
+		return
+	}
+	known, listed, stale := s.workspace.reviewVerdict(path)
+	switch {
+	case !known:
+		return
+	case !listed:
+		s.shell.ReviewPath = ""
+		s.workspace.clearReview()
+		s.invalidate()
+	case stale && s.shell.ReviewOpen:
+		// Closed, the drawer reloads when it is opened; there is nobody to
+		// read the diff until then.
+		s.loadReviewDiff(path)
+	}
 }
 
 // closeReview hides the drawer without touching the watermark: closing a
@@ -39,9 +77,11 @@ func (c *Coordinator) closeReview(s *ProjectWindow) {
 	s.invalidate()
 }
 
-// selectChange opens one path's diff.
+// selectChange opens one path's diff. Choosing the file that is already open
+// reads it again — the obvious way to retry a failed read or to ask for the
+// current diff — unless that read is still in flight.
 func (c *Coordinator) selectChange(s *ProjectWindow, path string) {
-	if s.shell.ReviewPath == path {
+	if s.shell.ReviewPath == path && s.workspace.reviewLoading(path) {
 		return
 	}
 	s.shell.ReviewPath = path

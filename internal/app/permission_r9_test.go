@@ -6,9 +6,11 @@ package app
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +93,10 @@ func TestRegressionR9_HelperACP(t *testing.T) {
 		case "session/cancel":
 			cancelled = true
 			logf("cancel-received")
+			if mode == "late" {
+				// A tool that was already on its way asks after the cancel.
+				ask("perm-late")
+			}
 			maybeFinish()
 		case "":
 			logf("answered " + string(p.ID) + " " + string(p.Result))
@@ -171,6 +177,92 @@ func TestRegressionR9_SecondPermissionRequestMustNotLoseTheFirst(t *testing.T) {
 	if s.Busy {
 		t.Fatalf("turn still running 3s after every presented approval was answered.\n presented to the user: %v\n pending in UI now: %v\n agent log:\n%s",
 			presented, s.Permission != nil, r9Log(logPath))
+	}
+	// One at a time, in the order fx asked.
+	if len(presented) != 2 || presented[0] != `"perm-1"` || presented[1] != `"perm-2"` {
+		t.Errorf("approvals presented = %v, want perm-1 then perm-2", presented)
+	}
+	if s.Permission != nil {
+		t.Errorf("an approval is still shown after the turn ended: %+v", s.Permission)
+	}
+}
+
+// An approval that arrives after Stop — a tool that was already on its way —
+// is answered with the cancelled outcome too, and is never put on screen.
+func TestRegressionR9_PermissionArrivingWhileStoppingIsAnswered(t *testing.T) {
+	c, logPath := r9Chat(t, "late")
+	if !c.submit("run one tool", nil, nil) {
+		t.Fatal("not submitted")
+	}
+	awaitChat(t, c, func(s chatSnapshot) bool { return s.Permission != nil })
+	c.stopTurn()
+	if s := c.snapshot(); s.Permission != nil {
+		t.Errorf("the approval stayed on screen after Stop: %+v", s.Permission)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && c.snapshot().Busy {
+		if s := c.snapshot(); s.Permission != nil {
+			t.Errorf("an approval was presented while the turn was stopping: %s", s.Permission.ID)
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s := c.snapshot(); s.Busy {
+		t.Fatalf("turn still running 3s after Stop: stopping=%v\n agent log:\n%s", s.Stopping, r9Log(logPath))
+	}
+	log := r9Log(logPath)
+	for _, id := range []string{`"perm-1"`, `"perm-late"`} {
+		if !strings.Contains(log, "answered "+id+` {"outcome":{"outcome":"cancelled"}}`) {
+			t.Errorf("%s was not answered with the cancelled outcome\n agent log:\n%s", id, log)
+		}
+	}
+	if !strings.Contains(log, "turn-resolved cancelled") {
+		t.Errorf("the turn did not resolve as cancelled\n agent log:\n%s", log)
+	}
+}
+
+// The queue is bounded, keeps arrival order, and holds one entry per id.
+func TestRegressionR9_PermissionQueueIsBoundedAndOrdered(t *testing.T) {
+	c := newChatSession("/stub/fx", t.TempDir(), nil, nil)
+	t.Cleanup(c.Close)
+	request := func(id, title string) acp.Packet {
+		params, err := json.Marshal(map[string]any{
+			"toolCall": map[string]any{"title": title},
+			"options":  []map[string]string{{"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return acp.Packet{JSONRPC: "2.0", ID: json.RawMessage(strconv.Quote(id)), Method: "session/request_permission", Params: params}
+	}
+	for i := 0; i < maxPendingPermissions+10; i++ {
+		c.event(request(fmt.Sprintf("p%02d", i), "first"))
+	}
+	// A repeated id replaces its entry instead of adding one.
+	c.event(request("p00", "shown again"))
+	c.event(request("p05", "queued again"))
+
+	s := c.snapshot()
+	if s.Permission == nil || s.Permission.ID != `"p00"` || s.Permission.Title != "shown again" {
+		t.Fatalf("shown approval = %+v, want p00 with its newest title", s.Permission)
+	}
+	c.mu.Lock()
+	queued := len(c.permissionQueue)
+	fifth := c.permissionQueue[4]
+	ids := c.takePermissionsLocked()
+	empty := c.permission == nil && c.permissionQueue == nil
+	c.mu.Unlock()
+	if queued != maxPendingPermissions {
+		t.Errorf("%d approvals queued, want the bound %d", queued, maxPendingPermissions)
+	}
+	if fifth.ID != `"p05"` || fifth.Title != "queued again" {
+		t.Errorf("queued entry 5 = %+v, want p05 replaced in place", fifth)
+	}
+	if len(ids) != maxPendingPermissions+1 || ids[0] != `"p00"` || ids[1] != `"p01"` || ids[len(ids)-1] != fmt.Sprintf("%q", fmt.Sprintf("p%02d", maxPendingPermissions)) {
+		t.Errorf("taken ids: %d entries, first %v, last %v", len(ids), ids[:2], ids[len(ids)-1])
+	}
+	if !empty {
+		t.Error("taking the approvals left some behind")
 	}
 }
 

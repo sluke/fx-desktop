@@ -2,7 +2,9 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -71,11 +73,23 @@ func allowlistWorkspaceKey(workspace string) string {
 	return filepath.Clean(path)
 }
 
-func readSettingsRoot(path string) (map[string]json.RawMessage, error) {
+// readSettingsRoot reads fx's settings document. A file that does not exist
+// yet is an empty document, reported through missing: fx writes settings.json
+// when something is first changed, so its absence means "no settings", and
+// showing the page a raw "no such file" for it was wrong.
+func readSettingsRoot(path string) (root map[string]json.RawMessage, missing bool, err error) {
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read fx settings: %w", err)
+	if errors.Is(err, fs.ErrNotExist) {
+		return make(map[string]json.RawMessage), true, nil
 	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read fx settings: %w", err)
+	}
+	root, err = parseSettingsRoot(data)
+	return root, false, err
+}
+
+func parseSettingsRoot(data []byte) (map[string]json.RawMessage, error) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("parse fx settings: %w", err)
@@ -247,6 +261,15 @@ func writeSettingsRoot(path string, root map[string]json.RawMessage) error {
 		return err
 	}
 	data = append(data, '\n')
+	// A settings.json kept in a dotfiles checkout is a symbolic link. The
+	// file it names is replaced, where it lives: renaming over the link
+	// turned it into a regular file and left the linked file without the
+	// change. The lock stays beside the link, where fx looks for it.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if target, err := filepath.EvalSymlinks(path); err == nil {
+			path = target
+		}
+	}
 	mode := os.FileMode(0o600)
 	if st, err := os.Stat(path); err == nil {
 		mode = st.Mode().Perm()
@@ -292,6 +315,13 @@ func allowlistApplyAt(path, workspace, action, scope, kind, tool, pattern string
 		if category, err = allowlistCategory(kind, tool); err != nil {
 			return err
 		}
+	case chrome.AllowlistRemoveRule:
+		// A listed row names its rule exactly: kind carries the stored
+		// category and tool the stored key, with nothing trimmed or rebuilt.
+		category, key = kind, tool
+		if category == "" {
+			return fmt.Errorf("This rule cannot be identified")
+		}
 	default:
 		if category, key, err = allowlistTarget(kind, tool, pattern); err != nil {
 			return err
@@ -308,9 +338,14 @@ func allowlistApplyAt(path, workspace, action, scope, kind, tool, pattern string
 		return err
 	}
 	defer unlock()
-	root, err := readSettingsRoot(path)
+	root, missing, err := readSettingsRoot(path)
 	if err != nil {
 		return err
+	}
+	if missing && action != "add" {
+		// Nothing is stored, so there is nothing to remove, and removing
+		// must not be what creates the file.
+		return nil
 	}
 	switch action {
 	case "add":
@@ -320,7 +355,7 @@ func allowlistApplyAt(path, workspace, action, scope, kind, tool, pattern string
 			}
 			perm[category][key] = "allow"
 		})
-	case "remove":
+	case "remove", chrome.AllowlistRemoveRule:
 		err = mutatePermission(root, workspace, scope, false, func(perm map[string]map[string]string) {
 			delete(perm[category], key)
 			if len(perm[category]) == 0 {
@@ -347,7 +382,7 @@ func allowlistApplyAt(path, workspace, action, scope, kind, tool, pattern string
 }
 
 func allowlistRulesAt(path, workspace string) ([]chrome.AllowlistRule, error) {
-	root, err := readSettingsRoot(path)
+	root, _, err := readSettingsRoot(path)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +449,7 @@ func appendAllowlistRules(out []chrome.AllowlistRule, scope string, perm map[str
 				pattern = key
 			}
 			out = append(out, chrome.AllowlistRule{
-				Scope: scope, Kind: kind, Key: key, Label: label,
+				Scope: scope, Kind: kind, Category: category, Key: key, Label: label,
 				Pattern: pattern, Decision: perm[category][key],
 			})
 		}
@@ -450,7 +485,7 @@ func (c *Coordinator) runAllowlist(s *ProjectWindow, action, scope, kind, key, p
 		s.invalidate()
 		return
 	}
-	if action == "remove" || action == "reset" || action == "reset-all" {
+	if action == "remove" || action == chrome.AllowlistRemoveRule || action == "reset" || action == "reset-all" {
 		message := "Remove this persistent allow rule?"
 		if action == "reset" {
 			message = "Reset every persistent rule of this kind in the selected scope?"
