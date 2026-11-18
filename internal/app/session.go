@@ -104,6 +104,9 @@ type ProjectWindow struct {
 	// project session leaves it empty and derives its name from the path.
 	title string
 	shell chrome.ShellState
+	// historyDelete is the History deletion this window is running. It
+	// outlives the panel's own state, which is rebuilt on every open.
+	historyDelete historyDeleteGate
 
 	started time.Time
 	model   string

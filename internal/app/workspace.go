@@ -221,16 +221,20 @@ func (w *workspaceController) reviewLoading(path string) bool {
 
 // reviewVerdict compares the selected file with the newest working-tree read.
 // known is false while there is no read to compare with. listed is whether
-// the file is still a change; stale is whether what the read says about it
-// differs from what was true when its diff was asked for.
-func (w *workspaceController) reviewVerdict(path string) (known, listed, stale bool) {
+// the read names the file as a change; stale is whether what the read says
+// about it differs from what was true when its diff was asked for.
+//
+// unconfirmed separates "removed" from "not read yet": the file is absent
+// from a status list that was cut at the read budget, so the read does not
+// show it is clean. Only a complete list may clear a selection (r10 §3).
+func (w *workspaceController) reviewVerdict(path string) (known, listed, stale, unconfirmed bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.git == nil {
-		return false, false, false
+		return false, false, false, false
 	}
 	now := stampFor(w.git, path)
-	return true, now.listed, w.reviewPath == path && now != w.reviewSeen
+	return true, now.listed, w.reviewPath == path && now != w.reviewSeen, !now.listed && w.git.ListTruncated
 }
 
 // clearReview forgets the drawer's diff and retires a read still in flight.

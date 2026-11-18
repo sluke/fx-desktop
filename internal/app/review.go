@@ -27,9 +27,10 @@ func (c *Coordinator) toggleReview(s *ProjectWindow) {
 	// review instead of jumping back to the top of the list — as long as
 	// that file is still a change. One that was committed or reverted while
 	// the drawer was closed is not resumed: the drawer would open on a file
-	// that is not in its own list.
+	// that is not in its own list. Only a complete list can say that; a list
+	// cut at the read budget may simply not have reached the file.
 	if path := s.shell.ReviewPath; path != "" {
-		if known, listed, _ := s.workspace.reviewVerdict(path); known && !listed {
+		if known, listed, _, unconfirmed := s.workspace.reviewVerdict(path); known && !listed && !unconfirmed {
 			s.shell.ReviewPath = ""
 		}
 	}
@@ -50,16 +51,22 @@ func (c *Coordinator) toggleReview(s *ProjectWindow) {
 // It runs on the app loop. A file that is no longer a change loses its diff.
 // One that is still a change is read again only when the read says something
 // new about it, so a quiet tree costs no git call per refresh.
+//
+// A file missing from a list that was cut at the read budget is neither: the
+// selection stays, and its diff is read once more — a single-path read with
+// its own budget — because that is the read that can still answer for it.
+// The stamp taken for that read is "not listed", so later partial lists that
+// still omit the file cost nothing further.
 func (s *ProjectWindow) reconcileReview() {
 	path := s.shell.ReviewPath
 	if path == "" {
 		return
 	}
-	known, listed, stale := s.workspace.reviewVerdict(path)
+	known, listed, stale, unconfirmed := s.workspace.reviewVerdict(path)
 	switch {
 	case !known:
 		return
-	case !listed:
+	case !listed && !unconfirmed:
 		s.shell.ReviewPath = ""
 		s.workspace.clearReview()
 		s.invalidate()
@@ -139,8 +146,12 @@ func (c *Coordinator) sessionReview(s *ProjectWindow) chrome.ReviewData {
 	if git != nil {
 		d.Branch = git.Branch
 		d.Changes = git.Changes
-		d.ListTruncated = git.ListTruncated
+		d.ListTruncated = git.incomplete()
 		d.CountsUnknown = git.CountsUnknown
+		// The selected file is on screen but the list that would confirm it
+		// was cut before reaching it: say so rather than show its diff as
+		// settled fact.
+		d.SelectedUnconfirmed = d.Selected != "" && git.ListTruncated && !stampFor(git, d.Selected).listed
 	}
 	return d
 }

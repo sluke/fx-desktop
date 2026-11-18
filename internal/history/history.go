@@ -160,6 +160,11 @@ type Paging struct {
 	Seen, Cursors                map[string]bool
 	Scanned                      int
 	Generation                   uint64
+	// Revision counts publications of Entries: it moves whenever Apply or
+	// Reset may have changed which rows there are or their order. A view
+	// that derives something from Entries keys its cache on it, so a
+	// replacement of the same length is still seen as a change.
+	Revision uint64
 }
 
 // HasMore reports whether another batch could produce rows.
@@ -176,6 +181,7 @@ func (p *Paging) Apply(generation uint64, result Result) bool {
 	}
 	p.Busy = false
 	p.Loaded = true
+	p.Revision++
 	p.Entries = append(p.Entries, result.Entries...)
 	sort.SliceStable(p.Entries, func(i, j int) bool { return p.Entries[i].UpdatedAtMS > p.Entries[j].UpdatedAtMS })
 	p.Pending, p.Seen, p.Cursors = result.Pending, result.Seen, result.Cursors
@@ -193,10 +199,12 @@ func (p *Paging) Request() Request {
 	}
 }
 
-// Reset forgets the walk but keeps the applied conditions and generation.
+// Reset forgets the walk but keeps the applied conditions and generation. The
+// revision moves on rather than starting over, so the emptied list is never
+// mistaken for an earlier one.
 func (p *Paging) Reset(query string, all bool) {
-	generation := p.Generation
-	*p = Paging{All: all, Query: query, Generation: generation}
+	generation, revision := p.Generation, p.Revision
+	*p = Paging{All: all, Query: query, Generation: generation, Revision: revision + 1}
 }
 
 // Deletable drops conversations that are open in a window. It also drops an

@@ -494,6 +494,10 @@ func Frame(c *ui.Context, h Host) {
 	}
 	if sh.History.Open && h.Actions.OpenHistory != nil {
 		historyDialog(c, &sh.History, h.History, p)
+	} else {
+		// Closed by its button, the backdrop or Escape alike: the panel
+		// keeps no laid-out rows while it is not showing.
+		sh.History.releaseRows()
 	}
 }
 

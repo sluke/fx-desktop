@@ -24,6 +24,8 @@ type HistoryState struct {
 	ResumeProblem  string
 	List           ui.ListState
 	history.Paging
+	// rowCache is the list's rows as last laid out; see historyRowCache.
+	rowCache historyRowCache
 }
 
 type HistoryHost struct {
@@ -42,41 +44,130 @@ type HistoryHost struct {
 	Now  time.Time
 }
 
-func historyDate(ms int64, now time.Time) string {
-	if ms <= 0 {
-		return "Unknown date"
-	}
-	t := time.UnixMilli(ms).In(now.Location())
+// historyDay is one local day's group boundaries, in Unix milliseconds. It is
+// computed once per build of the rows rather than once per row: every row is
+// compared against the same three instants.
+type historyDay struct {
+	today, yesterday, week int64
+}
+
+func historyDayOf(now time.Time) historyDay {
 	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return historyDay{
+		today:     start.UnixMilli(),
+		yesterday: start.AddDate(0, 0, -1).UnixMilli(),
+		week:      start.AddDate(0, 0, -7).UnixMilli(),
+	}
+}
+
+func (d historyDay) group(ms int64) string {
 	switch {
-	case !t.Before(start):
+	case ms <= 0:
+		return "Unknown date"
+	case ms >= d.today:
 		return "Today"
-	case !t.Before(start.AddDate(0, 0, -1)):
+	case ms >= d.yesterday:
 		return "Yesterday"
-	case !t.Before(start.AddDate(0, 0, -7)):
+	case ms >= d.week:
 		return "Previous 7 days"
 	default:
 		return "Older"
 	}
 }
 
-type historyRow struct {
-	key, group string
-	index      int
+func historyDate(ms int64, now time.Time) string {
+	return historyDayOf(now).group(ms)
 }
 
+// historyRow is one line of the list: a date heading when group is set,
+// otherwise the session at index.
+type historyRow struct {
+	group string
+	index int
+}
+
+// historyGroupKey and historySessionKey are the list's stable item keys. They
+// are distinct types so a session whose ID happens to read like a heading
+// cannot collide with one, and so no key string is built per row.
+type (
+	historyGroupKey   string
+	historySessionKey string
+)
+
+func historyRowKey(entries []HistorySession, r historyRow) any {
+	if r.group != "" {
+		return historyGroupKey(r.group)
+	}
+	return historySessionKey(entries[r.index].ID)
+}
+
+// historyRows lays entries out under their date headings. It is the cold
+// build: one pass and one slice, whatever the number of entries.
 func historyRows(entries []HistorySession, now time.Time) []historyRow {
-	var rows []historyRow
+	if len(entries) == 0 {
+		return nil
+	}
+	day := historyDayOf(now)
+	// Sorted entries cross each of the five headings at most once.
+	rows := make([]historyRow, 0, len(entries)+5)
 	last := ""
-	for i, e := range entries {
-		group := historyDate(e.UpdatedAtMS, now)
+	for i := range entries {
+		group := day.group(entries[i].UpdatedAtMS)
 		if group != last {
-			rows = append(rows, historyRow{key: "group:" + group, group: group})
+			rows = append(rows, historyRow{group: group})
 			last = group
 		}
-		rows = append(rows, historyRow{key: "session:" + e.ID, index: i})
+		rows = append(rows, historyRow{index: i})
 	}
 	return rows
+}
+
+// historyRowCache keeps the laid-out rows between frames. The panel is drawn
+// every frame, but its rows change only when the published entries or the
+// local day do; rebuilding them each time cost an allocation per loaded
+// session per frame (r10 §4).
+//
+// The key is the paging revision — which moves on every Apply and Reset, so a
+// same-length replacement is seen — plus the slice's own identity, which
+// covers a caller that assigns Entries directly, plus the day's boundaries
+// and location, which cover midnight and a time-zone change. Each row's
+// relative time is not cached: it is rendered from the clock when drawn.
+type historyRowCache struct {
+	rows     []historyRow
+	valid    bool
+	revision uint64
+	first    *HistorySession
+	count    int
+	day      historyDay
+	zone     *time.Location
+	// builds counts cold builds, so a test can prove a quiet panel does not
+	// rebuild.
+	builds int
+}
+
+// rowsFor returns the rows for the state's entries at now, building them only
+// when something they depend on changed.
+func (state *HistoryState) rowsFor(now time.Time) []historyRow {
+	cache := &state.rowCache
+	var first *HistorySession
+	if len(state.Entries) > 0 {
+		first = &state.Entries[0]
+	}
+	day := historyDayOf(now)
+	if cache.valid && cache.revision == state.Revision && cache.first == first &&
+		cache.count == len(state.Entries) && cache.day == day && cache.zone == now.Location() {
+		return cache.rows
+	}
+	cache.rows = historyRows(state.Entries, now)
+	cache.valid, cache.revision, cache.first, cache.count = true, state.Revision, first, len(state.Entries)
+	cache.day, cache.zone = day, now.Location()
+	cache.builds++
+	return cache.rows
+}
+
+// releaseRows drops the cached rows. A closed panel keeps nothing derived.
+func (state *HistoryState) releaseRows() {
+	state.rowCache = historyRowCache{builds: state.rowCache.builds}
 }
 
 func historyDeleteTip(live bool) string {
@@ -97,7 +188,7 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 	if now.IsZero() {
 		now = time.Now()
 	}
-	rows := historyRows(state.Entries, now)
+	rows := state.rowsFor(now)
 	sheet(c, &state.Open, p, "Session history", func() {
 		ui.Column(c).FillWidth().Children(func() {
 			ui.Row(c).FillWidth().Padding(Space5, Space7).AlignItems(ui.Center).Children(func() {
@@ -143,7 +234,7 @@ func historyDialog(c *ui.Context, state *HistoryState, h HistoryHost, p Palette)
 			})
 			ui.Box(c).Height(1).FillWidth().Background(p.Hairline)
 			if len(rows) > 0 {
-				ui.List(c, &state.List, len(rows)).ItemKey(func(i int) any { return rows[i].key }).
+				ui.List(c, &state.List, len(rows)).ItemKey(func(i int) any { return historyRowKey(state.Entries, rows[i]) }).
 					Height(min(float32(400), max(float32(100), height-260))).FillWidth().Label("History results").Rows(func(row ui.ListRow) {
 					c := row.Context
 					r := rows[row.Index]

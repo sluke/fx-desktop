@@ -25,6 +25,10 @@ type ReviewData struct {
 	Selected string
 	Diff     []DiffLine
 	Omitted  int
+	// SelectedUnconfirmed means the selected file is missing from a change
+	// list that was cut at the read budget: it may still be a change, so the
+	// selection is kept and labelled instead of cleared.
+	SelectedUnconfirmed bool
 	// Busy says a diff read is in flight, and Note explains an empty diff
 	// that is not busy: a binary file, or a path git did not answer for.
 	Busy bool
@@ -180,6 +184,10 @@ func inkFor(p Palette, strong bool) ui.Color {
 	return p.Ink
 }
 
+// reviewUnconfirmedNote labels a selected file the cut-short change list did
+// not reach.
+const reviewUnconfirmedNote = "Not in the incomplete list · status unconfirmed"
+
 // reviewDiff is the selected file's whole change. It is the reason the drawer
 // exists, so it takes the space the file list does not.
 func reviewDiff(c *ui.Context, h Host, p Palette) {
@@ -200,6 +208,9 @@ func reviewDiff(c *ui.Context, h Host, p Palette) {
 	}
 	ui.Column(c).FillWidth().Shrink(0).Padding(Space4, panelPad, Space2, panelPad).Children(func() {
 		ui.Text(c, d.Selected).Font(MonoFont).FontSize(TypeLabel).TextColor(p.Accent).SingleLine()
+		if d.SelectedUnconfirmed {
+			ui.Text(c, reviewUnconfirmedNote).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
+		}
 	})
 	ui.Scroll(c).Grow(1).MinHeight(0).FillWidth().Children(func() {
 		ui.Column(c).FillWidth().Padding(Space0, Space0, Space3, Space0).Children(func() {

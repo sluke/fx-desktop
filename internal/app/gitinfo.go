@@ -24,10 +24,22 @@ type GitInfo struct {
 	// commit or a review, so the rail does not raise it again.
 	Modified   map[string]time.Time
 	LastCommit time.Time
-	// ListTruncated means status or numstat hit the read budget. CountsUnknown
-	// means line counts could not be read and must not be shown as zero.
-	ListTruncated bool
-	CountsUnknown bool
+	// ListTruncated means `git status` hit the read budget: Changes is a
+	// prefix of the tree's changes, so a path that is absent from it has not
+	// been shown to be clean. CountsTruncated means only the numstat read was
+	// cut: every changed path is listed, but some line counts are missing.
+	// The two are kept apart because only the first makes absence uncertain
+	// (r10 §3). CountsUnknown means line counts could not be read at all and
+	// must not be shown as zero.
+	ListTruncated   bool
+	CountsTruncated bool
+	CountsUnknown   bool
+}
+
+// incomplete reports whether either read was cut short — what the drawer's
+// "list incomplete" caption says.
+func (g *GitInfo) incomplete() bool {
+	return g != nil && (g.ListTruncated || g.CountsTruncated)
 }
 
 // unreviewed reports whether any change is newer than the watermark — the
@@ -128,6 +140,12 @@ func gitDiffBase(ctx context.Context, root string) (string, error) {
 // dir is not inside a work tree — a fact about the workspace, not a failure —
 // and the underlying failure when git exists but the tree could not be read.
 func gitInfo(ctx context.Context, dir string) (*GitInfo, error) {
+	return gitInfoWithin(ctx, dir, maxGitDiffBytes, maxGitDiffBytes)
+}
+
+// gitInfoWithin is gitInfo with the two read budgets named, so a test can cut
+// the status list and the line counts independently.
+func gitInfoWithin(ctx context.Context, dir string, statusBudget, countsBudget int) (*GitInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -144,7 +162,7 @@ func gitInfo(ctx context.Context, dir string) (*GitInfo, error) {
 	// separates the two paths of a rename with its own NUL. Quoted output
 	// would name a file that does not exist (" leading", "quote\"x") and a
 	// rename would read as one string with " -> " in the middle.
-	status := gitCommandOutput(ctx, root, maxGitDiffBytes, "status", "--porcelain=v1", "-z", "-b", "--untracked-files=all")
+	status := gitCommandOutput(ctx, root, statusBudget, "status", "--porcelain=v1", "-z", "-b", "--untracked-files=all")
 	if status.err != nil {
 		if !inGitTree(dir) {
 			return nil, errNoRepo
@@ -152,8 +170,9 @@ func gitInfo(ctx context.Context, dir string) (*GitInfo, error) {
 		return nil, status.err
 	}
 	out := completeNULRecords(status.data, status.truncated)
-	adds, dels, countsCut, countsErr := gitNumstat(ctx, root)
-	info.ListTruncated = status.truncated || countsCut
+	adds, dels, countsCut, countsErr := gitNumstat(ctx, root, countsBudget)
+	info.ListTruncated = status.truncated
+	info.CountsTruncated = countsCut
 	info.CountsUnknown = countsErr != nil
 	if countsErr != nil {
 		adds, dels = map[string]int{}, map[string]int{}
@@ -358,7 +377,7 @@ func gitMark(xy string) string {
 // gitNumstat maps path to added and deleted line counts from HEAD (or the
 // empty tree) through the working tree — the same range review shows.
 // Untracked files have no diff and so no counts.
-func gitNumstat(ctx context.Context, root string) (map[string]int, map[string]int, bool, error) {
+func gitNumstat(ctx context.Context, root string, budget int) (map[string]int, map[string]int, bool, error) {
 	adds := map[string]int{}
 	dels := map[string]int{}
 	base, baseErr := gitDiffBase(ctx, root)
@@ -367,7 +386,7 @@ func gitNumstat(ctx context.Context, root string) (map[string]int, map[string]in
 	}
 	// -z keeps a path with spaces, tabs or quotes as the file's own name. Its
 	// records are "adds<TAB>dels<TAB>path", NUL-terminated.
-	res := gitCommandOutput(ctx, root, maxGitDiffBytes, "diff", "--numstat", "-z", base)
+	res := gitCommandOutput(ctx, root, budget, "diff", "--numstat", "-z", base)
 	if res.err != nil && !res.truncated {
 		var exitErr *exec.ExitError
 		if !errors.As(res.err, &exitErr) || exitErr.ExitCode() != 1 || len(res.data) == 0 {

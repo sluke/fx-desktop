@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"fx-desktop/internal/app/chrome"
 )
 
 func TestAllowlistMutatesLocalAndUserRulesWithoutLosingSettings(t *testing.T) {
@@ -148,4 +150,149 @@ func TestAllowlistRejectsMalformedRules(t *testing.T) {
 			t.Fatalf("accepted malformed rule: %+v", tc)
 		}
 	}
+}
+
+// A row's Remove carries the rule exactly as fx stores it, so it removes that
+// rule and nothing that merely resembles it: a longer command with the same
+// prefix, the same key in the other scope, and the same key under another
+// category all stay (r10 §1).
+func TestAllowlistRowRemoveDeletesExactlyTheListedRule(t *testing.T) {
+	dir := t.TempDir()
+	settings := filepath.Join(dir, "settings.json")
+	workspace := filepath.Join(dir, "workspace")
+	for _, step := range []struct{ scope, kind, pattern string }{
+		{"local", "command", "git status"},
+		{"local", "command", "git status --short"},
+		{"user", "command", "git status"},
+		{"local", "url", "git status"},
+	} {
+		if err := allowlistApplyAt(settings, workspace, "add", step.scope, step.kind, "", step.pattern); err != nil {
+			t.Fatalf("%+v: %v", step, err)
+		}
+	}
+	rules, err := allowlistRulesAt(settings, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target *chrome.AllowlistRule
+	for i := range rules {
+		if r := rules[i]; r.Scope == "local" && r.Kind == "command" && r.Pattern == "git status" {
+			target = &rules[i]
+		}
+	}
+	if target == nil {
+		t.Fatalf("the rule to remove is not listed: %+v", rules)
+	}
+	action, scope, category, key, pattern := target.RemoveRequest()
+	if action != chrome.AllowlistRemoveRule || category == "" || key != "git status" || pattern != "" {
+		t.Fatalf("RemoveRequest = %q,%q,%q,%q,%q", action, scope, category, key, pattern)
+	}
+	if err := allowlistApplyAt(settings, workspace, action, scope, category, key, pattern); err != nil {
+		t.Fatal(err)
+	}
+	after, err := allowlistRulesAt(settings, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(rules)-1 {
+		t.Fatalf("removed %d rules, want 1: %+v", len(rules)-len(after), after)
+	}
+	left := map[string]bool{}
+	for _, r := range after {
+		left[r.Scope+"/"+r.Kind+"/"+r.Pattern] = true
+	}
+	if left["local/command/git status"] {
+		t.Fatal("the listed rule is still present")
+	}
+	for _, want := range []string{"local/command/git status --short", "user/command/git status", "local/url/git status"} {
+		if !left[want] {
+			t.Fatalf("a neighbouring rule was removed: missing %q in %+v", want, after)
+		}
+	}
+	// A row whose category is unknown cannot be named, and says so instead of
+	// guessing one.
+	if err := allowlistApplyAt(settings, workspace, chrome.AllowlistRemoveRule, "local", "", "git status --short", ""); err == nil {
+		t.Fatal("a rule with no category was accepted")
+	}
+}
+
+// A settings.json that links to a file that does not exist is the user's
+// link, not an empty document: adding a rule reports it and changes nothing,
+// instead of replacing the link with a regular file (r10). The neighbouring
+// cases keep working: a path with nothing at it is created, a link that
+// resolves is written through, the file's own mode survives, and the lock
+// stays beside the path fx names.
+func TestAllowlistKeepsADanglingSettingsLink(t *testing.T) {
+	workspace := t.TempDir()
+	add := func(path string) error {
+		return allowlistApplyAt(path, workspace, "add", "user", "command", "", "fixture")
+	}
+
+	t.Run("dangling link is reported and kept", func(t *testing.T) {
+		dir := t.TempDir()
+		link := filepath.Join(dir, "settings.json")
+		if err := os.Symlink("future.json", link); err != nil {
+			t.Skip("symbolic links are not available:", err)
+		}
+		err := add(link)
+		if err == nil || !strings.Contains(err.Error(), "future.json") {
+			t.Fatalf("add over a dangling link = %v, want an error naming the target", err)
+		}
+		if target, lerr := os.Readlink(link); lerr != nil || target != "future.json" {
+			t.Fatalf("the link was changed: %q, %v", target, lerr)
+		}
+		if _, serr := os.Stat(filepath.Join(dir, "future.json")); !os.IsNotExist(serr) {
+			t.Fatalf("the missing target was created: %v", serr)
+		}
+		entries, _ := os.ReadDir(dir)
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".settings-") {
+				t.Fatalf("a temporary file was left behind: %s", entry.Name())
+			}
+		}
+		// Removing from it is still "nothing to remove", and still touches
+		// nothing; listing it is still an empty list.
+		if err := allowlistApplyAt(link, workspace, "remove", "user", "command", "", "fixture"); err != nil {
+			t.Fatalf("remove on a dangling link = %v", err)
+		}
+		if rules, err := allowlistRulesAt(link, workspace); err != nil || len(rules) != 0 {
+			t.Fatalf("rules on a dangling link = %v, %v", rules, err)
+		}
+		if target, _ := os.Readlink(link); target != "future.json" {
+			t.Fatal("a later call replaced the link")
+		}
+		// Once the target exists the same request succeeds through the link.
+		if err := os.WriteFile(filepath.Join(dir, "future.json"), []byte("{}\n"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := add(link); err != nil {
+			t.Fatal(err)
+		}
+		if target, _ := os.Readlink(link); target != "future.json" {
+			t.Fatal("writing through the link replaced it")
+		}
+		if st, err := os.Stat(filepath.Join(dir, "future.json")); err != nil || st.Mode().Perm() != 0o640 {
+			t.Fatalf("the linked file's mode changed: %v, %v", st, err)
+		}
+		if rules, err := allowlistRulesAt(link, workspace); err != nil || len(rules) != 1 {
+			t.Fatalf("rules through the link = %v, %v", rules, err)
+		}
+		if _, err := os.Stat(settingsLockPath(link)); err != nil {
+			t.Fatalf("the lock is not beside the link: %v", err)
+		}
+	})
+
+	t.Run("a path with nothing at it is still created", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "settings.json")
+		if err := add(path); err != nil {
+			t.Fatal(err)
+		}
+		st, err := os.Lstat(path)
+		if err != nil || !st.Mode().IsRegular() || st.Mode().Perm() != 0o600 {
+			t.Fatalf("new settings file = %v, %v", st, err)
+		}
+		if rules, err := allowlistRulesAt(path, workspace); err != nil || len(rules) != 1 {
+			t.Fatalf("rules = %v, %v", rules, err)
+		}
+	})
 }

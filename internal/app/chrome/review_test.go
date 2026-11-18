@@ -514,3 +514,22 @@ func TestReviewCommitRequiresAMessage(t *testing.T) {
 		t.Fatalf("a message should dispatch exactly one commit, got %d", commits)
 	}
 }
+
+// A selected file the cut-short list did not reach stays on screen, labelled,
+// with its diff; a confirmed selection carries no such label (r10 §3).
+func TestReviewDrawerLabelsAnUnconfirmedSelection(t *testing.T) {
+	d := ReviewData{
+		Open: true, Workspace: WorkspaceRepo, Branch: "main", ListTruncated: true,
+		Changes:  []Change{{Path: "earlier.txt", Kind: "M", Adds: 1}},
+		Selected: "later.txt", SelectedUnconfirmed: true,
+		Diff: []DiffLine{{Kind: DiffAdd, Text: "+kept"}},
+	}
+	h, sh := reviewTestHost(d)
+	ts := reviewTester(&h, sh)
+	mustHave(t, ts, "later.txt", reviewUnconfirmedNote, "+kept", "list incomplete")
+
+	h.Review.SelectedUnconfirmed = false
+	ts.Frame()
+	mustNotHave(t, ts, reviewUnconfirmedNote)
+	mustHave(t, ts, "later.txt", "+kept")
+}

@@ -88,6 +88,10 @@ type Coordinator struct {
 	// production two seconds. Zero means the default.
 	quitBudget time.Duration
 
+	// historySeams replaces History deletion's I/O and dialogs in tests. The
+	// zero value is production behaviour.
+	historySeams historyDeleteSeams
+
 	// confirmLink asks whether a folder named by a link may be opened. Nil
 	// means the native dialog; a test supplies its own answer.
 	confirmLink func(path string) bool

@@ -107,8 +107,187 @@ func (c *Coordinator) openHistory(s *ProjectWindow) {
 	s.shell.Tools.Open = false
 	state := &s.shell.History
 	generation := state.Generation + 1
-	*state = chrome.HistoryState{Open: true, Paging: history.Paging{Generation: generation}}
+	// The panel's state is rebuilt on every open, but a deletion belongs to
+	// the window, not to one showing of the panel: closing and reopening while
+	// one runs must not re-enable the delete controls (r10 §2).
+	*state = chrome.HistoryState{Open: true, Deleting: s.historyDelete.busy(), Paging: history.Paging{Generation: generation}}
 	c.loadHistory(s, true)
+}
+
+// historyDeleteGate is the window's one History deletion — a single delete or
+// a clear-all. It lives on the window rather than in chrome.HistoryState
+// because the panel's state is replaced each time the panel opens, while the
+// work it started keeps running. App loop only.
+//
+// active names the operation in flight; zero means none. A completion callback
+// ends only the operation it belongs to, so a callback that outlived its own
+// operation cannot unlock a newer one.
+type historyDeleteGate struct {
+	seq, active uint64
+}
+
+func (g *historyDeleteGate) busy() bool { return g.active != 0 }
+
+// beginHistoryDelete admits one deletion for this window, or refuses while
+// another is in flight. The returned operation is what must be handed back.
+func (s *ProjectWindow) beginHistoryDelete() (op uint64, ok bool) {
+	gate := &s.historyDelete
+	if gate.busy() {
+		return 0, false
+	}
+	gate.seq++
+	gate.active = gate.seq
+	s.shell.History.Deleting = true
+	return gate.active, true
+}
+
+// endHistoryDelete finishes op. It reports false, and changes nothing, when op
+// is not the operation in flight.
+func (s *ProjectWindow) endHistoryDelete(op uint64) bool {
+	gate := &s.historyDelete
+	if op == 0 || gate.active != op {
+		return false
+	}
+	gate.active = 0
+	s.shell.History.Deleting = false
+	return true
+}
+
+// historyDeleteSeams replaces the deletion's I/O and native dialogs. Every nil
+// field means the real thing; a test supplies fakes it can hold at each stage.
+type historyDeleteSeams struct {
+	list   func(ctx context.Context, executable, dir string, all bool) ([]FxSession, error)
+	remove func(ids []string) ([]string, error)
+	alert  func(title, message string)
+	inform func(s *ProjectWindow, title, message, detail string)
+}
+
+func (c *Coordinator) listHistorySessions(ctx context.Context, executable, dir string, all bool) ([]FxSession, error) {
+	if c.historySeams.list != nil {
+		return c.historySeams.list(ctx, executable, dir, all)
+	}
+	return readAllHistorySessions(ctx, executable, dir, all)
+}
+
+func (c *Coordinator) removeHistorySessions(ids []string) ([]string, error) {
+	if c.historySeams.remove != nil {
+		return c.historySeams.remove(ids)
+	}
+	return c.deleteHistorySessions(ids)
+}
+
+func (c *Coordinator) historyAlert(title, message string) {
+	if c.historySeams.alert != nil {
+		c.historySeams.alert(title, message)
+		return
+	}
+	mygo.Dialog.Error(title, message)
+}
+
+func (c *Coordinator) historyInform(s *ProjectWindow, title, message, detail string) {
+	if c.historySeams.inform != nil {
+		c.historySeams.inform(s, title, message, detail)
+		return
+	}
+	_, _ = mygo.Dialog.Message(mygo.MessageOptions{
+		Parent: s.winSnapshot(), Type: mygo.MessageInfo, Title: title, Message: message, Detail: detail,
+	})
+}
+
+const historyOpenElsewhere = "This conversation is open in a window. Close it before deleting it."
+
+// startHistoryDelete runs one confirmed deletion. It runs on the app loop and
+// reports whether the work started. The window's gate is taken first, so a
+// refused second deletion never touches the registry; the registry claim then
+// decides between this deletion and a window that resumed the conversation
+// while the dialog was up (T9).
+func (c *Coordinator) startHistoryDelete(s *ProjectWindow, id string) bool {
+	op, ok := s.beginHistoryDelete()
+	if !ok {
+		return false
+	}
+	finish, claimed := c.sessionUse.beginDelete(id)
+	if !claimed {
+		s.endHistoryDelete(op)
+		c.historyAlert("Delete saved session", historyOpenElsewhere)
+		return false
+	}
+	s.invalidate()
+	go func() {
+		_, delErr := c.removeHistorySessions([]string{id})
+		// Release on every path, and before the callback: a failed deletion
+		// must not leave the ID unusable, and neither must a window that
+		// closed while the files were being removed (T9).
+		finish()
+		s.dispatch(func() { c.finishHistoryDelete(s, op, "Delete saved session", delErr) })
+	}()
+	return true
+}
+
+// startHistoryClear runs one confirmed clear-all through the same gate. The
+// list is re-read from fx rather than taken from the UI, so unloaded pages and
+// search-hidden sessions are included.
+func (c *Coordinator) startHistoryClear(s *ProjectWindow, all bool) bool {
+	op, ok := s.beginHistoryDelete()
+	if !ok {
+		return false
+	}
+	s.invalidate()
+	executable, dir := c.fxPathSnapshot(), s.project
+	go func() {
+		ctx, cancel := context.WithTimeout(s.lifetime(), fxTimeout)
+		sessions, listErr := c.listHistorySessions(ctx, executable, dir, all)
+		cancel()
+		s.dispatch(func() {
+			if s.lifetime().Err() != nil {
+				// The window closed while the list was being read: nothing
+				// was claimed, and nothing is deleted on its behalf.
+				s.endHistoryDelete(op)
+				return
+			}
+			if listErr != nil {
+				s.endHistoryDelete(op)
+				s.invalidate()
+				c.historyAlert("Clear session history", listErr.Error())
+				return
+			}
+			ids := deletableHistoryIDs(sessions, c.liveSessionIDs())
+			reserved, releases := c.reserveDeletes(ids)
+			if len(reserved) == 0 {
+				s.endHistoryDelete(op)
+				s.invalidate()
+				c.historyInform(s, "Clear session history", "No sessions were deleted",
+					"No closed saved sessions were found. Conversations open in a window are kept.")
+				return
+			}
+			go func() {
+				_, delErr := c.removeHistorySessions(reserved)
+				// Every claimed ID is released, whatever happened on disk: a
+				// partial failure must not leave the survivors undeletable
+				// (T9).
+				for _, release := range releases {
+					release()
+				}
+				s.dispatch(func() { c.finishHistoryDelete(s, op, "Clear session history", delErr) })
+			}()
+		})
+	}()
+	return true
+}
+
+// finishHistoryDelete is the one way a deletion that reached the disk ends. It
+// unlocks the window only for its own operation, then refreshes what the
+// deletion may have changed.
+func (c *Coordinator) finishHistoryDelete(s *ProjectWindow, op uint64, title string, err error) {
+	if !s.endHistoryDelete(op) {
+		return
+	}
+	if err != nil {
+		c.historyAlert(title, err.Error())
+	}
+	c.refreshSavedLists()
+	c.loadHistory(s, true)
+	s.invalidate()
 }
 
 func (c *Coordinator) sessionHistory(s *ProjectWindow) chrome.HistoryHost {
@@ -179,7 +358,7 @@ func (c *Coordinator) deleteHistorySession(s *ProjectWindow, id, title string) {
 		// This check is only the early answer — the claim below is the one
 		// that decides.
 		if c.sessionUse.inUse(id) {
-			mygo.Dialog.Error("Delete saved session", "This conversation is open in a window. Close it before deleting it.")
+			mygo.Dialog.Error("Delete saved session", historyOpenElsewhere)
 			return
 		}
 		name := historySessionName(title, id)
@@ -196,37 +375,7 @@ func (c *Coordinator) deleteHistorySession(s *ProjectWindow, id, title string) {
 		if err != nil || result.Button != 1 {
 			return
 		}
-		// The user confirmed; now take the claim. Between the dialog and here
-		// another window may have resumed this conversation — the claim is
-		// what makes "one of the two" true instead of "both, in sequence"
-		// (T9).
-		finish, claimed := c.sessionUse.beginDelete(id)
-		if !claimed {
-			mygo.Dialog.Error("Delete saved session", "This conversation is open in a window. Close it before deleting it.")
-			return
-		}
-		state := &s.shell.History
-		if state.Deleting {
-			finish()
-			return
-		}
-		state.Deleting = true
-		s.invalidate()
-		go func() {
-			_, delErr := c.deleteHistorySessions([]string{id})
-			// Release on every path: a failed deletion must not leave the
-			// ID unusable (T9).
-			finish()
-			s.dispatch(func() {
-				state := &s.shell.History
-				state.Deleting = false
-				if delErr != nil {
-					mygo.Dialog.Error("Delete saved session", delErr.Error())
-				}
-				c.refreshSavedLists()
-				c.loadHistory(s, true)
-			})
-		}()
+		c.startHistoryDelete(s, id)
 	})
 }
 
@@ -258,59 +407,7 @@ func (c *Coordinator) clearHistory(s *ProjectWindow, all bool) {
 		if err != nil || result.Button != 1 {
 			return
 		}
-		state := &s.shell.History
-		if state.Deleting {
-			return
-		}
-		state.Deleting = true
-		s.invalidate()
-		executable, dir := c.fxPathSnapshot(), s.project
-		go func() {
-			ctx, cancel := context.WithTimeout(s.lifetime(), fxTimeout)
-			defer cancel()
-			sessions, listErr := readAllHistorySessions(ctx, executable, dir, all)
-			s.dispatch(func() {
-				state := &s.shell.History
-				if listErr != nil {
-					state.Deleting = false
-					mygo.Dialog.Error("Clear session history", listErr.Error())
-					s.invalidate()
-					return
-				}
-				ids := deletableHistoryIDs(sessions, c.liveSessionIDs())
-				reserved, releases := c.reserveDeletes(ids)
-				if len(reserved) == 0 {
-					state.Deleting = false
-					s.invalidate()
-					_, _ = mygo.Dialog.Message(mygo.MessageOptions{
-						Parent:  w,
-						Type:    mygo.MessageInfo,
-						Title:   "Clear session history",
-						Message: "No sessions were deleted",
-						Detail:  "No closed saved sessions were found. Conversations open in a window are kept.",
-					})
-					return
-				}
-				go func() {
-					_, delErr := c.deleteHistorySessions(reserved)
-					// Every claimed ID is released, whatever happened on
-					// disk: a partial failure must not leave the survivors
-					// undeletable (T9).
-					for _, release := range releases {
-						release()
-					}
-					s.dispatch(func() {
-						state := &s.shell.History
-						state.Deleting = false
-						if delErr != nil {
-							mygo.Dialog.Error("Clear session history", delErr.Error())
-						}
-						c.refreshSavedLists()
-						c.loadHistory(s, true)
-					})
-				}()
-			})
-		}()
+		c.startHistoryClear(s, all)
 	})
 }
 

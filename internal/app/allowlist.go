@@ -89,6 +89,25 @@ func readSettingsRoot(path string) (root map[string]json.RawMessage, missing boo
 	return root, false, err
 }
 
+// settingsLinkError is the answer for a settings.json that is a symbolic link
+// whose target cannot be read. "No such file" has two meanings here and only
+// one of them is an empty document: a path with nothing at it may be created,
+// a link to a missing file belongs to the user and is not replaced.
+func settingsLinkError(path string) error {
+	target, err := os.Readlink(path)
+	if err != nil || target == "" {
+		return fmt.Errorf("fx settings is a link that cannot be followed. Fix or remove the link, then try again")
+	}
+	return fmt.Errorf("fx settings is a link to %q, which does not exist. Create that file or remove the link, then try again", target)
+}
+
+// settingsIsLink reports whether path itself is a symbolic link, whatever it
+// points at.
+func settingsIsLink(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink != 0
+}
+
 func parseSettingsRoot(data []byte) (map[string]json.RawMessage, error) {
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(data, &root); err != nil {
@@ -265,10 +284,16 @@ func writeSettingsRoot(path string, root map[string]json.RawMessage) error {
 	// file it names is replaced, where it lives: renaming over the link
 	// turned it into a regular file and left the linked file without the
 	// change. The lock stays beside the link, where fx looks for it.
+	//
+	// A link whose target cannot be resolved is left alone and reported:
+	// renaming over it would silently replace the user's link with a regular
+	// file, which is the same loss by another route (r10).
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		if target, err := filepath.EvalSymlinks(path); err == nil {
-			path = target
+		target, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return settingsLinkError(path)
 		}
+		path = target
 	}
 	mode := os.FileMode(0o600)
 	if st, err := os.Stat(path); err == nil {
@@ -346,6 +371,12 @@ func allowlistApplyAt(path, workspace, action, scope, kind, tool, pattern string
 		// Nothing is stored, so there is nothing to remove, and removing
 		// must not be what creates the file.
 		return nil
+	}
+	if missing && settingsIsLink(path) {
+		// The document is missing because the link's target is, not because
+		// nothing was ever written. Say so before building anything, and
+		// leave the link exactly as it is.
+		return settingsLinkError(path)
 	}
 	switch action {
 	case "add":

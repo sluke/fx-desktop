@@ -79,7 +79,7 @@ func TestWorkspaceToolsNewPagesRenderAndDispatch(t *testing.T) {
 		Models:     []ModelInfo{{ID: "provider/model", Source: "gateway"}},
 		Skills:     []SkillInfo{{Name: "alpha", Description: "Alpha skill", Source: "workspace .fx/skills", Path: "/p/.fx/skills/alpha"}},
 		AllowScope: "local", AllowKind: "command", AllowPattern: "git status",
-		AllowRules: []AllowlistRule{{Scope: "local", Kind: "command", Key: "git status", Label: "Command", Pattern: "git status"}},
+		AllowRules: []AllowlistRule{{Scope: "local", Kind: "command", Category: "bash", Key: "git status", Label: "Command", Pattern: "git status"}},
 	}
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 720, 560)
 	ts.Frame()
@@ -114,11 +114,21 @@ func TestWorkspaceToolsNewPagesRenderAndDispatch(t *testing.T) {
 	if allowAction != "add" || allowScope != "local" || allowKind != "command" || allowPattern != "git status" {
 		t.Fatalf("allow add=%q,%q,%q,%q", allowAction, allowScope, allowKind, allowPattern)
 	}
+	// The form's "Remove selected" rebuilds a key from the kind and the typed
+	// pattern, so it travels the "remove" path with the form's own fields.
+	if err := ts.Click("Remove selected"); err != nil {
+		t.Fatal(err)
+	}
+	if allowAction != "remove" || allowScope != "local" || allowKind != "command" || allowKey != "" || allowPattern != "git status" {
+		t.Fatalf("allow remove selected=%q,%q,%q,%q,%q", allowAction, allowScope, allowKind, allowKey, allowPattern)
+	}
+	// A row's Remove names the rule as fx stores it: the stored category in
+	// the kind slot, the stored key in the key slot, and no typed pattern.
 	if err := ts.Click("Remove"); err != nil {
 		t.Fatal(err)
 	}
-	if allowAction != "remove" || allowKey != "git status" {
-		t.Fatalf("allow remove=%q key=%q", allowAction, allowKey)
+	if allowAction != AllowlistRemoveRule || allowScope != "local" || allowKind != "bash" || allowKey != "git status" || allowPattern != "" {
+		t.Fatalf("allow remove rule=%q,%q,%q,%q,%q", allowAction, allowScope, allowKind, allowKey, allowPattern)
 	}
 	if err := ts.Click("Reset scope"); err != nil {
 		t.Fatal(err)
