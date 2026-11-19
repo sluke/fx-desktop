@@ -31,7 +31,7 @@
 ## 环境要求
 
 - Go 1.27.3 或更高版本。
-- MyGo v0.7.1，已在 `go.mod` 中固定；可运行 `go tool mygo doctor` 检查环境。
+- MyGo v0.10.0，已在 `go.mod` 中固定；可运行 `go tool mygo doctor` 检查环境。
 - Linux：MyGo 运行环境需要 GTK 3 和 WebKitGTK 4.1。
 - 可选：预先[安装 fx](https://fx.sh/docs/getting-started/installation)，也可使用应用内安装器。
 

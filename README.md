@@ -31,7 +31,7 @@ This is not an official Vercel Labs release.
 ## Requirements
 
 - Go 1.27.3+
-- MyGo v0.7.1, pinned in `go.mod`; verify with `go tool mygo doctor`
+- MyGo v0.10.0, pinned in `go.mod`; verify with `go tool mygo doctor`
 - Linux: GTK 3 and WebKitGTK 4.1 for the MyGo runtime
 - Optional: an existing [fx](https://fx.sh/docs/getting-started/installation) install, or use the in-app installer
 
