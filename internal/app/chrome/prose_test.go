@@ -181,6 +181,20 @@ func TestChromeUsesVisibleAffordancesInsteadOfHints(t *testing.T) {
 		}
 	}
 
+	mention, _ := ts.Find("Mention a file")
+	image, _ := ts.Find("Attach image")
+	if mention.W != image.W || mention.H != image.H || mention.Y != image.Y {
+		t.Fatalf("unequal attachment controls: %+v, %+v", mention, image)
+	}
+	for _, target := range []ui.Rect{mention, image} {
+		ts.Move(target.X+target.W/2, target.Y+target.H/2)
+		ts.Frame()
+		m, _ := ts.Find("Mention a file")
+		i, _ := ts.Find("Attach image")
+		if m != mention || i != image {
+			t.Fatal("hover changed attachment button bounds")
+		}
+	}
 	picker := ConversationState{Draft: "@", MentionOpen: true}
 	pickerHost := ConversationHost{Ready: true, CanMention: true, MentionFiles: []MentionFile{{Name: "main.go", Path: "main.go"}}}
 	ts = ui.NewTester(func(c *ui.Context) { Conversation(c, &picker, pickerHost) }, 1000, 620)

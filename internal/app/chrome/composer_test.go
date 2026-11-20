@@ -10,7 +10,7 @@ import (
 // of them drawn as a text glyph would sit on the baseline and the pair
 // would not line up.
 func TestComposerStopAndSendButtonsLineUp(t *testing.T) {
-	state := ConversationState{}
+	state := ConversationState{Draft: "follow up"}
 	h := ConversationHost{Ready: true, Busy: true}
 	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 1000, 620)
 	ts.Frame()
@@ -28,4 +28,8 @@ func TestComposerStopAndSendButtonsLineUp(t *testing.T) {
 	if stop.Y != send.Y {
 		t.Fatalf("the two buttons do not line up: %.2f vs %.2f", stop.Y, send.Y)
 	}
+	h.Thought = "working"
+	ts.Frame()
+	mustHave(t, ts, "Stop response")
+	mustNotHave(t, ts, "Send message")
 }

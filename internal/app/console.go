@@ -18,12 +18,15 @@ import (
 // Every field is touched on the app loop only: the terminal's own goroutine
 // reaches them by asking the app to run the change for it.
 type consoleRun struct {
-	id      uint64
-	title   string
-	command string
-	term    *terminal.Terminal
-	exited  bool
-	exit    int
+	id           uint64
+	title        string
+	command      string
+	term         *terminal.Terminal
+	shell        bool
+	focusPending bool
+	input        ui.Handle
+	exited       bool
+	exit         int
 	// removed is set when the tab was closed. The process may still report
 	// its end afterwards, and a closed run has nothing left to update.
 	removed bool
@@ -151,6 +154,10 @@ func (c *Coordinator) startConsoleRun(s *ProjectWindow, title string, args ...st
 			}
 		}
 	}
+	return c.startConsoleTerminal(s, run, cmd)
+}
+
+func (c *Coordinator) startConsoleTerminal(s *ProjectWindow, run *consoleRun, cmd []string) (*consoleRun, error) {
 	light, dark := terminalThemes()
 	term, err := terminal.New(terminal.Options{
 		Command:   cmd,
@@ -217,7 +224,14 @@ func (ctl *consoleController) data() chrome.ConsoleData {
 		// two views, each with state of its own.
 		d.Body = func(ctx *ui.Context) {
 			ctx.Key(run.id)
-			terminal.View(ctx, run.term).Fill()
+			view := terminal.View(ctx, run.term).Fill()
+			if run.shell {
+				view.Bind(&run.input)
+				if run.focusPending {
+					run.input.Focus(ctx)
+					run.focusPending = false
+				}
+			}
 		}
 	}
 	return d
@@ -226,12 +240,28 @@ func (ctl *consoleController) data() chrome.ConsoleData {
 // toggleConsole shows or hides the drawer. Hiding it keeps the runs: the tabs
 // and their output are what the drawer is for, and ⌘J is how the conversation
 // gets the room back.
-func (c *Coordinator) toggleConsole(s *ProjectWindow) { s.console.toggle() }
+func (c *Coordinator) toggleConsole(s *ProjectWindow) {
+	if s.shell.ConsoleOpen {
+		s.shell.ConsoleOpen = false
+		s.invalidate()
+		return
+	}
+	c.openConsoleShell(s)
+}
 
-// toggle shows or hides the drawer.
-func (ctl *consoleController) toggle() {
-	ctl.window.shell.ConsoleOpen = !ctl.window.shell.ConsoleOpen
-	ctl.window.invalidate()
+func (c *Coordinator) openConsoleShell(s *ProjectWindow) {
+	for _, run := range s.console.runs {
+		if run.shell && !run.exited {
+			s.console.selectRun(run.id)
+			return
+		}
+	}
+	run := &consoleRun{title: "Shell", shell: true, focusPending: true}
+	if _, err := c.startConsoleTerminal(s, run, nil); err != nil {
+		mygo.Dialog.Error("Open shell", err.Error())
+		return
+	}
+	s.invalidate()
 }
 
 // selectConsole makes a run the one on screen, and shows the drawer: a click
@@ -241,6 +271,9 @@ func (c *Coordinator) selectConsole(s *ProjectWindow, id uint64) { s.console.sel
 // selectRun makes a run the one on screen, and shows the drawer.
 func (ctl *consoleController) selectRun(id uint64) {
 	ctl.window.shell.ConsoleRun = id
+	if run := ctl.active(); run != nil && run.shell {
+		run.focusPending = true
+	}
 	ctl.window.shell.ConsoleOpen = true
 	ctl.window.invalidate()
 }

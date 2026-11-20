@@ -252,7 +252,7 @@ func (s *ProjectWindow) optionalHosts(c *Coordinator) (
 	if s.shell.ReviewOpen {
 		review = c.sessionReview(s)
 	}
-	if s.shell.InspectorOpen && s.shell.InspectorTab == chrome.InspectorTabFiles {
+	if s.shell.InspectorOpen && s.chat != nil && !s.shell.ReviewOpen {
 		files = c.sessionFiles(s)
 	}
 	if s.shell.Tools.Open {

@@ -38,6 +38,7 @@ func testHost() (Host, *ShellState) {
 			FocusSession:    func(string) {},
 			Ask:             func(string) {},
 			ChooseConfig:    func(string) {},
+			ChooseModel:     noop,
 			SetAppearance:   func(string) {},
 			StageAll:        noop,
 			ToggleReview:    noop,
@@ -169,17 +170,6 @@ func TestPaletteDropsDeletedPanels(t *testing.T) {
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
 	mustNotHave(t, ts, "Show Explorer", "Show Search", "Show Changes", "Show Settings")
 	mustHave(t, ts, "Toggle Sidebar", "Focus next session needing you")
-}
-
-// Quiet by default: ask and auto are the unremarkable permission modes,
-// so the strip omits the stat entirely rather than stating the obvious.
-func TestPermissionIsQuietWhenDefault(t *testing.T) {
-	for _, mode := range []string{"ask", "auto"} {
-		h, _ := testHost()
-		h.Agent.Permission = mode
-		ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
-		mustNotHave(t, ts, "Permission", mode)
-	}
 }
 
 // full-access turns fx's checks off: that is worth a permanent, accented
@@ -365,6 +355,7 @@ func TestFramePaletteHidesUnavailableCommands(t *testing.T) {
 	h, sh := testHost()
 	h.Actions.Ask = nil
 	h.Actions.ChooseConfig = nil
+	h.Actions.ChooseModel = nil
 	sh.PaletteOpen = true
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
 	mustHave(t, ts, "Toggle Sidebar")
@@ -676,7 +667,7 @@ func TestPaletteIsOnePanel(t *testing.T) {
 	}
 	// The foot's right-hand text is flush with the panel's edge, which is
 	// what a right-aligned row inside the panel means.
-	count, ok := ts.Find(itoa(availableCommands(h)) + " commands")
+	count, ok := ts.Find(itoa(paletteCount(paletteGroupRows(h, sh.PaletteQuery))) + " commands")
 	if !ok {
 		t.Fatal("the palette foot does not say how many commands there are")
 	}

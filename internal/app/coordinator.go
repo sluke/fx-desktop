@@ -1307,8 +1307,13 @@ func (c *Coordinator) openFxConfig() {
 		mygo.Dialog.Error("fx", err.Error())
 		return
 	}
-	_ = os.MkdirAll(dir, 0o755)
-	_ = mygo.Shell.OpenPath(dir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		mygo.Dialog.Error("Open fx state", err.Error())
+		return
+	}
+	if err := mygo.Shell.OpenPath(dir); err != nil {
+		mygo.Dialog.Error("Open fx state", err.Error())
+	}
 }
 
 func (c *Coordinator) checkUpdates() {

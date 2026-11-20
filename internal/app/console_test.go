@@ -1,7 +1,14 @@
 package app
 
 import (
+	"github.com/egoist/mygo/plugins/terminal"
+	"github.com/egoist/mygo/ui"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 
 	"fx-desktop/internal/app/chrome"
 	"fx-desktop/internal/testutil"
@@ -95,17 +102,18 @@ func TestToggleConsoleKeepsTheRuns(t *testing.T) {
 	testutil.IsolateHome(t)
 	coord := NewCoordinator()
 	s := consoleSession()
+	shell := s.console.attach(&consoleRun{title: "Shell", shell: true})
 	s.console.attach(&consoleRun{title: "fx doctor"})
 
 	coord.toggleConsole(s)
 	if s.shell.ConsoleOpen {
 		t.Fatal("toggle-console should hide the drawer")
 	}
-	if len(s.console.runs) != 1 {
+	if len(s.console.runs) != 2 {
 		t.Fatalf("runs = %d, want the run to survive hiding", len(s.console.runs))
 	}
 	coord.toggleConsole(s)
-	if !s.shell.ConsoleOpen {
+	if !s.shell.ConsoleOpen || s.console.active() != shell || !shell.focusPending {
 		t.Fatal("toggle-console should show the drawer again")
 	}
 }
@@ -212,4 +220,48 @@ func TestConsoleTabsStayBoundedWithoutKillingRunningRuns(t *testing.T) {
 	if s.shell.ConsoleRun != newest.id {
 		t.Fatalf("active run = %d; want %d", s.shell.ConsoleRun, newest.id)
 	}
+}
+
+func TestToggleConsoleAcceptsShellInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX shell syntax")
+	}
+	if err := terminal.Load(); err != nil {
+		t.Skipf("terminal library unavailable: %v", err)
+	}
+	testutil.IsolateHome(t)
+	t.Setenv("SHELL", "/bin/sh")
+	c := NewCoordinator()
+	s := consoleSession()
+	s.project = t.TempDir()
+	c.toggleConsole(s)
+	defer s.console.closeAll()
+	if run := s.console.active(); run == nil || !run.shell {
+		t.Fatal("missing interactive shell")
+	}
+	ts := ui.NewTester(func(ctx *ui.Context) {
+		ui.Box(ctx).Fill().Children(func() {
+			if d := s.console.data(); d.Body != nil {
+				d.Body(ctx)
+			}
+		})
+	}, 640, 320)
+	ts.Frame()
+	ts.Type("pwd > console-cwd.txt")
+	ts.Key(0, ui.KeyEnter)
+	path := filepath.Join(s.project, "console-cwd.txt")
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ts.Frame()
+		if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) != "" {
+			got, err := os.Stat(strings.TrimSpace(string(data)))
+			want, statErr := os.Stat(s.project)
+			if err != nil || statErr != nil || !os.SameFile(got, want) {
+				t.Fatalf("wrong shell directory: %q", data)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("input did not execute: %s", s.console.active().term.Text())
 }

@@ -180,11 +180,7 @@ func TestComposerHoldsImagesWhileATurnRuns(t *testing.T) {
 	mustHave(t, ts, "Working… · images wait for the next turn", "shot.png")
 	mustNotHave(t, ts, "Images are attached with the next message")
 
-	// The arrow is drawn disabled, so clicking it is not an error — it is
-	// simply not a way to send the pictures mid-turn.
-	if err := ts.Click("Send message"); err != nil {
-		t.Fatal(err)
-	}
+	mustNotHave(t, ts, "Send message")
 	ts.Key(0, ui.KeyEnter)
 	if calls != 0 {
 		t.Fatalf("a busy turn took the images: %d sends", calls)

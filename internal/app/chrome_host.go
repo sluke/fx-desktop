@@ -42,16 +42,20 @@ func (c *Coordinator) chromeActions(parent *mygo.Window) chrome.Actions {
 			mygo.App.WhenReady(func() { c.openInFileManager(path) })
 		},
 		OpenPreferences: nativeAction(c.showPreferences),
-		OpenDocs: nativeAction(func() {
-			_ = mygo.Shell.OpenExternal("https://fx.sh/docs")
-		}),
-		OpenConfig: nativeAction(c.openFxConfig),
-		RunDoctor:  nativeAction(func() { c.openCommandSession("fx doctor", "", "doctor") }),
+		OpenDocs:        nativeAction(openDocs),
+		OpenConfig:      nativeAction(c.openFxConfig),
+		RunDoctor:       nativeAction(func() { c.openCommandSession("fx doctor", "", "doctor") }),
 		// Signing in is an interactive CLI flow and ACP advertises no auth
 		// method (§12.1), so the honest affordance is a terminal window
 		// running the command fx itself names in its guidance.
 		SignIn:       nativeAction(func() { c.signIn(nil) }),
 		CheckUpdates: nativeAction(c.checkUpdates),
+	}
+}
+
+func openDocs() {
+	if err := mygo.Shell.OpenExternal("https://fx.sh/docs"); err != nil {
+		mygo.Dialog.Error("Documentation", err.Error())
 	}
 }
 
@@ -144,6 +148,28 @@ func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	// A command window (fx pr, fx doctor …) has no workspace. Binding the
 	// git and fx-session actions here would offer buttons that cannot
 	// work; left nil, the rail hides them instead.
+	if s.chat != nil {
+		s.chat.mu.Lock()
+		if s.chat.busy && !s.chat.stopping && s.chat.client != nil {
+			a.InterruptSession = s.chat.stopTurn
+		}
+		if s.chat.ready && !s.chat.busy && !s.chat.configuring && len(s.chat.configs) > 0 {
+			a.ChooseConfig = s.openConfig
+			for _, opt := range s.chat.configs {
+				if opt.ID == "model" && len(opt.Options) > 0 {
+					a.ChooseModel = func() { s.openConfig("model") }
+					break
+				}
+			}
+		}
+		s.chat.mu.Unlock()
+	} else if s.term != nil {
+		s.mu.Lock()
+		if !s.exited {
+			a.InterruptSession = func() { s.term.Send([]byte{3}) }
+		}
+		s.mu.Unlock()
+	}
 	if s.project == "" {
 		return a
 	}
@@ -165,7 +191,6 @@ func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	// The right rail's Files tab browses this window's workspace. It is
 	// wired here rather than in chromeActions because its rows name a
 	// workspace path: a command window has none to show.
-	a.SelectInspectorTab = func(tab int) { c.selectInspectorTab(s, tab) }
 	a.ToggleFileDir = func(path string) { c.toggleFileDir(s, path) }
 	a.OpenFile = func(path string) { c.openFileWithDefaultApp(s, path) }
 	a.OpenFileInEditor = func(path string) { c.openFileInTextEditor(s, path) }
@@ -173,6 +198,7 @@ func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	a.RefreshFiles = func() { c.refreshFiles(s) }
 	// The console belongs to a project window: it is where the runs that
 	// need the workspace (fx doctor, fx pr, fx login) report back (§4.7).
+	a.OpenConsoleShell = nativeAction(func() { c.openConsoleShell(s) })
 	a.ToggleConsole = nativeAction(func() { c.toggleConsole(s) })
 	a.SelectConsole = func(id uint64) { mygo.App.WhenReady(func() { c.selectConsole(s, id) }) }
 	a.CloseConsoleRun = func(id uint64) { mygo.App.WhenReady(func() { c.closeConsoleRun(s, id) }) }
@@ -192,7 +218,6 @@ func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	// The picker belongs to the conversation, so opening it is UI state and
 	// not a session call: the strip and the palette must open the same panel
 	// rather than keep one each.
-	a.ChooseConfig = s.openConfig
 	a.StageAll = nativeAction(func() { c.stageAll(s) })
 	return a
 }
@@ -304,7 +329,17 @@ func (c *Coordinator) runCommand(s *ProjectWindow, id string) {
 			c.showPicker()
 		}
 	case "continue-session":
-		c.openSessionWithFlags(s.project, "-c")
+		s.mu.Lock()
+		var latest FxSession
+		for _, saved := range s.saved {
+			if latest.ID == "" || saved.UpdatedAtMS > latest.UpdatedAtMS {
+				latest = saved
+			}
+		}
+		s.mu.Unlock()
+		if latest.ID != "" {
+			c.sessionManagement(s).Resume(latest.ID, latest.WorkspaceRoot)
+		}
 	case "ask":
 		s.shell.AskOpen = true
 	case "session-settings":
@@ -328,6 +363,10 @@ func (c *Coordinator) runCommand(s *ProjectWindow, id string) {
 		c.openManagementPage(s, "MCP")
 		c.runManagement(s, "mcp-list")
 	case "run-doctor":
+		if s.project == "" {
+			c.openCommandSession("fx doctor", "", "doctor")
+			return
+		}
 		c.openManagementPage(s, "Details")
 		c.runManagement(s, "doctor")
 	case "toggle-console":
@@ -347,7 +386,7 @@ func (c *Coordinator) runCommand(s *ProjectWindow, id string) {
 	case "preferences":
 		c.showPreferences()
 	case "docs":
-		_ = mygo.Shell.OpenExternal("https://fx.sh/docs")
+		openDocs()
 	case "refresh-git":
 		s.startGitRefresh()
 	case "review-changes":

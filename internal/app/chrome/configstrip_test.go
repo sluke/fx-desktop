@@ -11,8 +11,8 @@ import (
 // text needs.
 func configStripTexts() map[string]float32 {
 	return map[string]float32{
-		"Provider · gateway":    configLabelSize,
-		"Model · glm-5.3-flash": configLabelSize,
+		"gateway":       configLabelSize,
+		"glm-5.3-flash": configLabelSize,
 	}
 }
 
@@ -62,7 +62,7 @@ func TestConversationConfigStripKeepsEveryShownItemWhole(t *testing.T) {
 				if !ok {
 					t.Fatalf("%s %d: the strip is missing with fx's options published", host.name, w)
 				}
-				for _, item := range []string{"Provider · gateway", "Model · glm-5.3-flash"} {
+				for _, item := range []string{"gateway", "glm-5.3-flash"} {
 					r, ok := ts.Find(item)
 					if !ok {
 						continue // left out whole, which is the rule
@@ -94,8 +94,8 @@ func TestConversationConfigStripYieldsBeforeWorkspaceAndStatus(t *testing.T) {
 		ts := ui.NewTester(func(c *ui.Context) { Conversation(c, state, h) }, w, 700)
 		ts.Frame()
 		ts.Frame()
-		provider := ts.HasText("Provider · gateway")
-		model := ts.HasText("Model · glm-5.3-flash")
+		provider := ts.HasText("gateway")
+		model := ts.HasText("glm-5.3-flash")
 		if !model {
 			dropped = true
 		}

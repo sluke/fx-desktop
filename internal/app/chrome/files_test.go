@@ -6,20 +6,15 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// The right rail is two destinations now. The Files tab lists the workspace
+// The right rail lists the workspace
 // the app flattened, expands folders in place, and hands a row to the default
 // application — without changing what the window is working on.
-func TestInspectorFilesTabBrowsesWorkspace(t *testing.T) {
-	h, sh := testHost()
+func TestFileRailBrowsesWorkspace(t *testing.T) {
+	h, _ := testHost()
 	h.Conversation = true
 	h.StatusRight = nil
 	h.Data.ProjectPath = "/p/proj"
-	var selected = -1
 	var toggled, opened string
-	h.Actions.SelectInspectorTab = func(tab int) {
-		selected = tab
-		sh.InspectorTab = tab
-	}
 	h.Actions.ToggleFileDir = func(path string) { toggled = path }
 	h.Actions.OpenFile = func(path string) { opened = path }
 	h.Files = FileBrowserData{Root: "/p/proj", Rows: []FileRow{
@@ -30,16 +25,7 @@ func TestInspectorFilesTabBrowsesWorkspace(t *testing.T) {
 
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
 	ts.Frame()
-	mustNotHave(t, ts, "main.go", "README.md")
-
-	if err := ts.Click("Inspector tab: Files"); err != nil {
-		t.Fatal(err)
-	}
-	ts.Frame()
-	if selected != InspectorTabFiles || sh.InspectorTab != InspectorTabFiles {
-		t.Fatalf("Files tab did not become the panel: selected=%d tab=%d", selected, sh.InspectorTab)
-	}
-	mustHave(t, ts, "src", "main.go", "README.md", "workspace files")
+	mustHave(t, ts, "src", "main.go", "README.md")
 
 	if err := ts.Click("/p/proj/src"); err != nil {
 		t.Fatal(err)
@@ -76,39 +62,30 @@ func TestInspectorFilesTabBrowsesWorkspace(t *testing.T) {
 	if opened != "README.md" {
 		t.Fatalf("external open dispatched %q, want README.md", opened)
 	}
-
-	if err := ts.Click("Inspector tab: Inspector"); err != nil {
-		t.Fatal(err)
-	}
-	ts.Frame()
-	mustHave(t, ts, "Runtime")
-	mustNotHave(t, ts, "main.go", "README.md")
 }
 
-func TestInspectorHidesFilesTabWithoutWorkspace(t *testing.T) {
-	h, sh := testHost()
+func TestFileRailWithoutWorkspace(t *testing.T) {
+	h, _ := testHost()
 	h.Conversation = true
 	h.Data.ProjectPath = ""
-	sh.InspectorTab = InspectorTabFiles
 
 	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
 	ts.Frame()
-	if _, ok := ts.Find("Inspector tab: Files"); ok {
+	if _, ok := ts.Find("Refresh files"); ok {
 		t.Fatal("a window without a workspace offered the file browser")
 	}
-	// A stale selection must not leave the panel empty.
-	mustHave(t, ts, "Runtime")
+
+	mustNotHave(t, ts, "Runtime")
 }
 
 // A file row's context menu chooses the kind of application: the text editor
 // or whatever owns the file's type. A folder has no text editor to open in,
 // so its menu offers only the default application.
 func TestInspectorFileRowContextMenu(t *testing.T) {
-	h, sh := testHost()
+	h, _ := testHost()
 	h.Conversation = true
 	h.StatusRight = nil
 	h.Data.ProjectPath = "/p/proj"
-	sh.InspectorTab = InspectorTabFiles
 	var opened, edited string
 	h.Actions.OpenFile = func(path string) { opened = path }
 	h.Actions.OpenFileInEditor = func(path string) { edited = path }

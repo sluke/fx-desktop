@@ -81,6 +81,9 @@ func consoleTabs(c *ui.Context, h Host, sh *ShellState, p Palette) {
 			})
 			// A run's state is on its own tab (coloured, and named), so the
 			// tab strip needs no sentence about what a click would do.
+			if h.Actions.OpenConsoleShell != nil {
+				ui.Button(c, "Shell").Label("Open interactive shell").Tooltip("Open interactive shell").FontSize(TypeControl).Padding(Space1, Space3).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).OnClick(h.Actions.OpenConsoleShell)
+			}
 			if h.Actions.ToggleConsole != nil {
 				ui.Button(c, "✕").Label("Hide console").Tooltip("Hide console (⌘J)").
 					FontSize(TypeControl).BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).

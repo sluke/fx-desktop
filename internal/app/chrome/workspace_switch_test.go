@@ -49,7 +49,8 @@ func TestComposerWorkspaceEntryReplacesPermissionSegments(t *testing.T) {
 				ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, width, 700)
 				ts.Frame()
 				ts.Frame()
-				mustNotHaveToken(t, ts, "Ask", "Code", "All session settings")
+				mustHave(t, ts, "Ask")
+				mustNotHaveToken(t, ts, "Code", "All session settings")
 				if err := ts.Click("Switch workspace"); err != nil {
 					t.Fatal(err)
 				}
@@ -57,7 +58,11 @@ func TestComposerWorkspaceEntryReplacesPermissionSegments(t *testing.T) {
 					t.Fatalf("switch changed conversation: calls=%d draft=%q", calls, state.Draft)
 				}
 				r, _ := ts.Find("Switch workspace")
-				send, _ := ts.Find("Send message")
+				action := "Send message"
+				if busy {
+					action = "Stop response"
+				}
+				send, _ := ts.Find(action)
 				if r.W != 28 || r.X < 0 || r.X+r.W > send.X {
 					t.Fatalf("workspace entry squeezed or overlaps Send: %+v vs %+v", r, send)
 				}

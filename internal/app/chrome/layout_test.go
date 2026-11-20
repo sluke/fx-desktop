@@ -106,13 +106,39 @@ func TestEveryPaletteRowDispatches(t *testing.T) {
 		sh := DefaultShell()
 		sh.PaletteOpen = true
 		ran, dispatched := "", false
-		h := Host{Shell: &sh, Actions: Actions{RunCommand: func(id string) { dispatched, ran = true, id }}}
+		h, _ := testHost()
+		h.Shell = &sh
+		h.Actions.RunCommand = func(id string) { dispatched, ran = true, id }
+		h.Actions.SignIn = noop
+		h.Actions.ManageWorkspace = noop
+		h.Actions.AttachImage = noop
+		h.Actions.PasteImage = noop
+		h.Actions.InterruptSession = noop
+		focused := ""
+		h.Actions.FocusSession = func(id string) { focused = id }
+		if !commandAvailable(h, cmd) {
+			t.Fatalf("capable session missing %s", cmd.ID)
+		}
 		runCommand(h, &sh, cmd)
 		if sh.PaletteOpen {
-			t.Fatalf("%s: running a command must close the palette", cmd.ID)
+			t.Fatalf("%s left palette open", cmd.ID)
 		}
-		if cmd.ID == "toggle-sidebar" {
-			continue // handled locally, before the dispatcher
+		switch cmd.ID {
+		case "toggle-sidebar":
+			if sh.SidebarOpen {
+				t.Fatal("sidebar still open")
+			}
+			continue
+		case "ask":
+			if !sh.AskOpen {
+				t.Fatal("ask dialog closed")
+			}
+			continue
+		case "focus-attention":
+			if focused != "/p/other" {
+				t.Fatalf("focused %q", focused)
+			}
+			continue
 		}
 		if !dispatched || ran != cmd.ID {
 			t.Fatalf("command %q dispatched to %q (dispatched=%v)", cmd.ID, ran, dispatched)
@@ -124,7 +150,7 @@ func TestRunCommandDispatchesByID(t *testing.T) {
 	sh := DefaultShell()
 	sh.PaletteOpen = true
 	got := ""
-	h := Host{Shell: &sh, Actions: Actions{RunCommand: func(id string) { got = id }}}
+	h := Host{Shell: &sh, Actions: Actions{RunDoctor: noop, RunCommand: func(id string) { got = id }}}
 	runCommand(h, &sh, Command{ID: "run-doctor"})
 	if got != "run-doctor" {
 		t.Fatalf("expected dispatch by id, got %q", got)
@@ -170,6 +196,44 @@ func TestItoa(t *testing.T) {
 	} {
 		if got := itoa(tc.in); got != tc.want {
 			t.Fatalf("itoa(%d) = %q want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestCenterOnlyPaletteExposesOnlyWiredCommands(t *testing.T) {
+	calls := 0
+	h := Host{CenterOnly: true, Actions: Actions{OpenPreferences: func() { calls++ }}}
+	groups := paletteGroupRows(h, "")
+	if paletteCount(groups) != 1 || groups[0].Rows[0].ID != "preferences" {
+		t.Fatalf("unexpected rows: %+v", groups)
+	}
+	sh := DefaultShell()
+	runCommand(h, &sh, groups[0].Rows[0].Command)
+	if calls != 1 {
+		t.Fatalf("preferences dispatched %d times", calls)
+	}
+}
+
+func TestPaletteSessionPrerequisites(t *testing.T) {
+	h, _ := testHost()
+	h.Sessions = h.Sessions[:1]
+	h.Data.Saved = nil
+	for _, id := range []string{"continue-session", "session-interrupt", "focus-attention"} {
+		if commandAvailable(h, Command{ID: id}) {
+			t.Errorf("%s available without a target", id)
+		}
+	}
+	h.Data.ProjectPath = ""
+	for _, id := range []string{"refresh-status", "show-credits", "mcp-list", "draft-pr", "draft-issue"} {
+		if commandAvailable(h, Command{ID: id}) {
+			t.Errorf("%s available without workspace", id)
+		}
+	}
+	h.Data.Welcome = true
+	h.Actions.SignIn = noop
+	for _, id := range []string{"sign-in", "check-updates", "run-doctor"} {
+		if commandAvailable(h, Command{ID: id}) {
+			t.Errorf("%s available in setup window", id)
 		}
 	}
 }

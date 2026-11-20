@@ -22,7 +22,6 @@ func TestOptionalHostsFollowTheShellSwitches(t *testing.T) {
 	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
 	s.shell.ReviewOpen = false
 	s.shell.InspectorOpen = false
-	s.shell.InspectorTab = chrome.InspectorTabTelemetry
 	s.shell.Tools.Open = false
 	s.shell.History.Open = false
 
@@ -45,15 +44,14 @@ func TestOptionalHostsFollowTheShellSwitches(t *testing.T) {
 
 	s.shell.ReviewOpen = true
 	s.shell.InspectorOpen = true
-	s.shell.InspectorTab = chrome.InspectorTabFiles
 	s.shell.Tools.Open = true
 	s.shell.History.Open = true
 	review, files, management, history = s.optionalHosts(c)
 	if !review.Open {
 		t.Fatal("an open review drawer got no data")
 	}
-	if files.Root != root {
-		t.Fatalf("an open Files tab got no root: %+v", files)
+	if files.Root != "" {
+		t.Fatalf("review drawer should displace files: %+v", files)
 	}
 	if management.Resume == nil || history.Resume == nil {
 		t.Fatal("an open dialog lost its actions")

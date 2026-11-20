@@ -401,16 +401,12 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 						// underneath it. Both buttons are absent when fx
 						// cannot take that kind of content.
 						if h.CanMention {
-							ui.Button(c, "@").Label("Mention a file").Tooltip("Mention a file (@)").
-								Font(MonoFont).FontSize(TypeTitle).Padding(Space2, Space3).Shrink(0).Radius(controlRadius).
-								BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
-								OnClick(func() { startMention(state, h) })
+							composerAttachmentButton(c, p, "Mention a file", "Mention a file (@)", func() { startMention(state, h) }).Children(func() {
+								mono(ui.Text(c, "@")).FontSize(IconLarge).TextColor(p.InkMuted)
+							})
 						}
 						if h.CanAttach && h.PickImage != nil {
-							ui.Button(c, "").Label("Attach image").Tooltip("Attach image…").
-								Padding(Space2, Space3).Shrink(0).Radius(controlRadius).
-								BorderWidth(0).Background(p.Surface).
-								OnClick(h.PickImage).
+							composerAttachmentButton(c, p, "Attach image", "Attach image…", h.PickImage).
 								Children(func() { ui.Icon(c, IconImage).FontSize(IconLarge).TextColor(p.InkMuted) })
 						}
 					})
@@ -447,9 +443,6 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 							// "Rea…", which reads as a bug, not a status.
 							ui.Text(c, composerStatus(h, state)).FontSize(composerStatusSize).TextColor(p.InkMuted).SingleLine().Shrink(0)
 						}
-						// Stop belongs to the running turn; the send arrow
-						// stays beside it because the composer never locks
-						// — Enter steers or queues instead of doing nothing.
 						if h.Busy {
 							// The stop square is drawn, not typed: a text
 							// glyph sits on the baseline and never lines up
@@ -459,13 +452,9 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 							ui.Button(c, "").Label("Stop response").Tooltip("Stop response (⌘.)").Padding(Space4).Radius(RadiusPill).BorderWidth(0).Background(p.Ink).TextColor(p.OnInk).Disabled(h.Stopping).OnClick(h.Stop).
 								Children(func() { ui.Icon(c, IconStop).FontSize(IconXL).TextColor(p.OnInk) })
 						}
-						// The arrow is drawn, not typed: a text glyph
-						// shifts baseline across platforms. The button
-						// wraps its content — a 16pt icon plus 8pt on
-						// each side makes the 32pt circle — so the
-						// glyph is centered by construction. Icons do
-						// not stretch or center reliably inside a
-						// fixed-size button: they follow text metrics.
+						if !showComposerSend(h, state) {
+							return
+						}
 						ui.Button(c, "").Label("Send message").Tooltip(sendTooltip(h, state)).Padding(Space4).Radius(RadiusPill).BorderWidth(0).Background(p.Ink).TextColor(p.OnInk).
 							Disabled(!h.Ready || h.ConfigChanging || h.Preparing || h.Busy && len(state.Attachments) > 0 ||
 								strings.TrimSpace(state.Draft) == "" && len(state.Attachments) == 0).OnClick(func() { dismissMention(state); send(state.Draft) }).
@@ -477,6 +466,17 @@ func Conversation(c *ui.Context, state *ConversationState, h ConversationHost) {
 			})
 		})
 	})
+}
+
+func composerAttachmentButton(c *ui.Context, p Palette, label, tip string, click func()) ui.Element {
+	button := ui.ButtonBase(c).Label(label).Tooltip(tip).OnClick(click).
+		Size(workspaceButtonWidth, workspaceButtonWidth).Shrink(0).Padding(Space0).Radius(controlRadius).
+		AlignItems(ui.Center).Justify(ui.Center).BorderWidth(0).Background(p.Surface)
+	return stateSurface(button, p, false, button.Hovered())
+}
+
+func showComposerSend(h ConversationHost, state *ConversationState) bool {
+	return !h.Busy || h.Thought == "" && h.Ready && !h.ConfigChanging && !h.Preparing && !h.Stopping && len(state.Attachments) == 0 && strings.TrimSpace(state.Draft) != ""
 }
 
 // The composer row's gutter, and the size of the two round controls that end
@@ -524,6 +524,12 @@ func fitComposerRow(c *ui.Context, h ConversationHost, state *ConversationState,
 	if h.SwitchWorkspace != nil {
 		entry = workspaceButtonWidth
 	}
+	if mode, ok := ModeConfig(h.Configs); ok {
+		if entry > 0 {
+			entry += configStripGap
+		}
+		entry += configButtonWidth(c, permissionButtonLabel(mode))
+	}
 	statusWidth := float32(0)
 	if status != "" {
 		statusWidth, _ = c.MeasureText(0, ui.Span{Text: status, Size: composerStatusSize})
@@ -537,7 +543,7 @@ func fitComposerRow(c *ui.Context, h ConversationHost, state *ConversationState,
 			gaps = 3
 		}
 		b := float32(gaps)*composerRowGap + composerControl
-		if h.Busy {
+		if h.Busy && showComposerSend(h, state) {
 			b += composerControl + composerRowGap
 		}
 		return b

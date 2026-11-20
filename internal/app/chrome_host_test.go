@@ -176,7 +176,7 @@ func TestSessionActionsWireFxIntegration(t *testing.T) {
 		t.Fatalf("session actions incomplete: %+v", a)
 	}
 	// The right rail's file browser acts on this window's workspace.
-	if a.SelectInspectorTab == nil || a.ToggleFileDir == nil || a.OpenFile == nil ||
+	if a.ToggleFileDir == nil || a.OpenFile == nil ||
 		a.OpenFileInEditor == nil || a.RefreshFiles == nil {
 		t.Fatalf("file browser actions incomplete: %+v", a)
 	}
@@ -192,7 +192,7 @@ func TestCommandSessionHidesWorkspaceActions(t *testing.T) {
 		a.ResumeSession != nil || a.Ask != nil || a.ChooseConfig != nil {
 		t.Fatalf("workspace actions must stay unwired without a project: %+v", a)
 	}
-	if a.SelectInspectorTab != nil || a.ToggleFileDir != nil || a.OpenFile != nil ||
+	if a.ToggleFileDir != nil || a.OpenFile != nil ||
 		a.OpenFileInEditor != nil || a.RefreshFiles != nil {
 		t.Fatalf("file browser must stay unwired without a workspace: %+v", a)
 	}

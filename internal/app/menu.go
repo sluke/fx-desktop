@@ -39,7 +39,7 @@ func (c *Coordinator) setupMenus() {
 		Label: "fx",
 		Submenu: []*mygo.MenuItem{
 			{
-				Label: "Check for Updates",
+				Label: "Upgrade fx CLI",
 				Click: func(*mygo.MenuItem, *mygo.Window) { c.checkUpdates() },
 			},
 			{

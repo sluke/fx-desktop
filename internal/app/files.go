@@ -327,12 +327,6 @@ func (c *Coordinator) sessionFiles(s *ProjectWindow) chrome.FileBrowserData {
 	if s == nil || s.project == "" {
 		return chrome.FileBrowserData{}
 	}
-	// The tab is the only thing that needs a listing; a window that never
-	// opens it should neither read the disk for it nor flatten a tree no
-	// frame draws.
-	if s.shell.InspectorTab != chrome.InspectorTabFiles {
-		return chrome.FileBrowserData{Root: s.project}
-	}
 	c.ensureFiles(s, s.project)
 	d := chrome.FileBrowserData{Root: s.project}
 	s.workspace.mu.Lock()
@@ -351,24 +345,6 @@ func (c *Coordinator) sessionFiles(s *ProjectWindow) chrome.FileBrowserData {
 	// workspace.mu, but that is once per change instead of once per frame.
 	d.Rows = fb.projected(s.project)
 	return d
-}
-
-// selectInspectorTab moves the right rail to the tab that was chosen and
-// starts the files read on the way in, so the first frame of the browser is
-// not an empty folder.
-func (c *Coordinator) selectInspectorTab(s *ProjectWindow, tab int) {
-	if s == nil {
-		return
-	}
-	if tab != chrome.InspectorTabFiles {
-		tab = chrome.InspectorTabTelemetry
-	}
-	s.shell.InspectorTab = tab
-	s.shell.InspectorOpen = true
-	if tab == chrome.InspectorTabFiles {
-		c.ensureFiles(s, s.project)
-	}
-	s.invalidate()
 }
 
 // toggleFileDir expands or collapses one folder. Expanding starts its read on

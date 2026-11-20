@@ -446,8 +446,9 @@ func TestConversationRendersConfigFromData(t *testing.T) {
 	state := ConversationState{}
 	h := ConversationHost{Ready: true, Configs: fixtureConfigs(), Modes: fixtureModes(), Mode: "ask"}
 	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 900, 700)
-	mustHave(t, ts, "Provider · gateway", "Model · glm-5.3-flash")
-	mustNotHaveToken(t, ts, "Ask", "Code", "All session settings")
+	mustHave(t, ts, "gateway", "glm-5.3-flash")
+	mustHave(t, ts, "Ask")
+	mustNotHaveToken(t, ts, "Code", "All session settings")
 	// The mode is the permission control, not a fourth config button.
 	mustNotHave(t, ts, "Session Mode · ask")
 
@@ -455,7 +456,7 @@ func TestConversationRendersConfigFromData(t *testing.T) {
 	h.Configs = nil
 	h.Modes = nil
 	ts.Frame()
-	mustNotHave(t, ts, "Model · glm-5.3-flash", "Provider · gateway")
+	mustNotHave(t, ts, "glm-5.3-flash", "gateway")
 
 	// A session whose mode fx did not name still renders its id rather
 	// than a blank segment.
@@ -472,7 +473,7 @@ func TestConversationConfigPickerDispatches(t *testing.T) {
 	h := ConversationHost{Ready: true, Configs: fixtureConfigs(), Modes: fixtureModes(), Mode: "ask",
 		SetConfig: func(configID, value string) { got = append(got, [2]string{configID, value}) }}
 	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 900, 700)
-	if err := ts.Click("Model · glm-5.3-flash"); err != nil {
+	if err := ts.Click("glm-5.3-flash"); err != nil {
 		t.Fatal(err)
 	}
 	ts.Frame()
@@ -498,12 +499,12 @@ func TestConversationConfigPickerDispatches(t *testing.T) {
 // and the current segment is not re-sent: that would spend a round trip to
 // change nothing.
 func TestConversationModeDoesNotResendCurrent(t *testing.T) {
-	state := ConversationState{ConfigListOpen: true}
+	state := ConversationState{}
 	var got [][2]string
 	h := ConversationHost{Ready: true, Configs: fixtureConfigs(), Modes: fixtureModes(), Mode: "ask",
 		SetConfig: func(configID, value string) { got = append(got, [2]string{configID, value}) }}
 	ts := ui.NewTester(func(c *ui.Context) { Conversation(c, &state, h) }, 900, 700)
-	if err := ts.Click("Configure Session Mode"); err != nil {
+	if err := ts.Click("Ask"); err != nil {
 		t.Fatal(err)
 	}
 	if err := ts.Click("Code"); err != nil {

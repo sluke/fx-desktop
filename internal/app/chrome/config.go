@@ -59,6 +59,13 @@ func ModeConfig(options []ConfigOption) (ConfigOption, bool) {
 	return conversation.ModeConfig(options)
 }
 
+func permissionButtonLabel(mode ConfigOption) string {
+	if mode.CurrentValue == "" {
+		return "Permission"
+	}
+	return choiceLabel(mode, mode.CurrentValue)
+}
+
 // selectableConfigs are the options that become a strip button. The mode is
 // excluded from the compact strip; it remains in the complete settings overview.
 func selectableConfigs(options []ConfigOption) []ConfigOption {
@@ -104,6 +111,17 @@ const (
 	workspaceButtonWidth = 28
 )
 
+func configButtonLabel(o ConfigOption) string {
+	value := shortChoice(choiceLabel(o, o.CurrentValue))
+	if value == "" {
+		return configLabel(o)
+	}
+	if o.ID == "provider" || o.ID == "model" {
+		return value
+	}
+	return configLabel(o) + " · " + value
+}
+
 // configStripLabels is the label each option's button carries, in fx's order.
 // The composer measures them before the strip is built: an option is shown
 // whole or left out, and which one it is cannot depend on a layout pass that
@@ -112,7 +130,7 @@ func configStripLabels(options []ConfigOption) []string {
 	opts := selectableConfigs(options)
 	out := make([]string, 0, len(opts))
 	for _, o := range opts {
-		out = append(out, fmt.Sprintf("%s · %s", configLabel(o), shortChoice(choiceLabel(o, o.CurrentValue))))
+		out = append(out, configButtonLabel(o))
 	}
 	return out
 }
@@ -146,6 +164,14 @@ func configStrip(c *ui.Context, state *ConversationState, h ConversationHost, p 
 				BorderWidth(0).Background(p.Surface).OnClick(h.SwitchWorkspace).
 				Children(func() { ui.Icon(c, IconExplorer).FontSize(IconLarge).TextColor(p.InkMuted) })
 		}
+		if mode, ok := ModeConfig(h.Configs); ok {
+			button := ui.Button(c, permissionButtonLabel(mode)).Tooltip("Change permission mode").
+				FontSize(configLabelSize).Padding(Space2, configButtonPad).Radius(controlRadius).
+				BorderWidth(0).Background(p.Surface).TextColor(p.InkMuted).
+				Disabled(!h.Ready || h.ConfigChanging || len(mode.Options) == 0).
+				OnClick(func() { toggleConfig(state, mode.ID) })
+			stateSurface(button, p, state.ConfigOpen == mode.ID, button.Hovered())
+		}
 		for i, option := range selectableConfigs(h.Configs) {
 			if i >= shown {
 				break
@@ -153,7 +179,7 @@ func configStrip(c *ui.Context, state *ConversationState, h ConversationHost, p 
 			option := option
 			open := state.ConfigOpen == option.ID
 			value := choiceLabel(option, option.CurrentValue)
-			label := fmt.Sprintf("%s · %s", configLabel(option), shortChoice(value))
+			label := configButtonLabel(option)
 			button := ui.Button(c, label).FontSize(configLabelSize).BorderWidth(0).Padding(Space2, configButtonPad).Radius(controlRadius).
 				Tooltip(fmt.Sprintf("%s: %s", configLabel(option), value)).
 				Disabled(!h.Ready || h.ConfigChanging).

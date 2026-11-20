@@ -6,14 +6,6 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// InspectorTabTelemetry and InspectorTabFiles are the right panel's two
-// destinations: the fx readout that has always lived there, and the workspace
-// itself as a browsable tree.
-const (
-	InspectorTabTelemetry = iota
-	InspectorTabFiles
-)
-
 // FileRow is one visible row of the file browser: a folder or file at its
 // depth below the workspace root. Path is workspace-relative and is the handle
 // its actions take; Abs is what the default application is given.

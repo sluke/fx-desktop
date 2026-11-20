@@ -27,11 +27,6 @@ func TestFileBrowserListsExpandsAndRefreshes(t *testing.T) {
 	)
 	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
 
-	// Selecting the tab is what asks for the listing.
-	c.selectInspectorTab(s, chrome.InspectorTabFiles)
-	if s.shell.InspectorTab != chrome.InspectorTabFiles || !s.shell.InspectorOpen {
-		t.Fatalf("tab selection: %+v", s.shell)
-	}
 	d := waitForFiles(t, c, s, func(d chrome.FileBrowserData) bool {
 		return !d.Loading && len(d.Rows) == 3
 	})
@@ -85,13 +80,14 @@ func TestFileBrowserListsExpandsAndRefreshes(t *testing.T) {
 	}
 }
 
-func TestFileBrowserRowsDoNotReadWhileTabIsClosed(t *testing.T) {
+func TestFileBrowserRowsDoNotReadWhilePanelIsClosed(t *testing.T) {
 	c := NewCoordinator()
 	root := t.TempDir()
 	writeFiles(t, root, "a.txt")
 	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
 
-	d := c.sessionFiles(s)
+	s.shell.InspectorOpen = false
+	_, d, _, _ := s.optionalHosts(c)
 	if d.Loading || len(d.Rows) != 0 {
 		t.Fatalf("a closed tab read the disk: %+v", d)
 	}
@@ -112,7 +108,6 @@ func TestFileBrowserProjectionIsReusedUntilStateChanges(t *testing.T) {
 	}
 	writeFiles(t, root, "a.txt", "src/main.go")
 	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
-	s.shell.InspectorTab = chrome.InspectorTabFiles
 
 	first := waitForFiles(t, c, s, func(d chrome.FileBrowserData) bool {
 		return !d.Loading && len(d.Rows) == 2
@@ -158,7 +153,6 @@ func TestFileBrowserSteadyFrameDoesNotAllocate(t *testing.T) {
 	c := NewCoordinator()
 	root := t.TempDir()
 	s := &ProjectWindow{coord: c, project: root, shell: chrome.DefaultShell()}
-	s.shell.InspectorTab = chrome.InspectorTabFiles
 	fb := newFileBrowser()
 	var rootEntries []fileEntry
 	for d := 0; d < 20; d++ {

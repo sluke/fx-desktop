@@ -126,14 +126,10 @@ type ShellState struct {
 	// flag rather than keeping one each.
 	ConsoleOpen bool
 	ConsoleRun  uint64
-	// InspectorOpen shows the right-hand telemetry panel. It is on by
+	// InspectorOpen shows the right-hand file browser. It is on by
 	// default and gives way to the review drawer and to windows that are
 	// too narrow to keep a usable conversation beside it.
 	InspectorOpen bool
-	// InspectorTab chooses what the right-hand panel shows: the telemetry
-	// readout or the workspace file browser. It is app state, so the tab
-	// survives a repaint and every way in (the tab bar itself) agrees.
-	InspectorTab int
 	// FileRows is the file browser's list state. The panel virtualizes its
 	// rows, so a folder with hundreds of entries builds only what shows,
 	// and an expanded tree keeps its scroll position across repaints.
@@ -262,7 +258,9 @@ type Actions struct {
 	// ChooseConfig opens an fx config picker; an empty id opens the full overview.
 	// Only a native session has one: a terminal window changes its own
 	// model with fx's /model.
-	ChooseConfig func(configID string)
+	ChooseConfig     func(configID string)
+	ChooseModel      func()
+	InterruptSession func()
 	// Ask runs one noninteractive `fx ask` request in its own window.
 	Ask func(prompt string)
 	// AskAdvanced is the native Quick ask form. When it is set the form
@@ -285,16 +283,12 @@ type Actions struct {
 	// ToggleConsole opens or closes the console drawer; SelectConsole makes
 	// one run the one on screen; CloseConsoleRun ends a run and drops its
 	// tab. All three are nil where the window has no console to show.
-	ToggleConsole   func()
-	SelectConsole   func(id uint64)
-	CloseConsoleRun func(id uint64)
-	// SelectInspectorTab chooses the right-hand panel's tab. The file
-	// browser also needs its folders read, expanded and opened; each row
-	// dispatches through the action below rather than touching the disk
-	// during a frame.
-	SelectInspectorTab func(tab int)
-	ToggleFileDir      func(path string)
-	OpenFile           func(path string)
+	OpenConsoleShell func()
+	ToggleConsole    func()
+	SelectConsole    func(id uint64)
+	CloseConsoleRun  func(id uint64)
+	ToggleFileDir    func(path string)
+	OpenFile         func(path string)
 	// OpenFileInEditor opens a file in the platform's default text editor,
 	// as distinct from OpenFile's "whatever the file's type opens".
 	OpenFileInEditor func(path string)
@@ -398,7 +392,7 @@ var Commands = []Command{
 	{ID: "draft-issue", Label: "fx: Draft an issue", Icon: IconFile},
 	{ID: "run-doctor", Label: "fx: Run doctor", Icon: IconTerminal},
 	{ID: "sign-in", Label: "fx: Sign in", Hint: "fx login", Icon: IconTerminal},
-	{ID: "check-updates", Label: "fx: Check for Updates", Icon: IconClock},
+	{ID: "check-updates", Label: "fx: Upgrade CLI", Icon: IconClock},
 	{ID: "show-credits", Label: "fx: Credits and balance", Icon: IconClock},
 	{ID: "mcp-list", Label: "fx: List MCP servers", Icon: IconChanges},
 	{ID: "open-config", Label: "fx: Open fx state", Icon: IconFile},
@@ -527,7 +521,6 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 	bar := c.TitleBar()
 	left := bar.Left + 14
 	width, _ := c.Size()
-	showChips := h.Conversation && !h.CenterOnly && width >= 980
 	ui.Row(c).Shrink(0).Height(titleBarHeight).AlignItems(ui.Center).Gap(Space4).
 		Background(p.Window).
 		BorderWidth(0, 0, 1, 0).BorderColor(p.Hairline).
@@ -552,28 +545,6 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 				}
 			})
 			ui.Box(c).Grow(1)
-			if showChips {
-				if h.Agent.Model != "" {
-					ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(Space3).Padding(Space1, Space4).Radius(RadiusChip).
-						Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
-						signalDot(c, p.Purple, 5)
-						mono(ui.Text(c, shortChoice(h.Agent.Model))).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
-					})
-				}
-				if h.Agent.Status != "" {
-					col := p.OK
-					if strings.EqualFold(h.Agent.Status, "attention") {
-						col = p.Warn
-					} else if strings.EqualFold(h.Agent.Status, "exited") {
-						col = p.InkMuted
-					}
-					ui.Row(c).Shrink(0).AlignItems(ui.Center).Gap(Space3).Padding(Space1, Space4).Radius(RadiusChip).
-						Background(p.Surface).BorderWidth(1).BorderColor(p.Hairline).Children(func() {
-						signalDot(c, col, 5)
-						mono(ui.Text(c, h.Agent.Status)).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
-					})
-				}
-			}
 			if !h.CenterOnly {
 				ui.Button(c, "").Label("Commands").Tooltip("Commands (⌘K)").Padding(Space3).BorderWidth(0).Background(p.Window).
 					OnClick(func() { OpenPalette(sh) }).
@@ -586,7 +557,7 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 				probe := ShellState{InspectorOpen: true}
 				if inspectorWidth(width, h, &probe) > 0 {
 					active := sh.InspectorOpen
-					btn := ui.Button(c, "").Label("Toggle Inspector").Tooltip("Toggle Inspector").
+					btn := ui.Button(c, "").Label("Toggle Files").Tooltip("Toggle Files").
 						Padding(Space3).Radius(controlRadius).BorderWidth(0).Background(p.Window).
 						OnClick(func() { sh.InspectorOpen = !sh.InspectorOpen })
 					if active {
@@ -597,7 +568,7 @@ func titleBar(c *ui.Context, h Host, p Palette, sh *ShellState) {
 						if active {
 							col = p.Accent
 						}
-						ui.Icon(c, IconGauge).FontSize(IconLarge).TextColor(col)
+						ui.Icon(c, IconExplorer).FontSize(IconLarge).TextColor(col)
 					})
 				}
 			}
@@ -613,7 +584,7 @@ func brandMark(c *ui.Context, p Palette) {
 	})
 }
 
-// inspectorWidth answers whether the telemetry panel belongs in this frame.
+// inspectorWidth answers whether the file panel belongs in this frame.
 // It gives way to the review drawer — one side panel at a time — and to a
 // window too narrow to keep a usable conversation beside it.
 func inspectorWidth(window float32, h Host, sh *ShellState) float32 {
@@ -1227,7 +1198,7 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 				BorderWidth(1, 0, 0, 0).BorderColor(p.Hairline).
 				Children(func() {
 					ui.Box(c).Grow(1)
-					mono(ui.Text(c, itoa(availableCommands(h))+" commands")).FontSize(TypeBadge).TextColor(p.InkFaint)
+					mono(ui.Text(c, itoa(rows)+" commands")).FontSize(TypeBadge).TextColor(p.InkFaint)
 				})
 		})
 	})
@@ -1237,50 +1208,74 @@ func commandPalette(c *ui.Context, h Host, sh *ShellState, p Palette) {
 // entry. A command window has no workspace, so it has no model to choose
 // and no repository to ask about — and a row that opens nothing is a lie.
 func commandAvailable(h Host, cmd Command) bool {
+	a := h.Actions
 	switch cmd.ID {
+	case "toggle-sidebar":
+		return !h.CenterOnly
 	case "workspace-tools":
-		return h.Actions.ManageWorkspace != nil && h.Data.ProjectPath != ""
+		return h.Data.ProjectPath != "" && a.ManageWorkspace != nil
 	case "ask":
-		return h.Data.ProjectPath != "" && (h.Actions.AskAdvanced != nil || h.Actions.Ask != nil)
-	case "set-model", "session-settings":
-		// Only a native session has a config picker to open; a terminal
-		// window changes its own model with fx's /model.
-		return h.Actions.ChooseConfig != nil
-	case "sign-in":
-		// fx login needs no workspace, so this stays available in every
-		// window kind: a signed-out user must be able to reach it before
-		// they have opened a folder.
-		return h.Actions.SignIn != nil
-	case "attach-image":
-		return h.Actions.AttachImage != nil
-	case "paste-image":
-		return h.Actions.PasteImage != nil
-	case "review-changes":
-		// The drawer reads one workspace's tree; without an action behind
-		// it there is nothing to open.
-		return h.Actions.ToggleReview != nil
-	case "toggle-console":
-		// A window with no console to show — a command window, whose whole
-		// surface is already a terminal — does not offer the drawer.
-		return h.Actions.ToggleConsole != nil
-	// These spawn fx against a repository: without a workspace they would
-	// run in the app's own directory, which is never what the user meant.
-	case "continue-session", "draft-pr", "draft-issue":
-		return h.Data.ProjectPath != ""
+		return h.Data.ProjectPath != "" && (a.AskAdvanced != nil || a.Ask != nil)
+	case "continue-session":
+		return h.Data.ProjectPath != "" && len(h.Data.Saved) > 0 && a.RunCommand != nil
+	case "draft-pr", "draft-issue", "mcp-list", "show-credits":
+		return h.Data.ProjectPath != "" && a.RunCommand != nil
+	case "run-doctor", "sign-in", "check-updates":
+		return !h.Data.Welcome && paletteAction(a, cmd.ID) != nil
+	case "refresh-status":
+		return h.Data.ProjectPath != "" && a.RunCommand != nil
+	case "focus-attention":
+		for _, session := range h.Sessions {
+			if session.ID != h.Active && session.Status.NeedsAttention() && a.FocusSession != nil {
+				return true
+			}
+		}
+		return false
+	default:
+		return paletteAction(a, cmd.ID) != nil
 	}
-	return true
 }
 
-// availableCommands counts the rows this window can run, which is what the
-// palette footer advertises.
-func availableCommands(h Host) int {
-	n := 0
-	for _, cmd := range Commands {
-		if commandAvailable(h, cmd) {
-			n++
+func paletteAction(a Actions, id string) func() {
+	switch id {
+	case "open-folder":
+		return a.OpenFolder
+	case "new-session":
+		return a.NewSession
+	case "run-doctor":
+		return a.RunDoctor
+	case "workspace-tools":
+		return a.ManageWorkspace
+	case "sign-in":
+		return a.SignIn
+	case "session-settings":
+		if a.ChooseConfig != nil {
+			return func() { a.ChooseConfig("") }
 		}
+	case "set-model":
+		return a.ChooseModel
+	case "paste-image":
+		return a.PasteImage
+	case "attach-image":
+		return a.AttachImage
+	case "preferences":
+		return a.OpenPreferences
+	case "docs":
+		return a.OpenDocs
+	case "refresh-git":
+		return a.RefreshChanges
+	case "open-config":
+		return a.OpenConfig
+	case "check-updates":
+		return a.CheckUpdates
+	case "review-changes":
+		return a.ToggleReview
+	case "toggle-console":
+		return a.ToggleConsole
+	case "session-interrupt":
+		return a.InterruptSession
 	}
-	return n
+	return nil
 }
 
 // askDialog is the native front end for fx ask. It keeps the one-shot
@@ -1455,29 +1450,26 @@ func askDialog(c *ui.Context, h Host, sh *ShellState, p Palette) {
 
 func runCommand(h Host, sh *ShellState, cmd Command) {
 	sh.PaletteOpen = false
-	switch {
-	case cmd.ID == "toggle-sidebar":
+	if !commandAvailable(h, cmd) {
+		return
+	}
+	switch cmd.ID {
+	case "toggle-sidebar":
 		sh.SidebarOpen = !sh.SidebarOpen
+	case "focus-attention":
+		for _, session := range h.Sessions {
+			if session.ID != h.Active && session.Status.NeedsAttention() {
+				h.Actions.FocusSession(session.ID)
+				return
+			}
+		}
+	case "ask":
+		sh.AskOpen = true
 	default:
 		if h.Actions.RunCommand != nil {
 			h.Actions.RunCommand(cmd.ID)
-		} else if (cmd.ID == "session-settings" || cmd.ID == "set-model") && h.Actions.ChooseConfig != nil {
-			id := ""
-			if cmd.ID == "set-model" {
-				id = "model"
-			}
-			h.Actions.ChooseConfig(id)
-		} else {
-			// Picker/setup hosts expose shared actions without a session dispatcher.
-			actions := map[string]func(){"open-folder": h.Actions.OpenFolder, "new-session": h.Actions.NewSession,
-				"workspace-tools": h.Actions.ManageWorkspace,
-				"preferences":     h.Actions.OpenPreferences, "docs": h.Actions.OpenDocs, "open-config": h.Actions.OpenConfig,
-				"run-doctor": h.Actions.RunDoctor, "check-updates": h.Actions.CheckUpdates,
-				"sign-in": h.Actions.SignIn, "review-changes": h.Actions.ToggleReview,
-				"toggle-console": h.Actions.ToggleConsole}
-			if action := actions[cmd.ID]; action != nil {
-				action()
-			}
+		} else if action := paletteAction(h.Actions, cmd.ID); action != nil {
+			action()
 		}
 	}
 }
