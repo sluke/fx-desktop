@@ -744,7 +744,7 @@ func (c *chatSession) start() (*acp.Client, error) {
 			} `json:"_meta"`
 		} `json:"agentCapabilities"`
 	}
-	if err = client.Call(ctx, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]string{"name": "fx-desktop", "version": "0.1.0"}, "clientCapabilities": map[string]any{"session": map[string]any{"notices": map[string]any{}}}, "_meta": map[string]any{"fx": map[string]bool{"terminal": false}}}, &init); err != nil {
+	if err = client.Call(ctx, "initialize", map[string]any{"protocolVersion": 1, "clientInfo": map[string]string{"name": "fx-desktop", "version": "0.2.0"}, "clientCapabilities": map[string]any{"session": map[string]any{"notices": map[string]any{}}}, "_meta": map[string]any{"fx": map[string]bool{"terminal": false}}}, &init); err != nil {
 		return client, c.abandonStart(client, err)
 	}
 	if init.ProtocolVersion != 1 {

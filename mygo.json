@@ -1,7 +1,7 @@
 {
   "name": "fx",
   "identifier": "sh.fx.desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "out": "outputs",
   "urlSchemes": ["fx-desktop"],
   "macos": {
