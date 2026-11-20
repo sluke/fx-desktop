@@ -1376,15 +1376,13 @@ func (c *chatSession) event(p acp.Packet) {
 			m.Text, m.Diff = text, diff
 		}
 		m.Done = m.Status == "completed" || m.Status == "failed"
-		// Time the call so the transcript can say what it cost: a row that
-		// reads "Running" next to a word like "Completed" tells the reader
-		// nothing, but a duration and a state do.
-		now := time.Now()
-		if m.Started.IsZero() {
-			m.Started = now
+		// Only a live announcement and a later completion delimit an
+		// observed interval. A session/load replay can deliver both at once.
+		if c.busy && !ok && u.Kind == "tool_call" && !m.Done {
+			m.Started = time.Now()
 		}
-		if m.Done && m.Ended.IsZero() {
-			m.Ended = now
+		if m.Done && !m.Started.IsZero() && m.Ended.IsZero() {
+			m.Ended = time.Now()
 		}
 		c.markMessageDirtyLocked(index)
 	case "session_info_update":

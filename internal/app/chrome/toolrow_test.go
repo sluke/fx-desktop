@@ -45,6 +45,7 @@ func TestToolRowShowsStateAndDuration(t *testing.T) {
 func TestFormatDuration(t *testing.T) {
 	cases := map[time.Duration]string{
 		0:                       "0ms",
+		time.Microsecond:        "<1ms",
 		20 * time.Millisecond:   "20ms",
 		340 * time.Millisecond:  "340ms",
 		1200 * time.Millisecond: "1.2s",

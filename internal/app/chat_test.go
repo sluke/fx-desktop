@@ -1135,3 +1135,24 @@ func TestFileURIEscapesPathCharacters(t *testing.T) {
 		})
 	}
 }
+
+func TestToolDurationNeedsALiveStart(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		c := newChatSession("", "", nil, nil)
+		c.busy = live
+		event := func(kind, id, status string) {
+			params := fmt.Sprintf(`{"update":{"sessionUpdate":%q,"toolCallId":%q,"status":%q}}`, kind, id, status)
+			c.event(acp.Packet{Method: "session/update", Params: json.RawMessage(params)})
+		}
+		event("tool_call", "finished", "completed")
+		event("tool_call", "pair", "in_progress")
+		event("tool_call_update", "pair", "completed")
+		rows := c.snapshot().Messages
+		if len(rows) != 2 || !rows[0].Started.IsZero() || !rows[0].Ended.IsZero() {
+			t.Fatalf("completion-only event acquired timing: %+v", rows)
+		}
+		if rows[1].Started.IsZero() == live || rows[1].Ended.IsZero() == live {
+			t.Fatalf("live=%v unexpected timing: %+v", live, rows[1])
+		}
+	}
+}

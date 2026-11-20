@@ -660,7 +660,7 @@ func toolStateLabel(status string) string {
 // toolDuration is how long a tool call took. The app times the call as it
 // arrives, so the transcript can say what the call cost.
 func toolDuration(m ChatMessage) (time.Duration, bool) {
-	if m.Started.IsZero() || m.Ended.IsZero() || m.Ended.Before(m.Started) {
+	if m.Started.IsZero() || m.Ended.IsZero() || !m.Ended.After(m.Started) {
 		return 0, false
 	}
 	return m.Ended.Sub(m.Started), true
@@ -670,6 +670,8 @@ func toolDuration(m ChatMessage) (time.Duration, bool) {
 // does: milliseconds for the quick calls, seconds for the slow ones.
 func formatDuration(d time.Duration) string {
 	switch {
+	case d > 0 && d < time.Millisecond:
+		return "<1ms"
 	case d < time.Second:
 		return itoa(int(d.Milliseconds())) + "ms"
 	case d < time.Minute:
@@ -1016,6 +1018,7 @@ func conversationMessage(c *ui.Context, state *ConversationState, m ChatMessage,
 		case "completed":
 			stateCol = p.OK
 		case "failed":
+			stateText = "failed"
 			stateCol = p.Danger
 		case "pending":
 			stateCol = p.InkFaint
