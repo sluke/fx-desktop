@@ -169,6 +169,7 @@ func (c *Coordinator) sessionActions(s *ProjectWindow) chrome.Actions {
 	a.ToggleFileDir = func(path string) { c.toggleFileDir(s, path) }
 	a.OpenFile = func(path string) { c.openFileWithDefaultApp(s, path) }
 	a.OpenFileInEditor = func(path string) { c.openFileInTextEditor(s, path) }
+	a.ToggleFileSort = func() { c.reloadFiles(s, true) }
 	a.RefreshFiles = func() { c.refreshFiles(s) }
 	// The console belongs to a project window: it is where the runs that
 	// need the workspace (fx doctor, fx pr, fx login) report back (§4.7).

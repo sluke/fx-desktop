@@ -196,7 +196,7 @@ func TestReadFileEntriesCapsWithoutLosingTotal(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	entries, total, err := readFileEntries(context.Background(), root)
+	entries, total, err := readFileEntries(context.Background(), root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +205,18 @@ func TestReadFileEntriesCapsWithoutLosingTotal(t *testing.T) {
 	}
 	if entries[0].name != "f0000.txt" || entries[len(entries)-1].name != fmt.Sprintf("f%04d.txt", maxFileEntries-1) {
 		t.Fatalf("kept range = %s .. %s", entries[0].name, entries[len(entries)-1].name)
+	}
+	newest := fmt.Sprintf("f%04d.txt", maxFileEntries)
+	stamp := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(root, newest), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err = readFileEntries(context.Background(), root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != maxFileEntries || entries[0].name != newest {
+		t.Fatal("most recently modified file missing from top of capped listing")
 	}
 }
 
@@ -215,7 +227,7 @@ func TestReadFileEntriesOrdersFoldersThenNames(t *testing.T) {
 	}
 	writeFiles(t, root, "alpha.txt", "Zeta.txt", "beta.txt")
 
-	entries, total, err := readFileEntries(context.Background(), root)
+	entries, total, err := readFileEntries(context.Background(), root, false)
 	if err != nil || total != 4 || len(entries) != 4 {
 		t.Fatalf("read: entries=%v total=%d err=%v", entries, total, err)
 	}

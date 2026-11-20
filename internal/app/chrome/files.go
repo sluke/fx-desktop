@@ -35,10 +35,11 @@ type FileRow struct {
 // FileBrowserData is the Files tab: the root the rows belong to and the
 // flattened, ordered rows the user has expanded.
 type FileBrowserData struct {
-	Root    string
-	Rows    []FileRow
-	Loading bool
-	Problem string
+	ByModified bool
+	Root       string
+	Rows       []FileRow
+	Loading    bool
+	Problem    string
 }
 
 // fileBrowserPanel is the workspace tree. Rows come already flattened and
@@ -86,6 +87,16 @@ func fileBrowserHead(c *ui.Context, h Host, p Palette) {
 		mono(ui.Text(c, name)).FontSize(TypeLabel).FontWeight(600).TextColor(p.InkStrong).
 			SingleLine().MinWidth(0)
 		ui.Box(c).Grow(1)
+		if h.Actions.ToggleFileSort != nil {
+			caption, next := "Name", "Sort by modification time, newest first"
+			if h.Files.ByModified {
+				caption, next = "Modified ↓", "Sort by name"
+			}
+			ui.Button(c, caption).Label(next).Tooltip(next).
+				FontSize(TypeBadge).BorderWidth(1).BorderColor(p.Hairline).Background(p.Surface).
+				TextColor(p.InkMuted).Padding(Space1, Space3).Radius(RadiusChip).
+				OnClick(h.Actions.ToggleFileSort)
+		}
 		if h.Actions.RefreshFiles != nil {
 			ui.Button(c, "Refresh").Label("Refresh files").Tooltip("Re-read the workspace").
 				FontSize(TypeBadge).BorderWidth(1).BorderColor(p.Hairline).Background(p.Surface).

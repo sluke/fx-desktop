@@ -298,6 +298,7 @@ type Actions struct {
 	// OpenFileInEditor opens a file in the platform's default text editor,
 	// as distinct from OpenFile's "whatever the file's type opens".
 	OpenFileInEditor func(path string)
+	ToggleFileSort   func()
 	RefreshFiles     func()
 }
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/egoist/mygo"
 
@@ -39,12 +40,13 @@ type fileEntry struct {
 // guarded by the owning window's mu: directory reads finish on their own
 // goroutine, and the frame reads what they left behind.
 type fileBrowser struct {
-	entries   map[string][]fileEntry // absolute folder -> ordered entries
-	read      map[string]bool        // the folder has been read once
-	expanded  map[string]bool        // the user opened this folder
-	problems  map[string]string      // why a read failed
-	loading   map[string]bool        // a read is in flight
-	truncated map[string]int         // entries the cap left out
+	byModified bool
+	entries    map[string][]fileEntry // absolute folder -> ordered entries
+	read       map[string]bool        // the folder has been read once
+	expanded   map[string]bool        // the user opened this folder
+	problems   map[string]string      // why a read failed
+	loading    map[string]bool        // a read is in flight
+	truncated  map[string]int         // entries the cap left out
 	// rows is the flattened projection of all of the above. A frame draws the
 	// same tree many times between two changes, so it is rebuilt lazily on the
 	// first frame after a write instead of on every repaint. Both fields are
@@ -127,7 +129,7 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 			s.invalidate()
 			return
 		}
-		entries, total, err := readFileEntries(ctx, dir)
+		entries, total, err := readFileEntries(ctx, dir, fb.byModified)
 		s.workspace.mu.Lock()
 		// A refresh replaces the browser while a read is in flight. The
 		// answer belongs to the browser that asked for it; filing it into
@@ -155,7 +157,7 @@ func (c *Coordinator) ensureFiles(s *ProjectWindow, dir string) {
 // readFileEntries lists one folder: folders first, then files, each by name
 // without case. A symlinked folder is shown as a folder, since expanding it
 // reads through the link, which is what the click asked for.
-func readFileEntries(ctx context.Context, dir string) ([]fileEntry, int, error) {
+func readFileEntries(ctx context.Context, dir string, byModified bool) ([]fileEntry, int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -185,6 +187,14 @@ func readFileEntries(ctx context.Context, dir string) ([]fileEntry, int, error) 
 					}
 				}
 				e := rankedEntry{fileEntry: fileEntry{name: item.Name(), dir: isDir}, lower: strings.ToLower(item.Name())}
+				if byModified {
+					if err := ctx.Err(); err != nil {
+						return nil, 0, err
+					}
+					if info, err := item.Info(); err == nil {
+						e.modified = info.ModTime()
+					}
+				}
 				if kept.Len() < maxFileEntries {
 					heap.Push(kept, e)
 					continue
@@ -206,23 +216,25 @@ func readFileEntries(ctx context.Context, dir string) ([]fileEntry, int, error) 
 		}
 	}
 	entries := make([]fileEntry, kept.Len())
+	sort.Slice(*kept, func(i, j int) bool { return entryBefore((*kept)[i], (*kept)[j]) })
 	for i, e := range *kept {
 		entries[i] = e.fileEntry
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entryBefore(rankedEntry{fileEntry: entries[i], lower: strings.ToLower(entries[i].name)}, rankedEntry{fileEntry: entries[j], lower: strings.ToLower(entries[j].name)})
-	})
 	return entries, total, nil
 }
 
 type rankedEntry struct {
 	fileEntry
-	lower string
+	modified time.Time
+	lower    string
 }
 
 func entryBefore(a, b rankedEntry) bool {
 	if a.dir != b.dir {
 		return a.dir
+	}
+	if !a.modified.Equal(b.modified) {
+		return a.modified.After(b.modified)
 	}
 	if a.lower != b.lower {
 		return a.lower < b.lower
@@ -332,6 +344,7 @@ func (c *Coordinator) sessionFiles(s *ProjectWindow) chrome.FileBrowserData {
 	if !fb.read[s.project] && fb.loading[s.project] {
 		d.Loading = true
 	}
+	d.ByModified = fb.byModified
 	d.Problem = fb.problems[s.project]
 	// A repaint that changed nothing reuses the projection. The first frame
 	// after a listing or expansion change still walks the tree here, under
@@ -435,13 +448,17 @@ func (c *Coordinator) openFileInTextEditor(s *ProjectWindow, path string) {
 // refreshFiles discards the cached listings and re-reads the root and every
 // folder the user has open. The expansion itself survives: refreshing should
 // show a file added a moment ago, not close the tree the user built.
-func (c *Coordinator) refreshFiles(s *ProjectWindow) {
+func (c *Coordinator) refreshFiles(s *ProjectWindow) { c.reloadFiles(s, false) }
+
+func (c *Coordinator) reloadFiles(s *ProjectWindow, toggleSort bool) {
 	if s == nil || s.project == "" {
 		return
 	}
 	s.workspace.mu.Lock()
+	byModified := false
 	var expanded []string
 	if s.workspace.files != nil {
+		byModified = s.workspace.files.byModified
 		expanded = make([]string, 0, len(s.workspace.files.expanded))
 		for dir := range s.workspace.files.expanded {
 			expanded = append(expanded, dir)
@@ -451,6 +468,7 @@ func (c *Coordinator) refreshFiles(s *ProjectWindow) {
 	s.workspace.retireFileReads()
 	s.workspace.mu.Lock()
 	fb := newFileBrowser()
+	fb.byModified = byModified != toggleSort
 	for _, dir := range expanded {
 		fb.expanded[dir] = true
 	}
