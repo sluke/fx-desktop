@@ -115,12 +115,11 @@ func (c *Coordinator) sessionManagement(s *ProjectWindow) chrome.ManagementHost 
 			if path == "" {
 				return
 			}
-			if _, err := os.Stat(path); err != nil {
-				// Opening a missing workspace skills folder should still give
-				// the user a useful place: the project root.
-				path = filepath.Dir(filepath.Dir(path))
-			}
-			_ = mygo.Shell.OpenPath(path)
+			mygo.App.WhenReady(func() {
+				if err := mygo.Shell.OpenPath(path); err != nil {
+					mygo.Dialog.Error("Open path", err.Error())
+				}
+			})
 		},
 		Resume: func(id, workspace string) {
 			s.dispatch(func() {
@@ -1160,7 +1159,10 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 		case "slack-status":
 			text, err := managementReadJSON(ctx, executable, dir, "slack", "status", "--json")
 			var slack FxSlackStatus
-			if err == nil && json.Unmarshal([]byte(text), &slack) == nil {
+			if err == nil {
+				err = json.Unmarshal([]byte(text), &slack)
+			}
+			if err == nil {
 				result.slack = slackStatusView(&slack)
 				result.output = "Slack status read from fx."
 			} else {
@@ -1182,14 +1184,9 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				return
 			}
 			state.Busy = false
-			if result.output != "" {
-				state.Output = truncateText(result.output, maxToolsTextBytes)
-			}
+			state.Output = truncateText(result.output, maxToolsTextBytes)
 			if action == "details" {
 				state.Details = result.details
-				if result.output == "" {
-					state.Output = ""
-				}
 			}
 			if action == "doctor" {
 				state.Doctor = result.doctor
@@ -1198,6 +1195,7 @@ func (c *Coordinator) readManagement(s *ProjectWindow, action string, args []str
 				state.Credits = truncateText(result.credits, maxToolsTextBytes)
 			}
 			if action == "slack-status" {
+				state.SlackLoaded = result.problem == nil
 				state.Slack = result.slack
 				state.SlackProblem = ""
 				if result.problem != nil {

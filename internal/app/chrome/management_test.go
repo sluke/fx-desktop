@@ -10,8 +10,53 @@ import (
 )
 
 func TestWorkspaceToolsPagesAndDispatch(t *testing.T) {
-	for _, tc := range []struct{ page, button, action string }{{"Account", "Sign in", "login"}, {"MCP", "List servers", "mcp-list"}, {"Folders", "List directories", "workspace-list"}, {"Details", "Refresh details", "details"}, {"Sessions", "Browse history…", "sessions"}, {"Launch", "Start new conversation", "launch"}} {
-		t.Run(tc.page, func(t *testing.T) {
+	for _, tc := range []struct{ page, button, action string }{
+		{"Account", "Sign in", "login"},
+		{"Account", "Sign out", "logout"},
+		{"Account", "Configure Gateway key", "setup"},
+		{"Account", "Choose team", "teams"},
+		{"Account", "Set default provider", "provider-set"},
+		{"Account", "Refresh credits", "credits"},
+		{"MCP", "List servers", "mcp-list"},
+		{"MCP", "Check server", "mcp-show"},
+		{"MCP", "Add Slack", "mcp-add-slack"},
+		{"MCP", "Approve all project servers", "mcp-approve-all"},
+		{"MCP", "Add server", "mcp-add"},
+		{"MCP", "Sign in server", "mcp-login"},
+		{"MCP", "Sign out server", "mcp-logout"},
+		{"MCP", "Remove server", "mcp-remove"},
+		{"MCP", "Approve server", "mcp-approve"},
+		{"MCP", "Reject server", "mcp-reject"},
+		{"Folders", "List directories", "workspace-list"},
+		{"Folders", "Add directory", "workspace-add"},
+		{"Folders", "Remove directory", "workspace-remove"},
+		{"Folders", "Clear additional directories", "workspace-clear"},
+		{"Details", "Refresh details", "details"},
+		{"Details", "Run doctor", "doctor"},
+		{"Details", "Refresh credits", "credits"},
+		{"Details", "Upgrade on this channel", "upgrade-channel"},
+		{"Sessions", "Browse history…", "sessions"},
+		{"Sessions", "Inspect session", "session-inspect"},
+		{"Sessions", "Recover corrupt session", "session-recover"},
+		{"Sessions", "Show live sessions", "sessions-live"},
+		{"Sessions", "Read session tail", "session-tail"},
+		{"Sessions", "Refresh profiles", "profiles"},
+		{"Sessions", "Convert old sessions", "sessions-convert"},
+		{"Models", "Refresh models", "models"},
+		{"Models", "Clear filter", "models-clear"},
+		{"Launch", "Start new conversation", "launch"},
+		{"Launch", "Start with these options", "launch"},
+		{"Rules", "List settings", "config-list"},
+		{"Rules", "Save setting", "config-set"},
+		{"Rules", "Remove setting", "config-unset"},
+		{"Skills", "Refresh skills", "skills-load"},
+		{"Slack", "Refresh status", "slack-status"},
+		{"Slack", "Install workspace bot", "slack-install"},
+		{"Slack", "Refresh tokens", "slack-refresh"},
+		{"Slack", "Add Slack MCP server", "mcp-add-slack"},
+		{"GitHub", "Run GitHub action", "github-run"},
+	} {
+		t.Run(tc.page+"/"+tc.action, func(t *testing.T) {
 			h, sh := testHost()
 			h.Actions.ManageWorkspace = noop
 			sh.Tools = ManagementState{Open: true, Page: tc.page, Transport: "stdio", Period: "month", Ultra: "default"}
@@ -21,6 +66,19 @@ func TestWorkspaceToolsPagesAndDispatch(t *testing.T) {
 			panel, ok := ts.Find("Workspace tools")
 			if !ok || panel.X < 0 || panel.Y < 0 || panel.X+panel.W > 720 || panel.Y+panel.H > 560 {
 				t.Fatalf("tools panel outside window: %+v", panel)
+			}
+			// Scroll long pages as a user would before clicking the command.
+			body, ok := ts.Find("Workspace tool page")
+			if !ok {
+				t.Fatal("missing tool page")
+			}
+			for i := 0; i < 60; i++ {
+				r, found := ts.Find(tc.button)
+				if found && r.Y >= body.Y && r.Y+r.H <= body.Y+body.H {
+					break
+				}
+				ts.Scroll(body.X+body.W-5, body.Y+body.H/2, 0, 100)
+				ts.Frame()
 			}
 			if err := ts.Click(tc.button); err != nil {
 				t.Fatal(err)
@@ -446,5 +504,28 @@ func TestWorkspaceToolsRowButtonsFollowTheTypeScale(t *testing.T) {
 	}
 	if diff := got.H - ref.H; diff > 0.5 || diff < -0.5 {
 		t.Fatalf("row button is %.2f high, want the 11px row control's %.2f", got.H, ref.H)
+	}
+}
+
+func TestWorkspaceToolResults(t *testing.T) {
+	h, sh := testHost()
+	h.Actions.ManageWorkspace = noop
+	sh.Tools = ManagementState{Open: true, Page: "Details", Credits: "fixture balance"}
+	ts := ui.NewTester(func(c *ui.Context) { Frame(c, h) }, 1280, 800)
+	mustHave(t, ts, "fixture balance")
+	sh.Tools.Page = "Slack"
+	ts.Frame()
+	mustNotHave(t, ts, "Not installed")
+	sh.Tools.SlackLoaded = true
+	ts.Frame()
+	mustHave(t, ts, "Not installed")
+	sh.Tools.Page = "GitHub"
+	sh.Tools.GitHub.Busy = true
+	calls := 0
+	h.Management.Run = func(string) { calls++ }
+	ts.Frame()
+	_ = ts.Click("Run GitHub action")
+	if calls != 0 {
+		t.Fatal("busy GitHub action dispatched again")
 	}
 }

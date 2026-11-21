@@ -25,6 +25,7 @@ type ManagementState struct {
 	Details       []DetailSection
 	Doctor        []DoctorCheck
 	Credits       string
+	SlackLoaded   bool
 	Slack         SlackStatus
 	SlackProblem  string
 	GitHub        GitHubState
@@ -308,6 +309,13 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							ui.Text(c, value).FontSize(TypeControl).TextColor(p.Ink).Wrap().Selectable()
 						})
 					}
+					credits := func() {
+						if state.Credits != "" {
+							ui.Scroll(c).FillWidth().MaxHeight(100).Children(func() {
+								ui.Text(c, state.Credits).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).Wrap().Selectable().Padding(Space4, Space5).Background(p.Sunken)
+							})
+						}
+					}
 					if state.Output != "" {
 						ui.Scroll(c).FillWidth().MaxHeight(150).Label("Workspace tool output").Children(func() {
 							ui.Text(c, state.Output).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).Wrap().Selectable().Padding(Space4, Space5).Background(p.Sunken)
@@ -334,11 +342,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						ui.Row(c).Gap(Space4).Children(func() { button("Set default provider", "provider-set") })
 						section("Credits")
 						ui.Row(c).Gap(Space4).Children(func() { button("Refresh credits", "credits") })
-						if state.Credits != "" {
-							ui.Scroll(c).FillWidth().MaxHeight(100).Children(func() {
-								ui.Text(c, state.Credits).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).Wrap().Selectable().Padding(Space4, Space5).Background(p.Sunken)
-							})
-						}
+						credits()
 					case "MCP":
 						badge("Applies to new sessions")
 						section("Servers")
@@ -468,6 +472,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							button("Run doctor", "doctor")
 							button("Refresh credits", "credits")
 						})
+						credits()
 						ui.Button(c, "Open diagnostics folder").FontSize(TypeControl).Disabled(h.OpenPath == nil).OnClick(func() {
 							if h.OpenPath != nil {
 								if root, err := fxhome.Root(); err == nil {
@@ -538,29 +543,29 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 								label += agent.Name
 							} else if agent.Title != "" {
 								label += agent.Title
-						} else {
-							label += agent.CLIRef
-						}
-						stateName := agent.State
-						if stateName == "" {
-							stateName = "未提供"
-						}
-						if agent.Ambiguous {
-							stateName += " · " + agent.Note
-						}
-						ui.Row(c).FillWidth().Gap(Space3).AlignItems(ui.Center).Children(func() {
-							ui.Text(c, label).FontSize(TypeControl).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
-							ui.Text(c, stateName).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
-							ui.Button(c, "Select").Label("Select "+agent.UIKey).FontSize(TypeControl).Padding(InlinePadY, InlinePadX).Disabled(agent.CLIRef == "" || agent.Ambiguous).OnClick(func() {
-								// A disabled control must not dispatch either:
-								// the check here is the behaviour, not only
-								// the greyed-out look.
-								if agent.CLIRef == "" || agent.Ambiguous {
-									return
-								}
-								state.SessionID = agent.CLIRef
+							} else {
+								label += agent.CLIRef
+							}
+							stateName := agent.State
+							if stateName == "" {
+								stateName = "未提供"
+							}
+							if agent.Ambiguous {
+								stateName += " · " + agent.Note
+							}
+							ui.Row(c).FillWidth().Gap(Space3).AlignItems(ui.Center).Children(func() {
+								ui.Text(c, label).FontSize(TypeControl).TextColor(p.Ink).Grow(1).MinWidth(0).SingleLine()
+								ui.Text(c, stateName).Font(MonoFont).FontSize(TypeLabel).TextColor(p.InkMuted).SingleLine()
+								ui.Button(c, "Select").Label("Select "+agent.UIKey).FontSize(TypeControl).Padding(InlinePadY, InlinePadX).Disabled(agent.CLIRef == "" || agent.Ambiguous).OnClick(func() {
+									// A disabled control must not dispatch either:
+									// the check here is the behaviour, not only
+									// the greyed-out look.
+									if agent.CLIRef == "" || agent.Ambiguous {
+										return
+									}
+									state.SessionID = agent.CLIRef
+								})
 							})
-						})
 						}
 						for _, profile := range state.Profiles {
 							ui.Column(c).FillWidth().Gap(Space1).Padding(Space3, Space4).Radius(RadiusChip).Background(p.Sunken).Children(func() {
@@ -818,6 +823,9 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 						if state.SlackProblem != "" {
 							statusLine(state.SlackProblem)
 						}
+						if !state.SlackLoaded {
+							break
+						}
 						ui.Column(c).FillWidth().Gap(Space2).Padding(Space4, Space5).Radius(RadiusChip).Background(p.Sunken).Children(func() {
 							status := "Not installed"
 							if state.Slack.Installed {
@@ -840,7 +848,7 @@ func managementDialog(c *ui.Context, state *ManagementState, h ManagementHost, p
 							ui.Checkbox(c, &state.GitHub.Auto, "Let fx review permissions automatically").FontSize(TypeControl).Disabled(state.Busy || state.GitHub.Busy)
 							ui.Checkbox(c, &state.GitHub.Create, "Publish with GitHub").FontSize(TypeControl).Disabled(state.Busy || state.GitHub.Busy)
 						})
-						button("Run GitHub action", "github-run")
+						ui.Button(c, "Run GitHub action").FontSize(TypeControl).Padding(ButtonPadY, ButtonPadX).Disabled(state.Busy || state.GitHub.Busy || h.Run == nil).OnClick(func() { h.Run("github-run") })
 						if state.GitHub.Busy {
 							statusLine("Running fx…")
 						}
