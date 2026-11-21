@@ -84,6 +84,7 @@ type ShellState struct {
 	PaletteScrolled  string
 	PaletteHover     string
 	CommitMsg        string
+	GitWriteBusy     bool
 	AskOpen          bool
 	AskPrompt        string
 	// Quick ask is a native form over fx's one-shot surface. The output is
@@ -315,11 +316,12 @@ const (
 )
 
 type SidebarData struct {
-	ProjectPath string
-	FxVersion   string
-	Recent      []string
-	Changes     []Change
-	Saved       []SavedSession
+	ProjectPath       string
+	FxVersion         string
+	Recent            []string
+	Changes           []Change
+	ChangesIncomplete bool
+	Saved             []SavedSession
 
 	// Workspace is the project's git as the rail's Changes line reads it.
 	Workspace WorkspaceState

@@ -215,6 +215,10 @@ func changesEntry(c *ui.Context, h Host, p Palette) {
 	if len(h.Data.Changes) == 0 {
 		hairlineH(c, p)
 		sectionLabel(c, p, "Changes", "")
+		if h.Data.ChangesIncomplete {
+			sidebarEmptyState(c, p, IconFile, "Change list incomplete")
+			return
+		}
 		switch h.Data.Workspace {
 		case WorkspaceFailed:
 			sidebarEmptyState(c, p, IconAlert, "Could not read the workspace")
@@ -261,6 +265,9 @@ func changesDetail(h Host) string {
 	out := itoa(n) + " changed"
 	if a > 0 || d > 0 {
 		out += " · +" + itoa(a) + " −" + itoa(d)
+	}
+	if h.Data.ChangesIncomplete {
+		out += " · incomplete"
 	}
 	return out
 }

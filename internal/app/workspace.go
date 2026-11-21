@@ -180,10 +180,11 @@ func (w *workspaceController) publishGit(gen uint64, info *GitInfo, err error) b
 // changeStamp is what one working-tree read says about one changed file: the
 // facts that move when the file's diff would. It is compared, never shown.
 type changeStamp struct {
-	listed     bool
-	kind       string
-	adds, dels int
-	modified   time.Time
+	renamedFrom string
+	listed      bool
+	kind        string
+	adds, dels  int
+	modified    time.Time
 }
 
 // stampFor reads path's stamp from a working-tree read.
@@ -193,7 +194,7 @@ func stampFor(git *GitInfo, path string) changeStamp {
 	}
 	for _, change := range git.Changes {
 		if change.Path == path {
-			return changeStamp{listed: true, kind: change.Kind, adds: change.Adds, dels: change.Dels, modified: git.Modified[path]}
+			return changeStamp{renamedFrom: git.RenamedFrom[path], listed: true, kind: change.Kind, adds: change.Adds, dels: change.Dels, modified: git.Modified[path]}
 		}
 	}
 	return changeStamp{}

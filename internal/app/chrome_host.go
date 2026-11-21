@@ -414,24 +414,34 @@ func (c *Coordinator) runCommand(s *ProjectWindow, id string) {
 // thread — a 30s commit must not freeze the window — and reports back
 // through the app loop, where alone a dialog may be shown.
 func (c *Coordinator) commitChanges(s *ProjectWindow) {
-	msg := strings.TrimSpace(s.shell.CommitMsg)
+	if s.shell.GitWriteBusy {
+		return
+	}
+	draft := s.shell.CommitMsg
+	msg := strings.TrimSpace(draft)
 	if msg == "" {
 		mygo.Dialog.Error("Commit", "Write a commit message first")
 		return
 	}
-	n := s.workspace.changeCount()
+	git, _ := s.workspace.gitSnapshot()
 	detail := "This stages every change in the working tree and commits it."
-	if n > 0 {
-		detail = fmt.Sprintf("This stages all %d changed file(s) and commits them.", n)
+	if git != nil && !git.ListTruncated && len(git.Changes) > 0 {
+		detail = fmt.Sprintf("This stages all %d changed file(s) and commits them.", len(git.Changes))
 	}
+	s.shell.GitWriteBusy = true
+	s.invalidate()
 	res, err := mygo.Dialog.Message(mygo.MessageOptions{
-		Type:    mygo.MessageQuestion,
-		Title:   "Commit",
-		Message: "Stage everything and commit?",
-		Detail:  detail,
-		Buttons: []string{"Commit", "Cancel"},
+		Parent:        s.winSnapshot(),
+		Type:          mygo.MessageQuestion,
+		Title:         "Commit",
+		Message:       "Stage everything and commit?",
+		Detail:        detail,
+		Buttons:       []string{"Commit", "Cancel"},
+		DefaultButton: 1, CancelButton: 1,
 	})
 	if err != nil || res.Button != 0 {
+		s.shell.GitWriteBusy = false
+		s.invalidate()
 		return
 	}
 	go func() {
@@ -441,12 +451,16 @@ func (c *Coordinator) commitChanges(s *ProjectWindow) {
 		}
 		finalOut, finalErr := out, err
 		s.dispatch(func() {
+			s.shell.GitWriteBusy = false
+			s.startGitRefresh()
+			s.invalidate()
 			if finalErr != nil {
-				mygo.Dialog.Error("Commit", firstLine(finalOut))
+				mygo.Dialog.Error("Commit", firstLineWith(finalOut, finalErr.Error()))
 				return
 			}
-			s.shell.CommitMsg = ""
-			s.startGitRefresh()
+			if s.shell.CommitMsg == draft {
+				s.shell.CommitMsg = ""
+			}
 		})
 	}()
 }
@@ -474,30 +488,41 @@ func runGitCommand(ctx context.Context, dir string, args ...string) ([]byte, err
 // below the irreversible actions — but it still stages everything, so it
 // asks first rather than silently restaging files the user had kept out.
 func (c *Coordinator) stageAll(s *ProjectWindow) {
-	n := s.workspace.changeCount()
-	detail := "Every change in the working tree will be staged."
-	if n > 0 {
-		detail = fmt.Sprintf("All %d changed file(s) will be staged.", n)
+	if s.shell.GitWriteBusy {
+		return
 	}
+	git, _ := s.workspace.gitSnapshot()
+	detail := "Every change in the working tree will be staged."
+	if git != nil && !git.ListTruncated && len(git.Changes) > 0 {
+		detail = fmt.Sprintf("All %d changed file(s) will be staged.", len(git.Changes))
+	}
+	s.shell.GitWriteBusy = true
+	s.invalidate()
 	res, err := mygo.Dialog.Message(mygo.MessageOptions{
-		Type:    mygo.MessageQuestion,
-		Title:   "Stage all",
-		Message: "Stage every change?",
-		Detail:  detail,
-		Buttons: []string{"Stage", "Cancel"},
+		Parent:        s.winSnapshot(),
+		Type:          mygo.MessageQuestion,
+		Title:         "Stage all",
+		Message:       "Stage every change?",
+		Detail:        detail,
+		Buttons:       []string{"Stage", "Cancel"},
+		DefaultButton: 1, CancelButton: 1,
 	})
 	if err != nil || res.Button != 0 {
+		s.shell.GitWriteBusy = false
+		s.invalidate()
 		return
 	}
 	go func() {
 		out, err := runGitCommand(s.lifetime(), s.project, "add", "-A")
 		finalOut, finalErr := out, err
 		s.dispatch(func() {
+			s.shell.GitWriteBusy = false
+			s.startGitRefresh()
+			s.invalidate()
 			if finalErr != nil {
-				mygo.Dialog.Error("Stage all", firstLine(finalOut))
+				mygo.Dialog.Error("Stage all", firstLineWith(finalOut, finalErr.Error()))
 				return
 			}
-			s.startGitRefresh()
 		})
 	}()
 }
@@ -550,6 +575,7 @@ func (c *Coordinator) sessionData(s *ProjectWindow) chrome.SidebarData {
 	git, gitErr := s.workspace.gitSnapshot()
 	if git != nil {
 		d.Changes = git.Changes
+		d.ChangesIncomplete = git.incomplete()
 	}
 	d.Workspace = workspaceState(git, gitErr)
 	now := time.Now()

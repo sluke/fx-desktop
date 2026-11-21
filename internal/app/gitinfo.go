@@ -22,8 +22,9 @@ type GitInfo struct {
 	// git last recorded a commit. Together they are the reviewed watermark
 	// §5 and §12.0 define: a change older than both has already been through a
 	// commit or a review, so the rail does not raise it again.
-	Modified   map[string]time.Time
-	LastCommit time.Time
+	RenamedFrom map[string]string
+	Modified    map[string]time.Time
+	LastCommit  time.Time
 	// ListTruncated means `git status` hit the read budget: Changes is a
 	// prefix of the tree's changes, so a path that is absent from it has not
 	// been shown to be clean. CountsTruncated means only the numstat read was
@@ -197,11 +198,17 @@ func gitInfoWithin(ctx context.Context, dir string, statusBudget, countsBudget i
 			// -z puts the new path first and the old path in the next
 			// record. The drawer works on the file that exists now.
 			i++
+			if strings.Contains(xy, "R") && i < len(records) && records[i] != "" {
+				if info.RenamedFrom == nil {
+					info.RenamedFrom = make(map[string]string)
+				}
+				info.RenamedFrom[path] = records[i]
+			}
 		}
 		if path == "" {
 			continue
 		}
-		if fi, statErr := os.Stat(filepath.Join(root, path)); statErr == nil {
+		if fi, statErr := os.Lstat(filepath.Join(root, path)); statErr == nil {
 			info.Modified[path] = fi.ModTime()
 		}
 		info.Changes = append(info.Changes, workspace.Change{
@@ -267,6 +274,10 @@ const maxReviewDiffLines = workspace.MaxUnifiedDiffLines
 // /dev/null: the drawer then shows what would be added instead of an empty
 // pane that looks like "nothing changed here".
 func gitFileDiff(ctx context.Context, dir, path string) ([]workspace.DiffLine, int, bool, error) {
+	return gitFileDiffFrom(ctx, dir, path, "")
+}
+
+func gitFileDiffFrom(ctx context.Context, dir, path, renamedFrom string) ([]workspace.DiffLine, int, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -289,6 +300,9 @@ func gitFileDiff(ctx context.Context, dir, path string) ([]workspace.DiffLine, i
 		args = []string{"diff", "--no-color", "--no-index", "--", os.DevNull, full}
 	} else {
 		args = []string{"diff", "--no-color", base, "--", gitLiteralPathspec(path)}
+		if renamedFrom != "" {
+			args = append(args, gitLiteralPathspec(renamedFrom))
+		}
 	}
 	res := gitCommandOutput(ctx, root, maxGitDiffBytes, args...)
 	out := res.data
@@ -331,7 +345,7 @@ func gitIsUntracked(ctx context.Context, dir, path string) (bool, error) {
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
 		return false, err
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, path)); statErr != nil {
+	if _, statErr := os.Lstat(filepath.Join(dir, path)); statErr != nil {
 		return false, nil
 	}
 	return true, nil
@@ -367,6 +381,8 @@ func gitMark(xy string) string {
 	switch {
 	case strings.Contains(xy, "D"):
 		return "D"
+	case strings.Contains(xy, "R"):
+		return "R"
 	case strings.Contains(xy, "A"), strings.Contains(xy, "?"):
 		return "A"
 	default:

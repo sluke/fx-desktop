@@ -89,6 +89,9 @@ func reviewHeader(c *ui.Context, h Host, p Palette) {
 // clean tree says so rather than showing an empty tally.
 func reviewSummary(d ReviewData) string {
 	if len(d.Changes) == 0 {
+		if d.ListTruncated {
+			return "Change list incomplete"
+		}
 		switch d.Workspace {
 		case WorkspaceFailed:
 			return "Workspace unavailable"
@@ -133,6 +136,10 @@ func reviewSummary(d ReviewData) string {
 func reviewFiles(c *ui.Context, h Host, sh *ShellState, p Palette) {
 	d := h.Review
 	if len(d.Changes) == 0 {
+		if d.ListTruncated {
+			emptyState(c, p, IconFile, "Change list incomplete")
+			return
+		}
 		switch d.Workspace {
 		case WorkspaceFailed:
 			emptyState(c, p, IconAlert, "Could not read the workspace")
@@ -214,17 +221,17 @@ func reviewDiff(c *ui.Context, h Host, p Palette) {
 	})
 	ui.Scroll(c).Grow(1).MinHeight(0).FillWidth().Children(func() {
 		ui.Column(c).FillWidth().Padding(Space0, Space0, Space3, Space0).Children(func() {
-			switch {
-			case d.Busy:
+			if d.Busy {
 				ui.Text(c, "Reading diff…").FontSize(TypeControl).TextColor(p.InkMuted).Padding(Space2, panelPad)
-			case d.Note != "":
+				return
+			}
+			if d.Note != "" {
 				ui.Text(c, d.Note).FontSize(TypeControl).TextColor(p.InkMuted).Padding(Space2, panelPad)
-			default:
-				diffLines(c, d.Diff, p, maxDiffRenderLines, false)
-				if d.Omitted > 0 {
-					ui.Text(c, "… "+itoa(d.Omitted)+" more lines not read").FontSize(TypeLabel).
-						TextColor(p.InkMuted).Padding(Space2, panelPad)
-				}
+			}
+			diffLines(c, d.Diff, p, maxDiffRenderLines, false)
+			if d.Omitted > 0 {
+				ui.Text(c, "… "+itoa(d.Omitted)+" more lines not read").FontSize(TypeLabel).
+					TextColor(p.InkMuted).Padding(Space2, panelPad)
 			}
 		})
 	})
@@ -239,7 +246,7 @@ func reviewActions(c *ui.Context, h Host, sh *ShellState, p Palette) {
 	// Where there is no tree — still reading, no repository, or unreadable
 	// — the bar stays silent: the drawer above already said which it is,
 	// and a second, wrong sentence would only muddle it.
-	if d.Workspace != WorkspaceRepo {
+	if d.Workspace != WorkspaceRepo || (len(d.Changes) == 0 && d.ListTruncated) {
 		return
 	}
 	ui.Column(c).FillWidth().Shrink(0).Padding(Space5, panelPad).Gap(Space4).Children(func() {
@@ -263,19 +270,19 @@ func reviewActions(c *ui.Context, h Host, sh *ShellState, p Palette) {
 			// button can never dispatch on a stale frame (design system §5).
 			// The app layer keeps its own confirmation/error guard as a
 			// second line of defence.
-			commitReady := strings.TrimSpace(sh.CommitMsg) != "" && h.Actions.Commit != nil
+			commitReady := !sh.GitWriteBusy && strings.TrimSpace(sh.CommitMsg) != "" && h.Actions.Commit != nil
 			ui.PrimaryButton(c, "Commit").Background(p.Accent).TextColor(p.OnInk).
 				FontSize(TypeControl).Padding(ButtonPadY, ButtonPadX).
 				Grow(1).MinWidth(0).Shrink(0).Disabled(!commitReady).
 				OnClick(func() {
-					if strings.TrimSpace(sh.CommitMsg) == "" || h.Actions.Commit == nil {
+					if sh.GitWriteBusy || strings.TrimSpace(sh.CommitMsg) == "" || h.Actions.Commit == nil {
 						return
 					}
 					h.Actions.Commit()
 				})
 			if h.Actions.StageAll != nil {
 				ui.Button(c, "Stage all").FontSize(TypeControl).Padding(ButtonPadY, ButtonPadX).Radius(controlRadius).TextColor(p.Ink).
-					Shrink(0).OnClick(h.Actions.StageAll)
+					Shrink(0).Disabled(sh.GitWriteBusy).OnClick(h.Actions.StageAll)
 			}
 		})
 	})

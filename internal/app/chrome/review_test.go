@@ -533,3 +533,23 @@ func TestReviewDrawerLabelsAnUnconfirmedSelection(t *testing.T) {
 	mustNotHave(t, ts, reviewUnconfirmedNote)
 	mustHave(t, ts, "later.txt", "+kept")
 }
+
+func TestPartialReviewAndPendingWrite(t *testing.T) {
+	d := ReviewData{Open: true, Workspace: WorkspaceRepo, ListTruncated: true, Selected: "a.txt", Note: "Partial preview", Diff: []DiffLine{{Kind: DiffAdd, Text: "retained line"}}}
+	h, sh := reviewTestHost(d)
+	ts := reviewTester(&h, sh)
+	mustHave(t, ts, "Partial preview", "retained line", "Change list incomplete")
+	mustNotHave(t, ts, "Nothing to commit", "Working tree clean")
+	h.Review.Changes = []Change{{Path: "a.txt", Kind: "M"}}
+	sh.CommitMsg = "next commit"
+	sh.GitWriteBusy = true
+	calls := 0
+	h.Actions.Commit = func() { calls++ }
+	h.Actions.StageAll = func() { calls++ }
+	ts.Frame()
+	_ = ts.Click("Commit")
+	_ = ts.Click("Stage all")
+	if calls != 0 {
+		t.Fatal("dispatched overlapping git write")
+	}
+}

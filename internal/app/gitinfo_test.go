@@ -38,7 +38,7 @@ func TestGitMark(t *testing.T) {
 		{"A ", "A"},
 		{"??", "A"},
 		{" D", "D"},
-		{"R ", "M"},
+		{"R ", "R"},
 	}
 	for _, tc := range tests {
 		if got := gitMark(tc.xy); got != tc.want {
@@ -317,6 +317,18 @@ func TestGitInfoReadsQuotedAndRenamedPaths(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
 			t.Fatalf("change %q does not name a file in the workspace: %v", path, err)
+		}
+	}
+	if info.RenamedFrom["new name.go"] != "old name.go" {
+		t.Fatal("rename source was lost")
+	}
+	lines, _, _, err := gitFileDiffFrom(context.Background(), dir, "new name.go", info.RenamedFrom["new name.go"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range lines {
+		if line.Kind == "add" || line.Kind == "del" {
+			t.Fatalf("unchanged rename reported content changes: %+v", line)
 		}
 	}
 	// The numstat carries the same names, so a path's line counts are not lost
@@ -631,5 +643,30 @@ func TestGitInfoUnreviewed(t *testing.T) {
 	var nilInfo *GitInfo
 	if nilInfo.unreviewed(time.Time{}) {
 		t.Fatal("no git info awaits nothing")
+	}
+}
+
+func TestChangesStageAndCommitDanglingSymlink(t *testing.T) {
+	isolateWithGit(t)
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "config", "user.name", "test")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	if err := os.Symlink("missing-target", filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	ctx := context.Background()
+	lines, _, _, err := gitFileDiff(ctx, dir, "link")
+	if err != nil || len(lines) == 0 {
+		t.Fatalf("untracked link diff: %v %v", lines, err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "record link"}} {
+		if out, err := runGitCommand(ctx, dir, args...); err != nil {
+			t.Fatalf("%v: %v %s", args, err, out)
+		}
+	}
+	info, err := gitInfo(ctx, dir)
+	if err != nil || len(info.Changes) != 0 {
+		t.Fatalf("working tree after commit: %+v %v", info, err)
 	}
 }

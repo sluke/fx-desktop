@@ -111,6 +111,10 @@ func (s *ProjectWindow) loadReviewDiff(path string) {
 	// starts: A→B→A gives each A its own generation, so the first A's late
 	// answer cannot pass on a path comparison alone (N4).
 	gen := s.workspace.beginReviewRead(path)
+	var from string
+	if git, _ := s.workspace.gitSnapshot(); git != nil {
+		from = git.RenamedFrom[path]
+	}
 	s.invalidate()
 
 	// The scope belongs to the selection, so it is claimed here rather than
@@ -119,7 +123,7 @@ func (s *ProjectWindow) loadReviewDiff(path string) {
 	scope, stop := s.scope("review")
 	go func() {
 		defer stop()
-		lines, omitted, truncated, err := gitFileDiff(scope, s.project, path)
+		lines, omitted, truncated, err := gitFileDiffFrom(scope, s.project, path, from)
 		if scope.Err() != nil {
 			return
 		}
