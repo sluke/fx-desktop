@@ -116,7 +116,7 @@ func configButtonLabel(o ConfigOption) string {
 	if value == "" {
 		return configLabel(o)
 	}
-	if o.ID == "provider" || o.ID == "model" {
+	if o.ID == "provider" || o.ID == "model" || o.ID == "effort" || strings.EqualFold(o.Name, "Reasoning Effort") {
 		return value
 	}
 	return configLabel(o) + " · " + value
